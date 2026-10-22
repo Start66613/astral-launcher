@@ -1,0 +1,103 @@
+/* ── 设计 Token ────────────────────────────────────────────────
+   主题市场里的每套皮肤 = 这组变量 + 一张背景图。
+   改动请只改这里，组件样式里不要写死颜色。 */
+:root {
+  --font: -apple-system, "Segoe UI Variable Text", "Segoe UI",
+    "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --mono: "Cascadia Mono", "Consolas", monospace;
+
+  --r: 8px;
+  --r-sm: 6px;
+
+  --bg: #f2f6fc;
+  --panel: #ffffff;
+  --panel2: #f7f8fa;
+  --line: #e4e8ef;
+  --line2: #d5dbe5;
+
+  --t1: #15181d;
+  --t2: #5b6472;
+  --t3: #8b95a3;
+
+  --accent: #1e6cd6;
+  --accent-bg: #eaf2fe;
+  --accent-line: #c6d9f5;
+
+  --red: #d1453b;
+  --green: #1b8a4b;
+
+  --hover: #f1f3f6;
+  --active: #e8ecf1;
+
+  --bar: var(--accent);
+  --sheen: 0 1px 2px rgba(16, 24, 40, 0.05);
+}
+
+:root[data-theme="dark"] {
+  --bg: #13161a;
+  --panel: #1b1e23;
+  --panel2: #202329;
+  --line: #2a2e35;
+  --line2: #363b44;
+
+  --t1: #e9ebef;
+  --t2: #9aa2ae;
+  --t3: #6f7783;
+
+  --accent: #4c86f5;
+  --accent-bg: #1a2438;
+  --accent-line: #2b3f63;
+
+  --red: #e06a60;
+  --green: #3fa96c;
+
+  --hover: #23272d;
+  --active: #2a2f36;
+
+  --bar: #21304a;
+  --sheen: none;
+}
+
+:root[data-accent="green"] {
+  --accent: #177f45;
+  --accent-bg: #e9f5ee;
+  --accent-line: #bfe3ce;
+}
+:root[data-accent="purple"] {
+  --accent: #6941da;
+  --accent-bg: #f0ecfd;
+  --accent-line: #d5cbf8;
+}
+:root[data-accent="orange"] {
+  --accent: #b85c0a;
+  --accent-bg: #fdf1e6;
+  --accent-line: #f2d5b4;
+}
+
+:root[data-theme="dark"][data-accent="green"] {
+  --accent: #4caf79;
+  --accent-bg: #16281e;
+  --accent-line: #28452f;
+  --bar: #1c3a2a;
+}
+:root[data-theme="dark"][data-accent="purple"] {
+  --accent: #9a86f0;
+  --accent-bg: #221c38;
+  --accent-line: #3a3059;
+  --bar: #2c2450;
+}
+:root[data-theme="dark"][data-accent="orange"] {
+  --accent: #d98a3c;
+  --accent-bg: #2a1f14;
+  --accent-line: #46331f;
+  --bar: #3d2a17;
+}
+
+:root[data-radius="sharp"] {
+  --r: 3px;
+  --r-sm: 2px;
+}
+:root[data-radius="soft"] {
+  --r: 12px;
+  --r-sm: 9px;
+}

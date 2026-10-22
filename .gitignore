@@ -1,0 +1,18 @@
+# 依赖
+app/node_modules/
+app/src-tauri/target/
+
+# 构建产物
+app/dist/
+app/src-tauri/gen/
+
+# 临时与草稿
+vendor-probe/
+**/.edge-profile/
+*.log
+*.tmp
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini

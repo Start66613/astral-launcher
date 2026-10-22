@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Astral · 简约版界面</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --font:-apple-system,"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono","Consolas",monospace;
+    --r:8px; --r-sm:6px;
+    --note:0 0 30px rgba(0,0,0,.05);
+  }
+  /* ---------- 亮色（默认） ---------- */
+  .app{
+    --bg:#F3F4F6; --panel:#FFFFFF; --panel2:#FAFAFB; --line:#E5E7EB; --line2:#D9DDE3;
+    --t1:#15181D; --t2:#5B6472; --t3:#8B95A3;
+    --accent:#2F6BED; --accent-bg:#EDF2FE; --accent-line:#C9DAFB;
+    --red:#D1453B; --green:#1B8A4B;
+    --hover:#F1F2F4; --active:#E9EBEE;
+    --sheen:0 1px 2px rgba(16,24,40,.04);
+  }
+  .app[data-theme="dark"]{
+    --bg:#15171B; --panel:#1C1F24; --panel2:#212429; --line:#2A2E35; --line2:#363B44;
+    --t1:#E9EBEF; --t2:#9AA2AE; --t3:#6F7783;
+    --accent:#4C86F5; --accent-bg:#1A2438; --accent-line:#2B3F63;
+    --red:#E06A60; --green:#3FA96C;
+    --hover:#23272D; --active:#2A2F36;
+    --sheen:none;
+  }
+  .app[data-accent="green"]{--accent:#1B8A4B;--accent-bg:#E9F5EE;--accent-line:#BFE3CE}
+  .app[data-accent="purple"]{--accent:#6D4AE0;--accent-bg:#F0ECFD;--accent-line:#D5CBF8}
+  .app[data-accent="orange"]{--accent:#B85C0A;--accent-bg:#FDF1E6;--accent-line:#F2D5B4}
+  .app[data-theme="dark"][data-accent="green"]{--accent:#4CAF79;--accent-bg:#16281E;--accent-line:#28452F}
+  .app[data-theme="dark"][data-accent="purple"]{--accent:#9A86F0;--accent-bg:#221C38;--accent-line:#3A3059}
+  .app[data-theme="dark"][data-accent="orange"]{--accent:#D98A3C;--accent-bg:#2A1F14;--accent-line:#46331F}
+  .app[data-radius="sharp"]{--r:4px;--r-sm:3px}
+  .app[data-radius="soft"]{--r:12px;--r-sm:9px}
+  .app[data-density="compact"]{font-size:12.5px}
+
+  html,body{height:100%}
+  body{font-family:var(--font);background:#0f1114;overflow:hidden;
+       font-size:13px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .app{
+    height:100vh;display:flex;flex-direction:column;overflow:hidden;
+    background:var(--bg);color:var(--t1);
+    font-variant-numeric:tabular-nums;
+    transition:background .18s ease,color .18s ease;
+  }
+  button{font-family:inherit;font-size:inherit;color:inherit;background:none;border:0;cursor:pointer}
+  ul{list-style:none}
+
+  /* ---------- 标题栏 ---------- */
+  .titlebar{
+    height:44px;flex:0 0 44px;display:flex;align-items:center;padding:0 0 0 16px;
+    border-bottom:1px solid var(--line);background:var(--panel);
+  }
+  .brand{display:flex;align-items:center;gap:9px}
+  .mark{
+    width:22px;height:22px;border-radius:5px;display:grid;place-items:center;
+    background:var(--accent);color:#fff;font-size:12px;font-weight:700;
+  }
+  .brand b{font-size:13px;font-weight:600;letter-spacing:.01em}
+  .brand em{font-style:normal;font-size:11.5px;color:var(--t3)}
+  .tb-gap{flex:1}
+  .tb-btn{
+    height:44px;padding:0 12px;color:var(--t2);
+    display:flex;align-items:center;gap:6px;font-size:12.5px;
+    transition:background .12s,color .12s;
+  }
+  .tb-btn:hover{background:var(--hover);color:var(--t1)}
+  .win{display:flex}
+  .win span{
+    width:44px;height:44px;display:grid;place-items:center;color:var(--t2);font-size:11px;
+    transition:background .12s,color .12s;
+  }
+  .win span:hover{background:var(--hover);color:var(--t1)}
+  .win span:last-child:hover{background:#D1453B;color:#fff}
+
+  /* ---------- 布局 ---------- */
+  .body{flex:1;display:flex;min-height:0}
+  .nav{
+    width:168px;flex:0 0 168px;padding:10px 8px;
+    border-right:1px solid var(--line);background:var(--panel);
+    display:flex;flex-direction:column;gap:2px;
+  }
+  .nav-item{
+    display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;
+    border-radius:var(--r-sm);color:var(--t2);font-size:13px;text-align:left;
+    transition:background .12s,color .12s;
+  }
+  .nav-item svg{width:16px;height:16px;flex:0 0 16px;stroke:currentColor;fill:none;
+                stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+  .nav-item:hover{background:var(--hover);color:var(--t1)}
+  .nav-item.on{background:var(--accent-bg);color:var(--accent);font-weight:600}
+  .nav-sep{height:1px;background:var(--line);margin:8px 10px}
+  .nav-foot{margin-top:auto;padding:8px 10px 4px;font-size:11.5px;color:var(--t3)}
+
+  .main{flex:1;min-width:0;overflow:auto;padding:24px 28px 32px}
+  .main::-webkit-scrollbar{width:10px}
+  .main::-webkit-scrollbar-thumb{background:var(--line2);border:3px solid var(--bg);border-radius:8px}
+
+  /* ---------- 通用 ---------- */
+  .page{display:none}
+  .page.on{display:block;animation:in .16s ease-out}
+  @keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .app[data-motion="off"] .page.on{animation:none}
+
+  .page-head{display:flex;align-items:flex-end;gap:12px;margin-bottom:18px}
+  .page-head h1{font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .page-head p{font-size:12px;color:var(--t3);padding-bottom:2px}
+
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+    box-shadow:var(--sheen);
+    transition:background .18s,border-color .18s;
+  }
+  .card-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  .card-head h2{font-size:13px;font-weight:600}
+  .card-head span{font-size:11.5px;color:var(--t3)}
+  .card-head .sp{flex:1}
+  .link{font-size:12px;color:var(--accent)}
+  .link:hover{text-decoration:underline}
+
+  .btn{
+    height:32px;padding:0 12px;border-radius:var(--r-sm);font-size:12.5px;
+    display:inline-flex;align-items:center;gap:6px;border:1px solid transparent;
+    transition:background .12s,border-color .12s,color .12s;
+  }
+  .btn svg{width:14px;height:14px;fill:currentColor;stroke:none}
+  .btn-primary{background:var(--accent);color:#fff;font-weight:500}
+  .btn-primary:hover{filter:brightness(1.06)}
+  .btn-primary:active{filter:brightness(.96)}
+  .btn-ghost{border-color:var(--line2);color:var(--t2);background:var(--panel)}
+  .btn-ghost:hover{background:var(--hover);color:var(--t1)}
+  .btn-soft{background:var(--accent-bg);color:var(--accent)}
+  .btn-soft:hover{background:var(--accent-bg);filter:brightness(.97)}
+
+  .chip{
+    display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;
+    background:var(--panel2);border:1px solid var(--line);color:var(--t2);
+  }
+  .chip.acc{background:var(--accent-bg);border-color:var(--accent-line);color:var(--accent)}
+
+  /* ---------- 启动卡 ---------- */
+  .launch{padding:16px;margin-bottom:14px}
+  .launch-row{display:flex;align-items:center;gap:14px}
+  .ava{
+    width:40px;height:40px;flex:0 0 40px;border-radius:var(--r-sm);
+    display:grid;place-items:center;font-size:15px;font-weight:600;
+    background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent-line);
+  }
+  .lv{flex:1;min-width:0}
+  .lv-name{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .lv-meta{font-size:12px;color:var(--t3);margin-top:2px}
+  .launch-act{display:flex;align-items:center;gap:8px}
+  .big{height:38px;padding:0 18px;font-size:13.5px;font-weight:500}
+  .progress{height:2px;background:var(--line);border-radius:2px;margin-top:14px;overflow:hidden;display:none}
+  .progress.on{display:block}
+  .progress i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s linear}
+  .p-hint{font-size:11.5px;color:var(--t3);margin-top:8px;display:none}
+  .p-hint.on{display:block}
+
+  /* ---------- 两栏 ---------- */
+  .grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);gap:14px;align-items:start}
+  .col-stack{display:flex;flex-direction:column;gap:14px}
+
+  /* 列表行 */
+  .rows{padding:4px 0}
+  .row{
+    display:flex;align-items:center;gap:12px;padding:9px 16px;cursor:pointer;
+    transition:background .12s;
+  }
+  .row:hover{background:var(--hover)}
+  .row-ico{
+    width:26px;height:26px;flex:0 0 26px;border-radius:5px;display:grid;place-items:center;
+    font-size:11px;font-weight:600;background:var(--panel2);border:1px solid var(--line);color:var(--t2);
+  }
+  .row-name{font-size:13px;font-weight:500;display:flex;align-items:center;gap:7px}
+  .row-sub{font-size:11.5px;color:var(--t3);margin-top:1px}
+  .row-r{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--t3)}
+  .row-btn{
+    height:26px;padding:0 10px;border-radius:5px;border:1px solid var(--line2);
+    font-size:11.5px;color:var(--t2);opacity:0;transition:opacity .12s,background .12s;
+  }
+  .row:hover .row-btn{opacity:1}
+  .row-btn:hover{background:var(--hover);color:var(--t1)}
+
+  /* 公告 */
+  .news{padding:6px 0}
+  .news li{padding:8px 16px;display:flex;gap:10px;align-items:flex-start}
+  .news li:hover{background:var(--hover)}
+  .news b{font-size:12.5px;font-weight:500;display:block}
+  .news span{font-size:11.5px;color:var(--t3);display:block;margin-top:1px}
+  .dot{width:5px;height:5px;border-radius:50%;background:var(--accent);margin-top:7px;flex:0 0 5px}
+
+  /* AI 卡 */
+  .ai-card{padding:14px 16px}
+  .ai-top{display:flex;gap:11px;align-items:flex-start}
+  .ai-ico{
+    width:28px;height:28px;flex:0 0 28px;border-radius:6px;display:grid;place-items:center;
+    background:var(--accent-bg);border:1px solid var(--accent-line);color:var(--accent);
+  }
+  .ai-ico svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .ai-top b{font-size:12.5px;font-weight:600}
+  .ai-top p{font-size:11.5px;color:var(--t3);margin-top:2px;line-height:1.5}
+  .ai-card .btn{margin-top:12px;width:100%;justify-content:center;height:30px}
+
+  /* 数据 */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr)}
+  .stat{padding:14px 16px;border-right:1px solid var(--line)}
+  .stat:last-child{border-right:0}
+  .stat em{font-style:normal;font-size:18px;font-weight:600;letter-spacing:-.01em}
+  .stat i{font-style:normal;font-size:11.5px;color:var(--t3);margin-left:3px}
+  .stat p{font-size:11.5px;color:var(--t3);margin-top:2px}
+
+  /* ---------- 下载页 ---------- */
+  .seg{display:inline-flex;padding:2px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-sm);gap:2px}
+  .seg button{height:26px;padding:0 12px;border-radius:4px;font-size:12px;color:var(--t2);transition:background .12s,color .12s}
+  .seg button.on{background:var(--panel);color:var(--t1);font-weight:500;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .search{
+    flex:1;max-width:280px;height:32px;display:flex;align-items:center;gap:8px;padding:0 10px;
+    border:1px solid var(--line2);border-radius:var(--r-sm);background:var(--panel);
+    transition:border-color .12s,box-shadow .12s;
+  }
+  .search:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+  .search input{border:0;outline:0;background:none;font-family:inherit;font-size:12.5px;color:var(--t1);width:100%}
+  .search input::placeholder{color:var(--t3)}
+  .search svg{width:14px;height:14px;stroke:var(--t3);fill:none;stroke-width:1.8}
+
+  /* ---------- 封面墙 ---------- */
+  .wall{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+  .tile{
+    border:1px solid var(--line);border-radius:var(--r);background:var(--panel);overflow:hidden;
+    cursor:pointer;transition:border-color .14s,transform .14s,box-shadow .14s;
+  }
+  .tile:hover{border-color:var(--line2);transform:translateY(-1px);box-shadow:0 4px 14px rgba(16,24,40,.06)}
+  .tile-cv{height:96px;background:var(--panel2);border-bottom:1px solid var(--line);
+           display:grid;place-items:center;color:var(--t3);font-size:22px;font-weight:600;letter-spacing:.02em}
+  .tile-bd{padding:11px 13px}
+  .tile-bd b{font-size:13px;font-weight:600;display:block}
+  .tile-bd span{font-size:11.5px;color:var(--t3)}
+  .app[data-motion="off"] .tile:hover{transform:none}
+
+  /* ---------- 设置页 ---------- */
+  .set-group{margin-bottom:14px}
+  .set-row{display:flex;align-items:center;gap:16px;padding:13px 16px;border-bottom:1px solid var(--line)}
+  .set-row:last-child{border-bottom:0}
+  .set-row .lbl{flex:0 0 158px}
+  .set-row .lbl b{font-size:12.5px;font-weight:500;display:block}
+  .set-row .lbl span{font-size:11.5px;color:var(--t3)}
+  .set-body{flex:1;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .sw{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;position:relative}
+  .sw.on{border-color:var(--t1)}
+  .sw i{position:absolute;inset:3px;border-radius:50%;display:block}
+  .opt{
+    height:28px;padding:0 11px;border-radius:var(--r-sm);border:1px solid var(--line2);
+    font-size:12px;color:var(--t2);transition:all .12s;
+  }
+  .opt:hover{background:var(--hover);color:var(--t1)}
+  .opt.on{border-color:var(--accent);color:var(--accent);background:var(--accent-bg);font-weight:500}
+  .inp{
+    height:30px;padding:0 10px;border-radius:var(--r-sm);border:1px solid var(--line2);
+    background:var(--panel2);color:var(--t1);font-family:var(--mono);font-size:12px;outline:0;width:230px;
+    transition:border-color .12s,box-shadow .12s;
+  }
+  .inp:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+  .note{font-size:11.5px;color:var(--t3)}
+
+  /* ---------- AI 抽屉 ---------- */
+  .drawer{
+    position:fixed;top:44px;right:0;bottom:0;width:380px;z-index:20;
+    background:var(--panel);border-left:1px solid var(--line);
+    box-shadow:-8px 0 24px rgba(16,24,40,.06);
+    transform:translateX(100%);transition:transform .2s cubic-bezier(.22,1,.36,1);
+    display:flex;flex-direction:column;
+  }
+  .app[data-motion="off"] .drawer{transition:none}
+  .drawer.on{transform:none}
+  .dr-head{display:flex;align-items:center;gap:9px;padding:14px 16px;border-bottom:1px solid var(--line)}
+  .dr-head h3{font-size:13px;font-weight:600}
+  .dr-head .chip{margin-left:2px}
+  .dr-close{margin-left:auto;width:26px;height:26px;border-radius:5px;display:grid;place-items:center;color:var(--t3)}
+  .dr-close:hover{background:var(--hover);color:var(--t1)}
+  .dr-body{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:14px}
+  .dr-body::-webkit-scrollbar{width:8px}
+  .dr-body::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px}
+
+  .file{
+    display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid var(--line);
+    border-radius:var(--r-sm);background:var(--panel2);font-size:11.5px;color:var(--t2);
+  }
+  .file svg{width:14px;height:14px;stroke:var(--t3);fill:none;stroke-width:1.7;flex:0 0 14px}
+  .file b{color:var(--t1);font-weight:500}
+
+  .steps{display:flex;flex-direction:column;gap:7px;font-size:11.5px;color:var(--t3)}
+  .steps div{display:flex;gap:7px;align-items:flex-start;opacity:0;animation:fadein .2s ease forwards}
+  @keyframes fadein{to{opacity:1}}
+  .steps svg{width:13px;height:13px;flex:0 0 13px;stroke:var(--green);fill:none;stroke-width:2;margin-top:2px}
+
+  .result{border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+  .res-head{display:flex;flex-direction:column;gap:6px;padding:12px 13px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .rh-top{display:flex;gap:8px;align-items:flex-start}
+  .rh-sub{font-size:11px;color:var(--t3)}
+  .tag{font-size:10.5px;font-weight:600;padding:1px 5px;border-radius:3px;background:#FDECEA;color:var(--red);
+       border:1px solid #F5C9C4;flex:0 0 auto;margin-top:1px}
+  .app[data-theme="dark"] .tag{background:#38201E;border-color:#4E2A26}
+  .res-head b{font-size:12.5px;font-weight:600;line-height:1.5}
+  .res-head em{font-style:normal;font-size:11px;color:var(--t3);margin-left:auto;white-space:nowrap}
+  .res-body{padding:12px 13px;display:flex;flex-direction:column;gap:10px;font-size:12px;color:var(--t2);line-height:1.65}
+  .mono{
+    font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--t2);
+    background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:8px 10px;white-space:pre;overflow:auto;
+  }
+  .fix{display:flex;align-items:center;gap:10px;padding:10px 11px;border:1px solid var(--line);border-radius:var(--r-sm)}
+  .fix p{font-size:12px;flex:1;line-height:1.5}
+  .fix small{display:block;color:var(--t3);font-size:11px;margin-top:1px}
+  .dr-foot{padding:12px 16px;border-top:1px solid var(--line);display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t3)}
+  .dr-foot .sp{flex:1}
+
+  .scrim{position:fixed;inset:44px 0 0 0;background:transparent;opacity:0;pointer-events:none;
+          transition:opacity .2s;z-index:19}
+  .scrim.on{opacity:1;pointer-events:auto}
+
+  @media (max-width:1120px){
+    .grid{grid-template-columns:1fr}
+    .wall{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
+</style>
+</head>
+<body>
+<div class="app" data-theme="light" data-accent="blue" data-radius="default" data-density="cozy" data-motion="on">
+
+  <!-- 标题栏 -->
+  <header class="titlebar">
+    <div class="brand">
+      <div class="mark">A</div>
+      <b>Astral</b>
+      <em>0.1.0</em>
+    </div>
+    <div class="tb-gap"></div>
+    <button class="tb-btn" id="openAi2">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+      AI 诊断
+    </button>
+    <button class="tb-btn" data-go="settings">设置</button>
+    <div class="win"><span>—</span><span>▢</span><span>✕</span></div>
+  </header>
+
+  <div class="body">
+    <!-- 导航 -->
+    <nav class="nav">
+      <button class="nav-item on" data-page="home">
+        <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V21h13V9.5"/></svg>主页
+      </button>
+      <button class="nav-item" data-page="download">
+        <svg viewBox="0 0 24 24"><path d="M12 3v11"/><path d="m7.5 10 4.5 4.5L16.5 10"/><path d="M4 17.5V20h16v-2.5"/></svg>下载
+      </button>
+      <button class="nav-item" data-page="instances">
+        <svg viewBox="0 0 24 24"><path d="M12 3 3.5 7.5v9L12 21l8.5-4.5v-9L12 3Z"/><path d="M3.5 7.5 12 12l8.5-4.5M12 12v9"/></svg>版本
+      </button>
+      <button class="nav-item" data-page="link">
+        <svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.5 1.5"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.5-1.5"/></svg>联机
+      </button>
+      <div class="nav-sep"></div>
+      <button class="nav-item" data-page="settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 11.5 4a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9 2 2 0 1 1 0 4Z"/></svg>设置
+      </button>
+      <div class="nav-foot">本地 4 个版本 · 已登录</div>
+    </nav>
+
+    <!-- 主内容 -->
+    <main class="main">
+
+      <!-- 主页 -->
+      <section class="page on" data-page="home">
+        <div class="page-head">
+          <h1>主页</h1>
+          <p>上次游玩 3 小时前</p>
+        </div>
+
+        <div class="card launch">
+          <div class="launch-row">
+            <div class="ava">T</div>
+            <div class="lv">
+              <div class="lv-name">暮色远征 <span class="chip">Forge 47.2.0</span></div>
+              <div class="lv-meta">1.20.1 · 128 个模组 · Java 17.0.8</div>
+            </div>
+            <div class="launch-act">
+              <button class="btn btn-ghost">选择版本</button>
+              <button class="btn btn-primary big" id="playBtn">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>启动游戏
+              </button>
+            </div>
+          </div>
+          <div class="progress" id="prog"><i></i></div>
+          <div class="p-hint" id="phint">正在校验 128 个模组…</div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <div class="card-head"><h2>版本</h2><span>4 个</span><div class="sp"></div><button class="link">管理</button></div>
+            <ul class="rows">
+              <li class="row">
+                <div class="row-ico">T</div>
+                <div><div class="row-name">暮色远征 <span class="chip acc">当前</span></div><div class="row-sub">1.20.1 · Forge 47.2.0 · 128 模组</div></div>
+                <div class="row-r"><span>126.5 小时</span><button class="row-btn">启动</button></div>
+              </li>
+              <li class="row">
+                <div class="row-ico">S</div>
+                <div><div class="row-name">生存 · 纯净</div><div class="row-sub">1.21.4 · Fabric 0.16 · 12 模组</div></div>
+                <div class="row-r"><span>58.2 小时</span><button class="row-btn">启动</button></div>
+              </li>
+              <li class="row">
+                <div class="row-ico">C</div>
+                <div><div class="row-name">建筑工坊</div><div class="row-sub">1.21.1 · NeoForge 21.1 · 46 模组</div></div>
+                <div class="row-r"><span>19.8 小时</span><button class="row-btn">启动</button></div>
+              </li>
+              <li class="row">
+                <div class="row-ico">1</div>
+                <div><div class="row-name">原版 1.20.1</div><div class="row-sub">未安装模组</div></div>
+                <div class="row-r"><span>2.1 小时</span><button class="row-btn">启动</button></div>
+              </li>
+            </ul>
+          </div>
+
+          <div class="col-stack">
+            <div class="card">
+              <div class="card-head"><h2>公告</h2><div class="sp"></div><span>2 条</span></div>
+              <ul class="news">
+                <li><span class="dot"></span><div><b>下载模块改为可远程开关</b><span>遇到合规调整时无需更新客户端</span></div></li>
+                <li><span class="dot"></span><div><b>新增 Fabric 0.16 支持</b><span>安装时自动匹配加载器版本</span></div></li>
+              </ul>
+            </div>
+
+            <div class="card ai-card">
+              <div class="ai-top">
+                <div class="ai-ico">
+                  <svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+                </div>
+                <div>
+                  <b>AI 诊断</b>
+                  <p>上次启动崩溃了 1 次，已保存崩溃报告</p>
+                </div>
+              </div>
+              <button class="btn btn-soft" id="openAi">查看崩溃分析</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-head"><h2>本周</h2><span>近 7 天</span></div>
+          <div class="stats">
+            <div class="stat"><em>12.4</em><i>小时</i><p>游玩时长</p></div>
+            <div class="stat"><em>37</em><i>次</i><p>死亡</p></div>
+            <div class="stat"><em>9</em><i>个</i><p>解锁成就</p></div>
+            <div class="stat"><em>0</em><i>次</i><p>崩溃</p></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-head"><h2>存档</h2><span>最近游玩</span><div class="sp"></div><button class="link">打开文件夹</button></div>
+          <ul class="rows">
+            <li class="row">
+              <div class="row-ico">E</div>
+              <div><div class="row-name">Expedition_07</div><div class="row-sub">生存 · 第 7 周目 · 12.4 MB</div></div>
+              <div class="row-r"><span>今天 19:32</span><button class="row-btn">继续</button></div>
+            </li>
+            <li class="row">
+              <div class="row-ico">S</div>
+              <div><div class="row-name">Skyblock_02</div><div class="row-sub">空岛 · 3 人联机 · 8.1 MB</div></div>
+              <div class="row-r"><span>昨天 22:10</span><button class="row-btn">继续</button></div>
+            </li>
+            <li class="row">
+              <div class="row-ico">B</div>
+              <div><div class="row-name">Build_Server</div><div class="row-sub">创造 · 建筑工坊 · 41.7 MB</div></div>
+              <div class="row-r"><span>10-19</span><button class="row-btn">继续</button></div>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- 下载页 -->
+      <section class="page" data-page="download">
+        <div class="page-head">
+          <h1>下载</h1>
+          <p>官方源 · 自动校验</p>
+        </div>
+        <div class="toolbar">
+          <div class="seg">
+            <button class="on">游戏版本</button>
+            <button>模组</button>
+            <button>整合包</button>
+            <button>资源包</button>
+          </div>
+          <div class="search">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <input placeholder="搜索版本号，如 1.20.1">
+          </div>
+        </div>
+        <div class="card" style="margin-bottom:14px">
+          <div class="stats">
+            <div class="stat"><em style="font-size:13px;font-weight:500">官方 CDN</em><p>下载源 · 连接正常 · 142 ms</p></div>
+            <div class="stat"><em style="font-size:13px;font-weight:500">12.4 MB/s</em><p>当前速度 · 8 线程</p></div>
+            <div class="stat"><em style="font-size:13px;font-weight:500">0</em><p>队列中的任务</p></div>
+            <div class="stat"><em style="font-size:13px;font-weight:500">4.2 GB</em><p>本月已下载</p></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>正式版</h2><span>按发布时间排序</span><div class="sp"></div><button class="link">刷新</button></div>
+          <ul class="rows">
+            <li class="row">
+              <div class="row-ico">1</div>
+              <div><div class="row-name">1.21.4 <span class="chip acc">最新</span></div><div class="row-sub">2024-12-03 · 支持 Fabric / NeoForge</div></div>
+              <div class="row-r"><button class="row-btn" style="opacity:1">安装</button></div>
+            </li>
+            <li class="row">
+              <div class="row-ico">1</div>
+              <div><div class="row-name">1.20.1</div><div class="row-sub">2023-06-12 · 支持 Forge / Fabric / NeoForge</div></div>
+              <div class="row-r"><button class="row-btn" style="opacity:1">安装</button></div>
+            </li>
+            <li class="row">
+              <div class="row-ico">1</div>
+              <div><div class="row-name">1.19.2</div><div class="row-sub">2022-08-05 · 支持 Forge / Fabric</div></div>
+              <div class="row-r"><button class="row-btn" style="opacity:1">安装</button></div>
+            </li>
+          </ul>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-head"><h2>预览版</h2><span>不稳定，仅用于测试模组兼容</span></div>
+          <ul class="rows">
+            <li class="row">
+              <div class="row-ico">P</div>
+              <div><div class="row-name">1.21.5-pre2</div><div class="row-sub">2025-01-08 · 无加载器支持</div></div>
+              <div class="row-r"><button class="row-btn" style="opacity:1">安装</button></div>
+            </li>
+            <li class="row">
+              <div class="row-ico">P</div>
+              <div><div class="row-name">1.21.5-pre1</div><div class="row-sub">2024-12-27 · 无加载器支持</div></div>
+              <div class="row-r"><button class="row-btn" style="opacity:1">安装</button></div>
+            </li>
+          </ul>
+        </div>
+        <p class="note" style="margin-top:12px">
+          下载源：Mojang 官方 CDN（piston-meta / resources），仅在你已拥有游戏的前提下使用；文件全部走 SHA1 校验，支持断点续传与镜像切换。
+        </p>
+      </section>
+
+      <!-- 版本墙 -->
+      <section class="page" data-page="instances">
+        <div class="page-head">
+          <h1>版本</h1>
+          <p>4 个实例 · 独立隔离</p>
+        </div>
+        <div class="wall">
+          <article class="tile">
+            <div class="tile-cv">T</div>
+            <div class="tile-bd"><b>暮色远征</b><span>Forge 47.2.0 · 1.20.1</span></div>
+          </article>
+          <article class="tile">
+            <div class="tile-cv">S</div>
+            <div class="tile-bd"><b>生存 · 纯净</b><span>Fabric 0.16 · 1.21.4</span></div>
+          </article>
+          <article class="tile">
+            <div class="tile-cv">C</div>
+            <div class="tile-bd"><b>建筑工坊</b><span>NeoForge 21.1 · 1.21.1</span></div>
+          </article>
+          <article class="tile">
+            <div class="tile-cv">1</div>
+            <div class="tile-bd"><b>原版 1.20.1</b><span>Vanilla · 未安装模组</span></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- 联机 -->
+      <section class="page" data-page="link">
+        <div class="page-head"><h1>联机</h1><p>内测中</p></div>
+        <div class="card" style="padding:28px 16px;text-align:center">
+          <p style="font-size:13px;color:var(--t2)">联机模块还在内测，先把启动和诊断做稳。</p>
+          <p class="note" style="margin-top:6px">计划支持：局域网直连 · 端口映射检测 · 服务器状态</p>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="page" data-page="settings">
+        <div class="page-head"><h1>设置</h1><p>改动即时生效</p></div>
+
+        <div class="card set-group">
+          <div class="card-head"><h2>外观</h2><span>主题市场里的每一套皮肤都由这几项生成</span></div>
+          <div class="set-row">
+            <div class="lbl"><b>主题</b><span>亮 / 暗 / 跟随系统</span></div>
+            <div class="set-body" id="themeOpts">
+              <button class="opt on" data-set-theme="light">亮色</button>
+              <button class="opt" data-set-theme="dark">暗色</button>
+              <button class="opt">跟随系统</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="lbl"><b>强调色</b><span>只用于主按钮与选中态</span></div>
+            <div class="set-body" id="accentOpts">
+              <button class="sw on" data-set-accent="blue"><i style="background:#2F6BED"></i></button>
+              <button class="sw" data-set-accent="green"><i style="background:#1B8A4B"></i></button>
+              <button class="sw" data-set-accent="purple"><i style="background:#6D4AE0"></i></button>
+              <button class="sw" data-set-accent="orange"><i style="background:#B85C0A"></i></button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="lbl"><b>圆角</b><span>4 / 8 / 12</span></div>
+            <div class="set-body" id="radiusOpts">
+              <button class="opt" data-set-radius="sharp">锐利</button>
+              <button class="opt on" data-set-radius="default">默认</button>
+              <button class="opt" data-set-radius="soft">柔和</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="lbl"><b>密度</b><span>列表行高与字号</span></div>
+            <div class="set-body" id="densityOpts">
+              <button class="opt on" data-set-density="cozy">舒适</button>
+              <button class="opt" data-set-density="compact">紧凑</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="lbl"><b>动效</b><span>页面切换与抽屉</span></div>
+            <div class="set-body" id="motionOpts">
+              <button class="opt on" data-set-motion="on">标准</button>
+              <button class="opt" data-set-motion="off">关闭</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card set-group">
+          <div class="card-head"><h2>下载</h2><span>内置下载模块</span></div>
+          <div class="set-row">
+            <div class="lbl"><b>下载源</b><span>失败时自动切换</span></div>
+            <div class="set-body">
+              <button class="opt on">官方 CDN</button>
+              <button class="opt">国内镜像</button>
+              <button class="opt">自定义</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="lbl"><b>并发线程</b><span>影响速度与占用</span></div>
+            <div class="set-body"><span class="note">8 线程 · 实测 12.4 MB/s</span></div>
+          </div>
+        </div>
+
+        <div class="card set-group">
+          <div class="card-head"><h2>AI</h2><span>使用你自己的 API Key</span></div>
+          <div class="set-row">
+            <div class="lbl"><b>API Key</b><span>Windows 凭据管理器</span></div>
+            <div class="set-body">
+              <input class="inp" type="password" value="sk-••••••••••••••••••••••••">
+              <button class="btn btn-ghost">验证</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="lbl"><b>模型</b><span>常规用 flash，疑难再升级</span></div>
+            <div class="set-body">
+              <button class="opt on">deepseek-flash</button>
+              <button class="opt">deepseek-v4-pro</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="lbl"><b>隐私</b><span>发送前可预览</span></div>
+            <div class="set-body"><span class="note">日志已脱敏：路径 / 用户名 / IP / Token</span></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- AI 抽屉 -->
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer">
+    <div class="dr-head">
+      <h3>崩溃分析</h3>
+      <span class="chip">deepseek-flash</span>
+      <button class="dr-close" id="closeAi">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <div class="dr-body" id="drBody">
+      <div class="file">
+        <svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/></svg>
+        <div><b>crash-report-2026-10-21_19-32-11.txt</b><br>1,284 行 · 1.8 MB</div>
+      </div>
+      <button class="btn btn-primary" id="analyzeBtn" style="justify-content:center;height:34px">开始分析</button>
+    </div>
+    <div class="dr-foot">
+      <span>预计 8.2K tokens · ≈ 0.014 元</span>
+      <div class="sp"></div>
+      <span>用你的 Key 计费</span>
+    </div>
+  </aside>
+</div>
+
+<script>
+(function () {
+  var app = document.querySelector('.app');
+  var qs = new URLSearchParams(location.search);
+
+  /* 主题参数 */
+  if (qs.get('theme') === 'dark') app.setAttribute('data-theme', 'dark');
+  if (qs.get('accent')) app.setAttribute('data-accent', qs.get('accent'));
+  if (qs.get('static') === '1') {
+    var st = document.createElement('style');
+    st.textContent = '*{animation:none!important;transition:none!important}.steps div{opacity:1!important}';
+    document.head.appendChild(st);
+  }
+
+  /* 导航 */
+  var navItems = document.querySelectorAll('.nav-item');
+  var pages = document.querySelectorAll('.page');
+  function go(name) {
+    navItems.forEach(function (n) { n.classList.toggle('on', n.dataset.page === name); });
+    pages.forEach(function (p) { p.classList.toggle('on', p.dataset.page === name); });
+    document.querySelector('.main').scrollTop = 0;
+  }
+  navItems.forEach(function (n) {
+    n.addEventListener('click', function () { go(n.dataset.page); });
+  });
+  document.querySelectorAll('[data-go]').forEach(function (b) {
+    b.addEventListener('click', function () { go(b.dataset.go); });
+  });
+
+  /* 设置项 */
+  function pick(group, attr, value) {
+    document.querySelectorAll('#' + group + ' .opt, #' + group + ' .sw').forEach(function (b) {
+      b.classList.toggle('on', b.getAttribute(attr) === value);
+    });
+  }
+  document.querySelectorAll('[data-set-theme]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      app.setAttribute('data-theme', b.dataset.setTheme);
+      pick('themeOpts', 'data-set-theme', b.dataset.setTheme);
+    });
+  });
+  document.querySelectorAll('[data-set-accent]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      app.setAttribute('data-accent', b.dataset.setAccent);
+      pick('accentOpts', 'data-set-accent', b.dataset.setAccent);
+    });
+  });
+  document.querySelectorAll('[data-set-radius]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      app.setAttribute('data-radius', b.dataset.setRadius);
+      pick('radiusOpts', 'data-set-radius', b.dataset.setRadius);
+    });
+  });
+  document.querySelectorAll('[data-set-density]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      app.setAttribute('data-density', b.dataset.setDensity);
+      pick('densityOpts', 'data-set-density', b.dataset.setDensity);
+    });
+  });
+  document.querySelectorAll('[data-set-motion]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      app.setAttribute('data-motion', b.dataset.setMotion);
+      pick('motionOpts', 'data-set-motion', b.dataset.setMotion);
+    });
+  });
+
+  /* 页面内的分段控件 */
+  document.querySelectorAll('.seg').forEach(function (seg) {
+    seg.querySelectorAll('button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        seg.querySelectorAll('button').forEach(function (x) { x.classList.remove('on'); });
+        b.classList.add('on');
+      });
+    });
+  });
+
+  /* 启动模拟 */
+  var playBtn = document.getElementById('playBtn');
+  var prog = document.getElementById('prog');
+  var pf = prog.querySelector('i');
+  var phint = document.getElementById('phint');
+  playBtn.addEventListener('click', function () {
+    if (playBtn.disabled) return;
+    playBtn.disabled = true;
+    playBtn.innerHTML = '正在启动…';
+    prog.classList.add('on');
+    phint.classList.add('on');
+    var p = 0;
+    var t = setInterval(function () {
+      p = Math.min(100, p + 12);
+      pf.style.width = p + '%';
+      if (p > 30 && p < 70) phint.textContent = '正在校验 128 个模组…';
+      if (p >= 70) phint.textContent = '正在注入 Forge 启动参数…';
+      if (p >= 100) {
+        clearInterval(t);
+        phint.textContent = '已启动 · PID 14832 · 用时 2.4 秒';
+        playBtn.disabled = false;
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M8 5v14l11-7z"/></svg>启动游戏';
+        setTimeout(function () { prog.classList.remove('on'); phint.classList.remove('on'); pf.style.width = '0'; }, 1600);
+      }
+    }, 130);
+  });
+
+  /* AI 抽屉 */
+  var drawer = document.getElementById('drawer');
+  var scrim = document.getElementById('scrim');
+  function openAi() { drawer.classList.add('on'); scrim.classList.add('on'); }
+  function closeAi() { drawer.classList.remove('on'); scrim.classList.remove('on'); }
+  document.getElementById('openAi').addEventListener('click', openAi);
+  document.getElementById('openAi2').addEventListener('click', openAi);
+  document.getElementById('closeAi').addEventListener('click', closeAi);
+  scrim.addEventListener('click', closeAi);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeAi(); });
+
+  var body = document.getElementById('drBody');
+  var analyzeBtn = document.getElementById('analyzeBtn');
+  var done = false;
+  analyzeBtn.addEventListener('click', function () {
+    if (done) return;
+    done = true;
+    analyzeBtn.remove();
+
+    var steps = ['读取 latest.log 与 crash-report', '命中规则：Mixin apply failed ×3', '抽取相关模组：optifine / embeddium'];
+    var wrap = document.createElement('div');
+    wrap.className = 'steps';
+    body.appendChild(wrap);
+    steps.forEach(function (s, i) {
+      setTimeout(function () {
+        var d = document.createElement('div');
+        d.innerHTML = '<svg viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></svg><span>' + s + '</span>';
+        wrap.appendChild(d);
+        if (i === steps.length - 1) setTimeout(showResult, 260);
+      }, i * 240);
+    });
+  });
+
+  function showResult() {
+    var d = document.createElement('div');
+    d.className = 'result';
+    d.innerHTML =
+      '<div class="res-head"><div class="rh-top"><span class="tag">FATAL</span><b>OptiFine 与 Embeddium 渲染管线冲突</b></div><div class="rh-sub">置信度 86% · 来自 2 条证据</div></div>' +
+      '<div class="res-body">' +
+        '<div>两个模组改写了同一批渲染类，Mixin 注入顺序不确定。</div>' +
+        '<div class="mono">crash-report:1284\nMixin apply failed\n  optifine.mixins.json → MinecraftMixin\n  Caused by: NoSuchMethodError: getRenderType</div>' +
+        '<div class="fix"><p>禁用 OptiFine，改用 Embeddium + Oculus<small>风险低 · 已创建快照 snapshot-4f2a</small></p>' +
+        '<button class="btn btn-soft" id="fixBtn">修复</button></div>' +
+      '</div>';
+    body.appendChild(d);
+    body.scrollTop = body.scrollHeight;
+    d.querySelector('#fixBtn').addEventListener('click', function (e) {
+      e.target.textContent = '已修复';
+      e.target.disabled = true;
+      e.target.style.color = 'var(--green)';
+      e.target.style.background = 'transparent';
+    });
+  }
+
+  if (qs.get('demo') === 'ai') {
+    openAi();
+    setTimeout(function () { analyzeBtn.click(); }, 80);
+  }
+  if (qs.get('page')) go(qs.get('page'));
+})();
+</script>
+</body>
+</html>
