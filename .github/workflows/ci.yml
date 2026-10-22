@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  web:
+    name: 类型检查 + 构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: 安装依赖
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript 检查
+        working-directory: app
+        run: pnpm exec tsc --noEmit
+
+      - name: 前端构建
+        working-directory: app
+        run: pnpm exec vite build
