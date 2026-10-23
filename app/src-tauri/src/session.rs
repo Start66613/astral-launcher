@@ -71,7 +71,8 @@ pub fn begin(instance_id: &str, task_id: &str, pid: u32) -> GameSession {
         let mut seq = SEQ.lock().unwrap();
         *seq += 1;
         GameSession {
-            session_id: format!("sess_{:x}", *seq),
+            // 跨进程唯一：时间戳 + 序号（重启后序号归零，时间戳保证不撞）
+            session_id: format!("sess_{:x}_{:x}", crate::time::now_unix_ms(), *seq),
             instance_id: instance_id.to_string(),
             task_id: task_id.to_string(),
             pid,

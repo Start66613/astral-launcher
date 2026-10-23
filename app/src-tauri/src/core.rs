@@ -213,6 +213,8 @@ pub fn spawn(
     main_dir: &Path,
     mc_dir: Option<&Path>,
     username: &str,
+    memory_mb: Option<u32>,
+    extra_args: &[String],
     on: impl FnMut(Progress),
 ) -> Result<std::process::Child, String> {
     portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
@@ -220,6 +222,17 @@ pub fn spawn(
     if let Some(dir) = mc_dir {
         inst.base_mut().set_mc_dir(dir);
     }
+
+    // 实例内存与自定义 JVM 参数（契约 v3 §7）
+    let mut jvm: Vec<String> = Vec::new();
+    if let Some(mb) = memory_mb {
+        jvm.push(format!("-Xmx{mb}M"));
+    }
+    jvm.extend_from_slice(extra_args);
+    if !jvm.is_empty() {
+        inst.base_mut().set_extra_jvm_args(jvm);
+    }
+
     let game = inst
         .install(Fwd(on))
         .map_err(|e| format!("INTERNAL|启动失败|{e:?}"))?;
@@ -235,7 +248,7 @@ pub fn launch(
     username: &str,
     on: impl FnMut(Progress),
 ) -> Result<u32, String> {
-    Ok(spawn(version, dir, None, username, on)?.id())
+    Ok(spawn(version, dir, None, username, None, &[], on)?.id())
 }
 
 /// 判断某个版本是否已完整安装（有版本 json 和 client jar）

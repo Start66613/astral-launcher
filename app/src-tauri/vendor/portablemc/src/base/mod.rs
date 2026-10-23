@@ -72,6 +72,8 @@ pub struct Installer {
     jvm_policy: JvmPolicy,
     launcher_name: Option<String>,
     launcher_version: Option<String>,
+    /// [Astral patch] 调用方追加的 JVM 参数（-Xmx、GC 等）
+    extra_jvm_args: Vec<String>,
 }
 
 impl Installer {
@@ -98,6 +100,7 @@ impl Installer {
             jvm_policy: JvmPolicy::SystemThenMojang,
             launcher_name: None,
             launcher_version: None,
+            extra_jvm_args: Vec::new(),
         }
 
     }
@@ -303,6 +306,12 @@ impl Installer {
         self
     }
 
+    /// [Astral patch] 追加 JVM 参数，会被拼在版本自带参数之后。
+    pub fn set_extra_jvm_args(&mut self, args: impl IntoIterator<Item = String>) -> &mut Self {
+        self.extra_jvm_args = args.into_iter().collect();
+        self
+    }
+
     /// Ensure that a the given version, from its id, is fully installed and return
     /// a game instance that can be used to run launch it.
     #[inline]
@@ -385,6 +394,9 @@ impl Installer {
             let logger_file = canonicalize_file(&logger_config.file)?;
             jvm_args.push(logger_config.argument.replace("${path}", &logger_file.to_string_lossy()));
         }
+
+        // [Astral patch] 追加调用方给的 JVM 参数（-Xmx 等），放在最后以便覆盖默认值
+        jvm_args.extend(self.extra_jvm_args.iter().cloned());
 
         // We also canonicalize paths that will probably be used by args replacements...
         let bin_dir = canonicalize_file(&bin_dir)?;

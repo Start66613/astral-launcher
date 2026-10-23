@@ -121,13 +121,21 @@ fn trim(s: &mut Store) {
     }
 }
 
-/// 改状态：revision +1 并推帧
+/// 终态粘滞：done / error / cancelled 之后不再接受任何修改
+fn is_terminal(state: &str) -> bool {
+    matches!(state, "done" | "error" | "cancelled")
+}
+
+/// 改状态：revision +1 并推帧；终态后忽略（防止迟到的进度覆盖结果）
 pub fn update(task_id: &str, f: impl FnOnce(&mut Task)) {
     let updated = {
         let mut s = store().lock().unwrap();
         let Some(t) = s.tasks.get_mut(task_id) else {
             return;
         };
+        if is_terminal(&t.state) {
+            return;
+        }
         f(t);
         t.revision += 1;
         t.clone()

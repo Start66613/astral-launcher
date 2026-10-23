@@ -34,6 +34,16 @@ fn game_root() -> PathBuf {
     PathBuf::from(core::load_config().game_dir)
 }
 
+/// 实例增删改后广播，界面不必轮询（契约 v3 §6.3）
+fn emit_instance_changed(instance_id: &str, change: &str) {
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.emit(
+            "astral://instance-changed",
+            serde_json::json!({ "instanceId": instance_id, "change": change }),
+        );
+    }
+}
+
 fn play_stats(id: &str) -> instance::PlayStats {
     stats::play_stats(id)
 }
@@ -45,7 +55,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "mods", "sessions", "tasks", "saves", "stats", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mirror"],
     })
 }
 
@@ -187,6 +197,7 @@ fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String>
         meta.cover = cover;
     }
     instance::save_meta(&game, &meta)?;
+    emit_instance_changed(&id, "updated");
     instance::find(&game, &id, &play_stats)
         .ok_or_else(|| "INTERNAL|保存后读不到实例".to_string())
 }
@@ -196,6 +207,59 @@ fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String>
 struct DeleteOpts {
     #[serde(default)]
     trash: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateInstanceRequest {
+    name: String,
+    game_version: String,
+    #[serde(default)]
+    loader_kind: Option<String>,
+    #[serde(default)]
+    loader_version: Option<String>,
+    #[serde(default)]
+    memory_mb: Option<u32>,
+}
+
+/// 创建托管实例：只建目录与元数据；缺版本文件时由 health 暴露，不静默下载
+#[tauri::command]
+async fn start_create_instance(request: CreateInstanceRequest) -> Result<Task, String> {
+    instance::validate_name(&request.name)?;
+    let t = task::create(
+        "create",
+        None,
+        Some(request.game_version.clone()),
+        format!("创建实例 {}", request.name.trim()),
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let meta = instance::InstanceMeta {
+            id: instance::new_id(),
+            name: request.name.trim().to_string(),
+            game_version: request.game_version,
+            loader_kind: request.loader_kind,
+            loader_version: request.loader_version,
+            memory_mb: request.memory_mb,
+            jvm_args: vec![],
+            java_path: None,
+            cover: None,
+            created_at: time::now_iso(),
+        };
+        match instance::create(&game, &meta) {
+            Ok(inst) => {
+                emit_instance_changed(&inst.id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({ "kind": "create", "instance": inst }),
+                );
+            }
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
 }
 
 #[tauri::command]
@@ -211,6 +275,7 @@ fn delete_instance(id: String, opts: Option<DeleteOpts>) -> Result<Config, Strin
         return error::fail(error::INSTANCE_BUSY, "实例有进行中的任务");
     }
     instance::delete(&game, &id, opts.and_then(|o| o.trash).unwrap_or(true))?;
+    emit_instance_changed(&id, "deleted");
 
     let mut cfg = core::load_config();
     if cfg.active_instance_id.as_deref() == Some(id.as_str()) {
@@ -312,6 +377,8 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
             &main_dir,
             mc_dir.as_deref(),
             &cfg.username,
+            inst.memory_mb,
+            &inst.jvm_args,
             move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
         );
 
@@ -357,10 +424,17 @@ fn list_sessions(instance_id: Option<String>, limit: Option<usize>) -> Vec<GameS
 // ── 存档 / 统计 ─────────────────────────────────────────────────
 
 #[tauri::command]
-fn list_saves(instance_id: Option<String>) -> Vec<stats::SaveEntry> {
+fn list_saves(instance_id: Option<String>) -> Result<Vec<stats::SaveEntry>, String> {
     let game = game_root();
-    let inst = instance_id.and_then(|id| instance::find(&game, &id, &play_stats));
-    stats::list_saves(&game, inst.as_ref())
+    // 指定了实例却找不到 → 明确报错，绝不回落到全局目录（契约 v3 §5.9）
+    let inst = match instance_id {
+        Some(id) => Some(
+            instance::find(&game, &id, &play_stats)
+                .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?,
+        ),
+        None => None,
+    };
+    Ok(stats::list_saves(&game, inst.as_ref()))
 }
 
 #[tauri::command]
@@ -509,6 +583,7 @@ pub fn run() {
             cancel_task,
             start_install,
             start_launch,
+            start_create_instance,
             get_active_session,
             list_sessions,
             list_saves,

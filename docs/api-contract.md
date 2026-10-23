@@ -1,4 +1,4 @@
-# 前后端接口契约 v3
+# 前后端接口契约 v3.1
 
 > **Rust 核心** 与 **React 界面** 之间唯一的对接约定。改接口先改本文档。
 >
@@ -631,6 +631,7 @@ payload: { instanceId: string; change: "created" | "updated" | "deleted"; }
 | v1 | 2026-10-23 | 初版：9 命令 / 2 事件 / 提案接口 |
 | v2 | 2026-10-23 | Task 模型、`game-exit`、实例 id 解耦、错误码化、`msa_poll` 状态机 |
 | v3 | 2026-10-23 | 按界面评审修订：实例目录布局与强制实例隔离、删除/覆盖/文件名规则、任务 revision 与订阅顺序、`GameSession` 与状态恢复、v1 参数与阻塞语义、`get_api_info`、`instance-changed`、诊断预览脱敏 |
+| v3.1 | 2026-10-23 | 回填接入评审：`start_install`/`start_launch`/`start_create_instance` 签名、`get_tasks` 顶层字段、`Instance.managed`、能力清单以注册为准、5 项实现缺陷修正、取消语义说明 |
 
 ### P2 待议（本版不实现）
 
@@ -638,3 +639,74 @@ payload: { instanceId: string; change: "created" | "updated" | "deleted"; }
 - 封面与目录的统一访问层（`get_paths()`）
 - 统计缓存与增量更新
 - `read_log(follow)` 的增量订阅与取消（现只返回快照）
+
+---
+
+## 11. v3.1 修订（按界面接入评审回填）
+
+> 界面在接入时核对了契约与实现，本版把差异回填，不改变既有语义。
+
+### 11.1 新增/修正的签名
+
+```ts
+// 安装（原 §4.2 只写了命令名）
+start_install({ gameVersion: string }): Task
+//   result: { kind: "install", gameVersion: string }
+
+// 启动（同上）
+start_launch({ instanceId: string }): Task
+//   result: { kind: "launch", sessionId, pid, startedAt }
+//   done 仅表示进程已创建；运行状态看 §5.10
+
+// 任务查询：IPC 是顶层字段，不是 filter 对象
+get_tasks({ state?: TaskState, kind?: TaskKind, instanceId?: string }): Task[]
+
+// 创建实例（v3 只在内部有 create，v3.1 公开为任务命令）
+start_create_instance({
+  name: string, gameVersion: string,
+  loaderKind?: LoaderKind, loaderVersion?: string, memoryMb?: number
+}): Task
+//   result: { kind: "create", instance: Instance }
+```
+
+### 11.2 `Instance.managed`（新增字段）
+
+```ts
+managed: boolean   // true = instances/<id> 托管实例；false = 从 versions/ 兼容出来
+```
+
+- 兼容实例的 `dir` / `dirs.*` 指向**共享游戏目录**，不得开放改名、删除或实例内写入。
+- 界面必须据此区分，不能假设所有实例都隔离。
+
+### 11.3 能力清单以实际注册为准
+
+`get_api_info().features` 只列真实注册的能力，当前为：
+
+```
+instances, sessions, tasks, saves, stats, mirror
+```
+
+**不含 `mods`**（模组命令尚未实现）。`apiVersion >= 3` 不等价于全功能，界面须以 `features` 门控入口。
+
+### 11.4 已修正的实现缺陷
+
+| 缺陷 | 修正 |
+|---|---|
+| `list_saves(instanceId)` 传了无效 id 会回落到全局 `saves/` | 改为返回 `INSTANCE_NOT_FOUND`，绝不跨实例展示 |
+| `sessionId` 每进程从 1 计数，重启后与历史记录冲突 | 改为 `sess_<毫秒时间戳>_<序号>`，跨进程唯一 |
+| 任务取消后，迟到的进度仍会覆盖终态 | `Task` 改为**终态粘滞**：`done/error/cancelled` 之后忽略任何更新 |
+| 实例 `memoryMb` / `jvmArgs` 保存了但启动没消费 | `spawn` 现在拼 `-Xmx{memoryMb}M` + 自定义 JVM 参数（vendored `portablemc` 新增 `set_extra_jvm_args`）；`javaPath` 仍未消费，界面先不开放 |
+| `astral://instance-changed` 从未发射 | `update_instance` / `delete_instance` / `start_create_instance` 成功后发射 |
+
+### 11.5 取消语义（补充说明）
+
+`cancel_task` 返回 `{ accepted: boolean }` 仅表示**请求已受理**。当前后台 worker 没有协作停止检查，已进入的下载可能继续完成；任务终态本身不会被后续进度覆盖（见 11.4）。**界面在 worker 支持停止前不要开放取消按钮。**
+
+### 11.6 尚未实现（界面不要放入口）
+
+`retry_task`、`start_duplicate_instance`、`list_loaders`、`start_install_loader`、`list_mods`、`set_mod_enabled`、`delete_mod`、`start_download`（实例级）、`start_install_modpack`、`export_modpack`、`get_account` / MSA、`prepare_diagnosis` / `start_diagnose`。
+
+### 11.7 桥接代码
+
+`docs/api-contract-bridge.md` 提供 `types.ts` / `bridge.ts` 的完整新增块，界面可直接粘贴。
+
