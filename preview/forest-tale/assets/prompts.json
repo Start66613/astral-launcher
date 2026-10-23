@@ -1,0 +1,19 @@
+{
+  "tool": "Built-in image_gen",
+  "use": "Forest Tale phase 1 original background illustrations; no real save screenshots",
+  "encoding": "WebP quality 88, original dimensions preserved",
+  "prompts": [
+    {
+      "key": "daylight",
+      "prompt": "Use case: stylized-concept. Asset type: wide background artwork for a refined Chinese desktop Minecraft launcher, Forest Tale theme, NOT a UI mockup. Primary request: a lush voxel forest valley in soft early morning light, terraced grassy banks and spruce/birch trees, a winding clear turquoise river, one tiny wooden cabin tucked into the right third, distant misty mountains and luminous pale sky. Beautiful art-directed Minecraft-inspired cubic terrain with fine subtle painted textures and atmospheric depth, quiet natural palette of sage, moss green, butter sunlight and mist blue. Composition: very wide landscape 16:9 or wider, trees frame the far edges, landscape focus on right two thirds, soft uncluttered lighter sky and mist at upper left with room for a separate HTML headline. Premium editorial game environment, restrained bloom, no neon, no characters, no weapons. No text, letters, logos, UI elements or watermark. Opaque landscape image."
+    },
+    {
+      "key": "nightfall",
+      "prompt": "Use case: stylized-concept. Asset type: cinematic wide background artwork for a premium Chinese desktop Minecraft launcher, Forest Tale nocturne direction, NOT a UI mockup. Primary request: a tranquil voxel spruce forest beside a still lake at blue hour under a small crescent moon, distant blocky mountain peaks, tiny warmly lit wooden cabin on the right bank, a few restrained fireflies, soft reflections and low mist. Beautiful cubic game terrain with sophisticated cinematic lighting. Composition: wide 16:9 landscape, deep dark teal pine silhouettes along sides, misty open lake on lower middle left and cabin in right third, ample quiet dark negative space in upper left for separate HTML typography. Palette of dark pine, desaturated blue, silver mist and one amber window, no purple neon. Premium environmental illustration, serene and mature, no characters or weapons. No text, letters, logos, UI elements or watermark. Opaque landscape image."
+    },
+    {
+      "key": "fieldnotes",
+      "prompt": "Use case: illustration-story. Asset type: landscape illustration for a paper-inspired Chinese desktop Minecraft launcher, Forest Tale field journal art direction, NOT a UI mockup. Primary request: an intimate voxel woodland clearing with a small timber cabin, tall blocky pine trees, wild grass, a stream and a winding ochre path, distant wooded hill. Style: exquisite gouache and fine colored-pencil travel journal illustration of cubic Minecraft-inspired scenery, subtle warm paper texture, matte pigments, warm cream, olive green, ochre and russet, charming but not childish. Wide 4:3 or 3:2 composition, strong layered scenery with one sunny clearing near center, no close-up objects. Illustration fills edge to edge, do not add external frames or margins. No text, letters, logos, UI elements, characters, weapons or watermark. Opaque landscape image."
+    }
+  ]
+}
