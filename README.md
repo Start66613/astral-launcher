@@ -5,7 +5,11 @@
 > 当前进度：**W4 / 契约 v3.3** —— 实例、会话、任务、模组、Fabric 加载器都已可用；
 > 森林物语界面已接入真实数据。整合包解包、MSA 登录、AI 诊断还没做。
 
-![森林物语界面](shots/merged-exe.png)
+![森林物语 · 首页](shots/ui-home.png)
+
+更多截图：[版本管理](shots/ui-versions.png) · [下载中心](shots/ui-download.png) · [模组中心](shots/ui-mods.png) · [设置](shots/ui-settings.png)
+
+> 以上为本机真实运行截图（Windows 11，读取本机 `.minecraft` 中的 1.8.9 与 26.3）。
 
 ## 已实现
 
