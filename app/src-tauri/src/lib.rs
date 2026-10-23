@@ -1,6 +1,7 @@
 mod core;
 mod error;
 mod instance;
+mod mods;
 mod session;
 mod stats;
 mod task;
@@ -55,7 +56,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "mirror"],
     })
 }
 
@@ -449,6 +450,41 @@ fn get_stats(range: Option<String>) -> stats::Stats {
     })
 }
 
+// ── 模组 ────────────────────────────────────────────────────────
+
+/// 只对托管实例开放（兼容实例共享游戏目录，不能写）
+fn managed_instance(id: &str) -> Result<Instance, String> {
+    let game = game_root();
+    let inst = instance::find(&game, id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    if !inst.managed {
+        return Err("UNSUPPORTED|兼容实例不支持模组管理".into());
+    }
+    Ok(inst)
+}
+
+#[tauri::command]
+fn list_mods(instance_id: String) -> Result<Vec<mods::ModFile>, String> {
+    let inst = managed_instance(&instance_id)?;
+    Ok(mods::list(std::path::Path::new(&inst.dirs.mods)))
+}
+
+#[tauri::command]
+fn set_mod_enabled(
+    instance_id: String,
+    file_name: String,
+    enabled: bool,
+) -> Result<mods::ModFile, String> {
+    let inst = managed_instance(&instance_id)?;
+    mods::set_enabled(std::path::Path::new(&inst.dirs.mods), &file_name, enabled)
+}
+
+#[tauri::command]
+fn delete_mod(instance_id: String, file_name: String) -> Result<(), String> {
+    let inst = managed_instance(&instance_id)?;
+    mods::delete(std::path::Path::new(&inst.dirs.mods), &file_name)
+}
+
 // ── legacy（阻塞语义，保持不变）──────────────────────────────────
 
 #[tauri::command]
@@ -588,6 +624,9 @@ pub fn run() {
             list_sessions,
             list_saves,
             get_stats,
+            list_mods,
+            set_mod_enabled,
+            delete_mod,
             install_version,
             launch_version,
             download_to
@@ -684,6 +723,34 @@ pub fn selftest() -> i32 {
                 .iter()
                 .any(|i| i.id == meta.id && i.mods_count == 1 && i.mods_disabled == 1)
     );
+
+    // 模组：列表 / 启停 / 删除 / 路径穿越防护
+    let mod_dir = std::env::temp_dir().join(format!("astral-mods-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&mod_dir);
+    let _ = std::fs::create_dir_all(&mod_dir);
+    let _ = std::fs::write(mod_dir.join("a.jar"), b"x");
+    let _ = std::fs::write(mod_dir.join("b.jar.disabled"), b"y");
+    let listed = mods::list(&mod_dir);
+    check!("mods listed", listed.len() == 2);
+    check!(
+        "mods enabled flag",
+        listed.iter().filter(|m| m.enabled).count() == 1
+    );
+    check!(
+        "mod disable",
+        mods::set_enabled(&mod_dir, "a.jar", false)
+            .map(|m| m.file_name == "a.jar.disabled" && !m.enabled)
+            .unwrap_or(false)
+    );
+    check!(
+        "mod enable",
+        mods::set_enabled(&mod_dir, "a.jar.disabled", true)
+            .map(|m| m.file_name == "a.jar" && m.enabled)
+            .unwrap_or(false)
+    );
+    check!("mod delete", mods::delete(&mod_dir, "a.jar").is_ok());
+    check!("mod path guard", mods::delete(&mod_dir, "../a.jar").is_err());
+    let _ = std::fs::remove_dir_all(&mod_dir);
 
     check!(
         "instance delete to trash",

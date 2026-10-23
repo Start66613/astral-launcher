@@ -507,9 +507,66 @@ Instance.managed: boolean
 | `retry_task` | 未注册；不复用 `start_*` 冒充 |
 | `start_duplicate_instance` | 未实现 |
 | `list_loaders` / `start_install_loader` | 下一批 |
-| `list_mods` / `set_mod_enabled` / `delete_mod` | 下一批 |
+| `list_mods` / `set_mod_enabled` / `delete_mod` | 仅托管实例可用（兼容实例返回 `UNSUPPORTED`） |
 | `start_download`（实例级） | 现在只有 legacy `download_to`，写共享目录 |
 | `start_install_modpack` / `export_modpack` | 下一批 |
 | `get_account` / MSA | 下一批 |
 | `prepare_diagnosis` / `start_diagnose` | 下一批 |
 | `javaPath` 生效 | 已存字段但启动未消费 |
+
+---
+
+## 7. 模组（本批已可用）
+
+### `types.ts` 追加
+
+```ts
+export interface ModFile {
+  /** 实际文件名，禁用态带 .disabled */
+  fileName: string;
+  /** 不带扩展名的主体名 */
+  baseName: string;
+  /** 从 jar 元数据读出的显示名，读不到时回退文件名 */
+  name: string;
+  version: string | null;
+  loader: string | null;
+  enabled: boolean;
+  sizeBytes: number;
+  /** 暂为 null：图标抽取未做 */
+  iconPath: string | null;
+  projectId: string | null;
+}
+```
+
+### `bridge.ts` 追加
+
+```ts
+/* ---------- 第五组：模组（仅托管实例） ---------- */
+
+export async function listMods(instanceId: string): Promise<ModFile[]> {
+  return call<ModFile[]>("list_mods", { instanceId });
+}
+
+/** 启停会改文件名；以返回的 fileName 为准，不要在界面猜后缀 */
+export async function setModEnabled(
+  instanceId: string,
+  fileName: string,
+  enabled: boolean
+): Promise<ModFile> {
+  return call<ModFile>("set_mod_enabled", { instanceId, fileName, enabled });
+}
+
+/** 直接删除，不进回收站 */
+export async function deleteMod(instanceId: string, fileName: string): Promise<void> {
+  return call<void>("delete_mod", { instanceId, fileName });
+}
+```
+
+要点：
+
+- **只对 `managed === true` 的实例开放**；兼容实例会返回 `UNSUPPORTED|兼容实例不支持模组管理`。
+- 禁用 = 把 `x.jar` 改名成 `x.jar.disabled`；同名冲突时核心会加 `-1`、`-2`，所以**必须用返回值里的 `fileName`** 更新本地列表。
+- `name` / `version` / `loader` 是从 jar 里尽力读的（fabric/quilt json、forge/neoforge toml、mcmod.info）；读不到就是 `null` 或文件名，**不代表文件损坏**。
+- `delete_mod` 是物理删除，没有回收站；界面需要二次确认。
+- `iconPath` 目前恒为 `null`，界面用通用占位，不要当成"没有图标"的结论。
+
