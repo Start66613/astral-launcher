@@ -1,9 +1,20 @@
 mod core;
+mod error;
+mod instance;
+mod session;
+mod stats;
+mod task;
+mod time;
 
 use core::Config;
-use serde::Serialize;
+use instance::Instance;
+use serde::{Deserialize, Serialize};
+use session::GameSession;
 use std::path::PathBuf;
+use task::Task;
 use tauri::{AppHandle, Emitter};
+
+const API_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +28,25 @@ pub struct SystemInfo {
 
 fn gb(bytes: u64) -> f64 {
     ((bytes as f64 / 1024.0 / 1024.0 / 1024.0) * 10.0).round() / 10.0
+}
+
+fn game_root() -> PathBuf {
+    PathBuf::from(core::load_config().game_dir)
+}
+
+fn play_stats(id: &str) -> instance::PlayStats {
+    stats::play_stats(id)
+}
+
+// ── 基础 ────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_api_info() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": API_VERSION,
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "features": ["instances", "mods", "sessions", "tasks", "saves", "stats", "mirror"],
+    })
 }
 
 #[tauri::command]
@@ -39,32 +69,42 @@ fn get_config() -> Config {
     core::load_config()
 }
 
+/// 部分更新：只覆盖出现的字段
 #[tauri::command]
-fn set_config(config: Config) -> Result<(), String> {
-    core::save_config(&config)
+fn set_config(config: serde_json::Value) -> Result<Config, String> {
+    let mut cur = core::load_config();
+    let mut merged = serde_json::to_value(&cur).map_err(|e| format!("INTERNAL|序列化失败|{e}"))?;
+    if let (Some(base), Some(patch)) = (merged.as_object_mut(), config.as_object()) {
+        for (k, v) in patch {
+            base.insert(k.clone(), v.clone());
+        }
+    }
+    cur = serde_json::from_value(merged).map_err(|e| format!("INVALID_NAME|配置格式不对|{e}"))?;
+    core::save_config(&cur)?;
+    Ok(cur)
 }
 
 #[tauri::command]
 fn scan_versions() -> Vec<String> {
-    core::scan_installed(std::path::Path::new(&core::load_config().game_dir))
+    core::scan_installed(&game_root())
 }
 
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     if !p.exists() {
-        return Err(format!("路径不存在: {path}"));
+        return error::fail(error::PERMISSION, format!("路径不存在: {path}"));
     }
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
             .arg(&p)
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("PERMISSION|打开目录失败|{e}"))?;
     }
     #[cfg(not(target_os = "windows"))]
     {
-        return Err("仅支持 Windows".into());
+        return error::fail(error::UNSUPPORTED, "仅支持 Windows");
     }
     Ok(())
 }
@@ -79,6 +119,264 @@ async fn list_versions() -> Result<Vec<core::VersionSummary>, String> {
     .map_err(|e| e.to_string())?
 }
 
+// ── 实例 ────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_instances() -> Vec<Instance> {
+    instance::discover(&game_root(), &play_stats)
+}
+
+#[tauri::command]
+fn get_instance(id: String) -> Option<Instance> {
+    instance::find(&game_root(), &id, &play_stats)
+}
+
+#[tauri::command]
+fn get_active_instance() -> Option<Instance> {
+    let id = core::load_config().active_instance_id?;
+    instance::find(&game_root(), &id, &play_stats)
+}
+
+#[tauri::command]
+fn set_active_instance(id: Option<String>) -> Result<Config, String> {
+    let mut cfg = core::load_config();
+    if let Some(ref want) = id {
+        if instance::find(&game_root(), want, &play_stats).is_none() {
+            return error::fail(error::INSTANCE_NOT_FOUND, "实例不存在");
+        }
+    }
+    cfg.active_instance_id = id;
+    core::save_config(&cfg)?;
+    Ok(cfg)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct InstancePatch {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    memory_mb: Option<Option<u32>>,
+    #[serde(default)]
+    jvm_args: Option<Vec<String>>,
+    #[serde(default)]
+    java_path: Option<Option<String>>,
+    #[serde(default)]
+    cover: Option<Option<String>>,
+}
+
+#[tauri::command]
+fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String> {
+    let game = game_root();
+    let mut meta = instance::read_meta(&game, &id)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在或不是托管实例".to_string())?;
+    if let Some(name) = patch.name {
+        instance::validate_name(&name)?;
+        meta.name = name.trim().to_string();
+    }
+    if let Some(mem) = patch.memory_mb {
+        meta.memory_mb = mem;
+    }
+    if let Some(args) = patch.jvm_args {
+        meta.jvm_args = args;
+    }
+    if let Some(java) = patch.java_path {
+        meta.java_path = java;
+    }
+    if let Some(cover) = patch.cover {
+        meta.cover = cover;
+    }
+    instance::save_meta(&game, &meta)?;
+    instance::find(&game, &id, &play_stats)
+        .ok_or_else(|| "INTERNAL|保存后读不到实例".to_string())
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct DeleteOpts {
+    #[serde(default)]
+    trash: Option<bool>,
+}
+
+#[tauri::command]
+fn delete_instance(id: String, opts: Option<DeleteOpts>) -> Result<Config, String> {
+    let game = game_root();
+    if instance::read_meta(&game, &id).is_none() {
+        return error::fail(error::INSTANCE_NOT_FOUND, "实例不存在或不是托管实例");
+    }
+    if session::active(Some(&id)).is_some() {
+        return error::fail(error::INSTANCE_BUSY, "实例正在运行，先退出游戏");
+    }
+    if task::has_running(&id) {
+        return error::fail(error::INSTANCE_BUSY, "实例有进行中的任务");
+    }
+    instance::delete(&game, &id, opts.and_then(|o| o.trash).unwrap_or(true))?;
+
+    let mut cfg = core::load_config();
+    if cfg.active_instance_id.as_deref() == Some(id.as_str()) {
+        cfg.active_instance_id = None;
+        core::save_config(&cfg)?;
+    }
+    Ok(cfg)
+}
+
+// ── 任务 ────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_tasks(
+    state: Option<String>,
+    kind: Option<String>,
+    instance_id: Option<String>,
+) -> Vec<Task> {
+    task::snapshot(state.as_deref(), kind.as_deref(), instance_id.as_deref())
+}
+
+#[tauri::command]
+fn get_task(task_id: String) -> Option<Task> {
+    task::get(&task_id)
+}
+
+#[tauri::command]
+fn cancel_task(task_id: String) -> serde_json::Value {
+    let accepted = task::cancel_task(&task_id);
+    serde_json::json!({ "accepted": accepted })
+}
+
+#[tauri::command]
+async fn start_install(
+    app: AppHandle,
+    game_version: String,
+) -> Result<Task, String> {
+    let t = task::create(
+        "install",
+        None,
+        Some(game_version.clone()),
+        format!("安装 {game_version}"),
+    );
+    let tid = t.task_id.clone();
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let cfg = core::load_config();
+        let dir = PathBuf::from(&cfg.game_dir);
+        let t2 = tid.clone();
+        let v = game_version.clone();
+        let res = core::install(&game_version, &dir, &cfg.username, move |p| {
+            task::progress(&t2, &p.stage, p.label, p.done, p.total);
+        });
+        match res {
+            Ok(_) => task::finish(&tid, serde_json::json!({ "kind": "install", "gameVersion": v })),
+            Err(e) => {
+                task::fail(&tid, e);
+            }
+        }
+        let _ = app2;
+    });
+    Ok(t)
+}
+
+#[tauri::command]
+async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    if session::active(Some(&instance_id)).is_some() {
+        return error::fail(error::INSTANCE_BUSY, "该实例正在运行");
+    }
+    if task::has_running(&instance_id) {
+        return error::fail(error::BUSY, "该实例有进行中的任务");
+    }
+
+    let t = task::create(
+        "launch",
+        Some(instance_id.clone()),
+        Some(inst.game_version.clone()),
+        format!("启动 {}", inst.name),
+    );
+    let tid = t.task_id.clone();
+    let app2 = app.clone();
+
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let cfg = core::load_config();
+        let main_dir = PathBuf::from(&cfg.game_dir);
+        let mc_dir = if inst.managed {
+            Some(PathBuf::from(&inst.dir))
+        } else {
+            None
+        };
+        let t2 = tid.clone();
+        let version = inst.game_version.clone();
+        let spawned = core::spawn(
+            &version,
+            &main_dir,
+            mc_dir.as_deref(),
+            &cfg.username,
+            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+        );
+
+        match spawned {
+            Ok(mut child) => {
+                let pid = child.id();
+                let sess = session::begin(&instance_id, &tid, pid);
+                task::finish(
+                    &tid,
+                    serde_json::json!({
+                        "kind": "launch",
+                        "sessionId": sess.session_id,
+                        "pid": pid,
+                        "startedAt": sess.started_at,
+                    }),
+                );
+                let sid = sess.session_id.clone();
+                std::thread::spawn(move || {
+                    let code = child.wait().ok().and_then(|s| s.code());
+                    if let Some(s) = session::mark_exited(&sid, code) {
+                        session::emit_exit(&app2, &s);
+                    }
+                });
+            }
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
+}
+
+// ── 会话 ────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_active_session(instance_id: Option<String>) -> Option<GameSession> {
+    session::active(instance_id.as_deref())
+}
+
+#[tauri::command]
+fn list_sessions(instance_id: Option<String>, limit: Option<usize>) -> Vec<GameSession> {
+    session::list(instance_id.as_deref(), limit.unwrap_or(50))
+}
+
+// ── 存档 / 统计 ─────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_saves(instance_id: Option<String>) -> Vec<stats::SaveEntry> {
+    let game = game_root();
+    let inst = instance_id.and_then(|id| instance::find(&game, &id, &play_stats));
+    stats::list_saves(&game, inst.as_ref())
+}
+
+#[tauri::command]
+fn get_stats(range: Option<String>) -> stats::Stats {
+    let game = game_root();
+    let names: std::collections::HashMap<String, String> = instance::discover(&game, &play_stats)
+        .into_iter()
+        .map(|i| (i.id, i.name))
+        .collect();
+    stats::stats(range.as_deref().unwrap_or("7d"), &|id| {
+        names.get(id).cloned().unwrap_or_else(|| id.to_string())
+    })
+}
+
+// ── legacy（阻塞语义，保持不变）──────────────────────────────────
+
 #[tauri::command]
 async fn install_version(app: AppHandle, version: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -89,6 +387,7 @@ async fn install_version(app: AppHandle, version: String) -> Result<(), String> 
             let _ = app.emit("astral://progress", (&v, &p));
         })
         .map(|_| ())
+        .map_err(legacy_msg)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -103,9 +402,19 @@ async fn launch_version(app: AppHandle, version: String) -> Result<u32, String> 
         core::launch(&version, &dir, &cfg.username, move |p| {
             let _ = app.emit("astral://progress", (&v, &p));
         })
+        .map_err(legacy_msg)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// legacy 命令的报错保持人话，不带 CODE 前缀（旧界面直接展示）
+fn legacy_msg(encoded: String) -> String {
+    let e = task::decode(&encoded);
+    match e.detail {
+        Some(d) => format!("{}（{}）", e.message, d),
+        None => e.message,
+    }
 }
 
 struct DlgHandler<F: FnMut(u32, u32, u32, u32)>(F);
@@ -116,13 +425,13 @@ impl<F: FnMut(u32, u32, u32, u32)> portablemc::download::Handler for DlgHandler<
     }
 }
 
-/// 把 Modrinth 的文件下到对应的游戏子目录（mods / resourcepacks / shaderpacks）
 #[tauri::command]
 async fn download_to(
     app: AppHandle,
     url: String,
     kind: String,
     filename: String,
+    instance_id: Option<String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let cfg = core::load_config();
@@ -133,8 +442,17 @@ async fn download_to(
             "datapack" => "datapacks",
             _ => "mods",
         };
-        let dir = PathBuf::from(&cfg.game_dir).join(sub);
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        // 指定实例时落到实例目录（契约 v3 §5.7）
+        let dir = match instance_id {
+            Some(id) => {
+                let game = PathBuf::from(&cfg.game_dir);
+                let inst = instance::find(&game, &id, &play_stats)
+                    .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+                PathBuf::from(inst.dir).join(sub)
+            }
+            None => PathBuf::from(&cfg.game_dir).join(sub),
+        };
+        std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
 
         let safe = PathBuf::from(&filename)
             .file_name()
@@ -150,27 +468,217 @@ async fn download_to(
         });
         single
             .download(&mut handler)
-            .map_err(|e| format!("下载失败: {e:?}"))?;
+            .map_err(|e| format!("NETWORK|下载失败|{e:?}"))?;
         Ok(dest.to_string_lossy().to_string())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+// ── 启动 ────────────────────────────────────────────────────────
+
+static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let _ = APP_HANDLE.set(handle.clone());
+            task::init(handle);
+            session::load();
+            session::reconcile();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            get_api_info,
             get_system_info,
             get_config,
             set_config,
             scan_versions,
             open_path,
             list_versions,
+            list_instances,
+            get_instance,
+            get_active_instance,
+            set_active_instance,
+            update_instance,
+            delete_instance,
+            get_tasks,
+            get_task,
+            cancel_task,
+            start_install,
+            start_launch,
+            get_active_session,
+            list_sessions,
+            list_saves,
+            get_stats,
             install_version,
             launch_version,
             download_to
         ])
         .run(tauri::generate_context!())
         .expect("error while running astral");
+}
+
+/// 无界面自检：`astral.exe --selftest`。
+///
+/// 本机的 `cargo test` 二进制在加载期就挂（0xc0000139），所以把关键断言
+/// 放进 app 二进制里跑，结果写 `%TEMP%\astral-selftest.log`，进程退出码 = 失败数。
+pub fn selftest() -> i32 {
+    let mut fails = 0i32;
+    let mut log = String::new();
+    macro_rules! check {
+        ($name:expr, $cond:expr) => {{
+            if $cond {
+                log.push_str(&format!("PASS {}\n", $name));
+            } else {
+                fails += 1;
+                log.push_str(&format!("FAIL {}\n", $name));
+            }
+        }};
+    }
+
+    let e = error::ApiError::with_detail(error::NETWORK, "下载失败", "a|b");
+    let d = task::decode(&e.encode());
+    check!(
+        "error roundtrip",
+        d.code == "NETWORK" && d.detail.as_deref() == Some("a|b")
+    );
+
+    check!(
+        "time epoch",
+        time::unix_ms_to_iso(0) == "1970-01-01T00:00:00Z"
+            && time::iso_to_unix_ms("1970-01-01T00:00:00Z") == Some(0)
+    );
+    let iso = "2026-10-23T00:00:00Z";
+    check!(
+        "time roundtrip",
+        time::iso_to_unix_ms(iso).map(time::unix_ms_to_iso).as_deref() == Some(iso)
+    );
+    check!(
+        "time leap",
+        time::iso_to_unix_ms("2024-02-29T12:00:00Z")
+            .map(time::unix_ms_to_iso)
+            .as_deref()
+            == Some("2024-02-29T12:00:00Z")
+    );
+
+    let game = std::env::temp_dir().join(format!("astral-selftest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&game);
+    let _ = std::fs::create_dir_all(game.join("versions/1.20.1"));
+    let _ = std::fs::write(game.join("versions/1.20.1/1.20.1.json"), "{}");
+    let _ = std::fs::write(game.join("versions/1.20.1/1.20.1.jar"), "x");
+    let _ = std::fs::create_dir_all(game.join("assets"));
+
+    let meta = instance::InstanceMeta {
+        id: instance::new_id(),
+        name: "自检实例".into(),
+        game_version: "1.20.1".into(),
+        loader_kind: None,
+        loader_version: None,
+        memory_mb: None,
+        jvm_args: vec![],
+        java_path: None,
+        cover: None,
+        created_at: time::now_iso(),
+    };
+    check!("instance create", instance::create(&game, &meta).is_ok());
+    let list = instance::discover(&game, &|_| instance::PlayStats::default());
+    check!(
+        "instance discover managed",
+        list.iter().any(|i| i.id == meta.id && i.managed)
+    );
+    check!(
+        "instance discover legacy",
+        list.iter().any(|i| i.id == "ver_1.20.1" && !i.managed)
+    );
+    check!(
+        "instance health ok",
+        list.iter().any(|i| i.id == meta.id && i.health.ok)
+    );
+
+    let mods = instance::instance_dir(&game, &meta.id).join("mods");
+    let had_mods = std::fs::write(mods.join("a.jar"), "x").is_ok()
+        && std::fs::write(mods.join("b.jar.disabled"), "x").is_ok();
+    let after = instance::discover(&game, &|_| instance::PlayStats::default());
+    check!(
+        "instance mods counted",
+        had_mods
+            && after
+                .iter()
+                .any(|i| i.id == meta.id && i.mods_count == 1 && i.mods_disabled == 1)
+    );
+
+    check!(
+        "instance delete to trash",
+        instance::delete(&game, &meta.id, true).is_ok()
+    );
+    check!(
+        "instance trash exists",
+        instance::instances_root(&game)
+            .join(".trash")
+            .read_dir()
+            .map(|d| d.count())
+            .unwrap_or(0)
+            == 1
+    );
+
+    let t = task::create("install", None, Some("1.20.1".into()), "安装 1.20.1");
+    let rev0 = t.revision;
+    task::progress(&t.task_id, "download", "下载 1/2", 1, 2);
+    let rev1 = task::get(&t.task_id).map(|x| x.revision).unwrap_or(0);
+    task::finish(
+        &t.task_id,
+        serde_json::json!({"kind":"install","gameVersion":"1.20.1"}),
+    );
+    let done = task::get(&t.task_id);
+    check!(
+        "task lifecycle",
+        rev1 == rev0 + 1
+            && done
+                .as_ref()
+                .map(|x| x.state == "done" && x.result.is_some())
+                .unwrap_or(false)
+    );
+    check!("task snapshot", !task::snapshot(None, None, None).is_empty());
+
+    let sess = session::begin("inst_selftest", &t.task_id, 0);
+    check!("session begin", !sess.session_id.is_empty());
+    let exited = session::mark_exited(&sess.session_id, Some(0));
+    check!(
+        "session exit",
+        exited
+            .as_ref()
+            .map(|s| s.state == "exited" && s.duration_ms.is_some())
+            .unwrap_or(false)
+    );
+    check!(
+        "session stats",
+        session::stats_for("inst_selftest").last_played.is_some()
+    );
+
+    let save = game.join("saves").join("World1");
+    let _ = std::fs::create_dir_all(&save);
+    let _ = std::fs::write(save.join("level.dat"), "x");
+    check!("saves listed", stats::list_saves(&game, None).len() == 1);
+
+    let st = stats::stats("7d", &|id| id.to_string());
+    check!(
+        "stats honest nulls",
+        st.deaths.is_none() && st.achievements.is_none() && st.range == "7d"
+    );
+
+    let cfg = core::Config::default();
+    check!(
+        "config defaults",
+        cfg.active_instance_id.is_none() && !cfg.game_dir.is_empty()
+    );
+
+    let _ = std::fs::remove_dir_all(&game);
+
+    let total = log.lines().count();
+    log.push_str(&format!("\n{total} checks, {fails} failed\n"));
+    let _ = std::fs::write(std::env::temp_dir().join("astral-selftest.log"), &log);
+    fails
 }

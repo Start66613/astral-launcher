@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "astral"
 version = "0.1.0"
 description = "Astral Launcher"
@@ -21,7 +21,6 @@ portablemc = { path = "vendor/portablemc" }
 uuid = { version = "1", features = ["v3"] }
 
 [profile.release]
-panic = "abort"
 codegen-units = 1
 lto = true
 opt-level = "s"

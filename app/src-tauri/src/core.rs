@@ -21,6 +21,8 @@ pub struct Config {
     pub source: String,
     /// 离线登录用的名字
     pub username: String,
+    /// 当前选中实例（契约 v3 §3）
+    pub active_instance_id: Option<String>,
 }
 
 impl Default for Config {
@@ -29,6 +31,7 @@ impl Default for Config {
             game_dir: default_game_dir().to_string_lossy().to_string(),
             source: "official".into(),
             username: "Player".into(),
+            active_instance_id: None,
         }
     }
 }
@@ -201,21 +204,38 @@ pub fn source_is_mirror(source: &str) -> bool {
     source == "bmclapi"
 }
 
-/// 装 + 启动，返回 PID
+/// 装 + 起进程，返回 Child（调用方负责 wait 与会话记录）
+///
+/// `main_dir` 是共享根（assets/libraries/versions），`mc_dir` 是游戏的 --gameDir，
+/// 托管实例会指向实例目录，实现存档/配置隔离（契约 v3 §7）。
+pub fn spawn(
+    version: &str,
+    main_dir: &Path,
+    mc_dir: Option<&Path>,
+    username: &str,
+    on: impl FnMut(Progress),
+) -> Result<std::process::Child, String> {
+    portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
+    let mut inst = base_installer(version, main_dir, username);
+    if let Some(dir) = mc_dir {
+        inst.base_mut().set_mc_dir(dir);
+    }
+    let game = inst
+        .install(Fwd(on))
+        .map_err(|e| format!("INTERNAL|启动失败|{e:?}"))?;
+    let mut cmd = game.command();
+    cmd.spawn()
+        .map_err(|e| format!("JAVA_MISSING|无法启动 Java|{e}"))
+}
+
+/// legacy：装 + 启动，返回 PID
 pub fn launch(
     version: &str,
     dir: &Path,
     username: &str,
     on: impl FnMut(Progress),
 ) -> Result<u32, String> {
-    portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
-    let mut inst = base_installer(version, dir, username);
-    let game = inst
-        .install(Fwd(on))
-        .map_err(|e| format!("启动失败: {e:?}"))?;
-    let mut cmd = game.command();
-    let child = cmd.spawn().map_err(|e| format!("无法启动 Java: {e}"))?;
-    Ok(child.id())
+    Ok(spawn(version, dir, None, username, on)?.id())
 }
 
 /// 判断某个版本是否已完整安装（有版本 json 和 client jar）
