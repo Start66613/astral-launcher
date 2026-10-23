@@ -12,6 +12,8 @@ async function check(name, run) {
   catch(error) { cases.push({name,status:'failed',message:error.message}); }
 }
 const nativeModule = `
+export { ApiError, parseApiError, deleteInstance, getActiveInstance, getActiveSession, getCoreConfig, getTasks, isTerminal, listInstances, listSessions, mergeTask, onGameExit, onInstanceChanged, onTask, setActiveInstance, startCreateInstance, startLaunch, updateInstance } from '/src/lib/bridge.ts?real-bridge';
+export async function getApiInfo() { return {apiVersion:1,appVersion:'UI TEST LEGACY',features:[]}; }
 const state = () => window.__forestTest;
 export const inTauri = true;
 export async function getSystemInfo() { return {os:'UI TEST DEVICE',cpuCores:8,totalMemGB:16,freeMemGB:8,demo:false}; }
@@ -51,7 +53,7 @@ async function main() {
   async function nativePage(extra={}) {
     const ctx = await browser.newContext({viewport:{width:1440,height:900}});
     await ctx.addInitScript(options=>{window.__forestTest={config:{gameDir:'C:/UI_TEST_ONLY/game',source:'official',username:'TestOffline'},versions:['1.21.1','1.20.1'],calls:[],listeners:new Set(),...options};},extra);
-    await ctx.route(/\/src\/lib\/bridge\.ts(?:\?.*)?$/,route=>route.fulfill({contentType:'application/javascript',body:nativeModule}));
+    await ctx.route(/\/src\/lib\/bridge\.ts(?:\?.*)?$/,route=>route.request().url().includes('real-bridge') ? route.continue() : route.fulfill({contentType:'application/javascript',body:nativeModule}));
     await ctx.route('https://api.modrinth.com/**',route=>route.fulfill({contentType:'application/json',body:JSON.stringify({hits:[]})}));
     const target = await ctx.newPage();
     target.on('pageerror',error=>errors.push(error.message));
@@ -152,7 +154,7 @@ async function main() {
       assert.equal(await core.locator('.world-tile').count(),2);
       assert.equal(await core.locator('.launch-button').isEnabled(),true);
       await core.locator('.switch-version').click();
-      await core.getByRole('dialog').getByRole('button',{name:'1.20.1',exact:true}).click();
+      await core.getByRole('dialog').getByRole('button',{name:/^1\.20\.1/}).click();
       assert.equal(await core.locator('.dock-selection h2').innerText(),'1.20.1');
     });
     await check('native fixture: launch waits for result and is protected against duplicate clicks',async()=>{
@@ -164,7 +166,7 @@ async function main() {
       assert.match(await core.locator('.launch-feedback').innerText(),/preparing JVM/);
       await core.evaluate(()=>window.__forestTest.pendingLaunch.resolve(4242));
       await core.getByText(/进程已创建 · PID 4242/).waitFor();
-      assert.match(await core.locator('.launch-feedback').innerText(),/后续运行状态尚未接入/);
+      assert.match(await core.locator('.launch-feedback').innerText(),/兼容核心未提供持续运行状态/);
       assert.equal(await core.evaluate(()=>window.__forestTest.calls.filter(call=>call.method==='launchVersion').length),1);
     });
     await check('native fixture: failed launch clears stale success and remains retryable',async()=>{

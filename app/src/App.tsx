@@ -71,9 +71,9 @@ export default function App() {
   }, [skin]);
   useEffect(() => {
     let alive = true;
-    if (inTauri) void getSystemInfo().then(info => { if (alive && !info.demo) setSystem(info); }).catch(() => {});
+    if (inTauri && (launcher.mode === "core" || launcher.mode === "legacy")) void getSystemInfo().then(info => { if (alive && !info.demo) setSystem(info); }).catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [launcher.mode]);
   useEffect(() => { content.current?.scrollTo(0, 0); [...(content.current?.querySelectorAll<HTMLElement>("h1") || [])].find(heading => heading.getClientRects().length > 0)?.focus({ preventScroll: true }); }, [view]);
 
   return <div className={`app ${view === "launch" ? "home-view" : "interior-view"}`}>
@@ -90,9 +90,9 @@ export default function App() {
         {view === "more" && <More />}
       </main>
     </div>
-    <footer className="statusbar"><span><i />{inTauri ? launcher.launchBusy ? "正在准备游戏进程" : "桌面模式 · 本地版本" : "浏览器预览 · 桌面功能未连接"}</span><span>FOREST TALE <em>/</em> ASTRAL <small>0.1.0</small></span></footer>
+    <footer className="statusbar"><span><i />{launcher.statusLabel}</span><span>FOREST TALE <em>/</em> ASTRAL <small>0.1.0</small></span></footer>
     <AiDrawer open={aiOpen} onClose={() => setAiOpen(false)} />
-    <Modal open={accountOpen} title="帐号与档案" onClose={() => setAccountOpen(false)}><div className="account-detail"><span className="account-avatar"><Icon name="user" /></span><h3>{launcher.config?.username || "尚未连接帐号"}</h3><p>{launcher.config?.username ? "当前使用离线档案，未验证 Microsoft 身份。" : "Microsoft 登录尚未接入，当前没有已验证的登录身份。"}</p></div><p className="modal-note">离线用户名可以在桌面端的设置中修改。帐号认证与多实例功能将随核心接口接入。</p><button className="btn btn-primary modal-full-button" onClick={() => { setAccountOpen(false); navigate("settings"); }}>前往设置 <Icon name="arrow" /></button></Modal>
+    <Modal open={accountOpen} title="帐号与档案" onClose={() => setAccountOpen(false)}><div className="account-detail"><span className="account-avatar"><Icon name="user" /></span><h3>{launcher.config?.username || "尚未连接帐号"}</h3><p>{launcher.config?.username ? "当前使用离线档案，未验证 Microsoft 身份。" : "Microsoft 登录尚未接入，当前没有已验证的登录身份。"}</p></div><p className="modal-note">离线用户名可以在桌面端的设置中修改。Microsoft 帐号认证尚未接入。</p><button className="btn btn-primary modal-full-button" onClick={() => { setAccountOpen(false); navigate("settings"); }}>前往设置 <Icon name="arrow" /></button></Modal>
     <Modal open={Boolean(windowError)} title="窗口操作未完成" onClose={() => setWindowError("")}><p className="error-message">{windowError}</p></Modal>
   </div>;
 }
