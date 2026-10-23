@@ -1,280 +1,49 @@
 import { useEffect, useState } from "react";
-import type { Accent, LauncherConfig, Motion, Radius, Skin, SystemInfo, Theme } from "../lib/types";
-import { getConfig, openPath, setConfig } from "../lib/bridge";
-import { Card, Svg } from "../components/ui";
+import type { Accent, LauncherConfig, Skin, SystemInfo } from "../lib/types";
+import { getConfig, inTauri, openPath, setConfig } from "../lib/bridge";
+import { Card } from "../components/ui";
+import Icon from "../components/Icon";
 
-const THEMES: { v: Theme; label: string }[] = [
-  { v: "light", label: "亮色" },
-  { v: "dark", label: "暗色" },
-];
-const ACCENTS: { v: Accent; color: string }[] = [
-  { v: "blue", color: "#1e6cd6" },
-  { v: "green", color: "#177f45" },
-  { v: "purple", color: "#6941da" },
-  { v: "orange", color: "#b85c0a" },
-];
-const RADII: { v: Radius; label: string }[] = [
-  { v: "sharp", label: "锐利" },
-  { v: "default", label: "默认" },
-  { v: "soft", label: "柔和" },
-];
-const MOTIONS: { v: Motion; label: string }[] = [
-  { v: "on", label: "标准" },
-  { v: "off", label: "关闭" },
-];
-
-function Select({
-  value,
-  options,
-  onPick,
-}: {
-  value: string;
-  options: { v: string; label: string }[];
-  onPick: (v: string) => void;
+const ACCENTS: { value: Accent; label: string }[] = [{ value: "green", label: "松针绿" }, { value: "blue", label: "湖水蓝" }, { value: "purple", label: "暮山紫" }, { value: "orange", label: "木屋橙" }];
+export default function Settings({ skin, setSkin, system, onSaved }: {
+  skin: Skin; setSkin: (patch: Partial<Skin>) => void; system: SystemInfo | null; onSaved: () => void;
 }) {
-  return (
-    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-      {options.map((o) => (
-        <button
-          key={o.v}
-          className={"opt" + (value === o.v ? " on" : "")}
-          onClick={() => onPick(o.v)}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function StaticSelect({ text }: { text: string }) {
-  return (
-    <div className="field">
-      <span>{text}</span>
-      <Svg>
-        <path d="m6 9 6 6 6-6" />
-      </Svg>
-    </div>
-  );
-}
-
-export default function Settings({
-  skin,
-  setSkin,
-  system,
-}: {
-  skin: Skin;
-  setSkin: (p: Partial<Skin>) => void;
-  system: SystemInfo | null;
-}) {
-  const [cfg, setCfg] = useState<LauncherConfig | null>(null);
-
+  const [config, setDraft] = useState<LauncherConfig | null>(null);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   useEffect(() => {
-    void getConfig().then(setCfg);
+    let alive = true;
+    if (inTauri) void getConfig().then(value => { if (alive) setDraft(value); }).catch(cause => { if (alive) setError(String(cause)); });
+    return () => { alive = false; };
   }, []);
-
-  function update(p: Partial<LauncherConfig>) {
-    setCfg((c) => {
-      if (!c) return c;
-      const next = { ...c, ...p };
-      void setConfig(next);
-      return next;
-    });
+  function edit(patch: Partial<LauncherConfig>) { setDraft(old => old ? { ...old, ...patch } : old); setSaved(false); }
+  async function save() {
+    if (!inTauri || !config || saving) return;
+    if (!config.username.trim()) { setError("请填写离线用户名。"); return; }
+    setSaving(true); setError(""); setSaved(false);
+    try { await setConfig(config); setSaved(true); onSaved(); } catch (cause) { setError(String(cause)); }
+    finally { setSaving(false); }
   }
-
-  return (
-    <section className="page">
-      <div className="page-head">
-        <h1>设置</h1>
-        <p>改动即时生效</p>
-      </div>
-
-      <Card title="外观" meta="主题市场的每一套皮肤都由这几项生成">
-        <div className="frow">
-          <div className="lbl">主题</div>
-          <div className="val">
-            <Select
-              value={skin.theme}
-              options={THEMES}
-              onPick={(v) => setSkin({ theme: v as Theme })}
-            />
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">强调色</div>
-          <div className="val">
-            <div style={{ display: "flex", gap: 8 }}>
-              {ACCENTS.map((a) => (
-                <button
-                  key={a.v}
-                  className={"sw" + (skin.accent === a.v ? " on" : "")}
-                  onClick={() => setSkin({ accent: a.v })}
-                  title={a.v}
-                >
-                  <i style={{ background: a.color }} />
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">圆角</div>
-          <div className="val">
-            <Select
-              value={skin.radius}
-              options={RADII}
-              onPick={(v) => setSkin({ radius: v as Radius })}
-            />
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">动效</div>
-          <div className="val">
-            <Select
-              value={skin.motion}
-              options={MOTIONS}
-              onPick={(v) => setSkin({ motion: v as Motion })}
-            />
-          </div>
-        </div>
+  return <section className="page settings-page">
+    <header className="page-head"><div><span className="eyebrow">MAKE IT YOURS</span><h1 id="page-title" tabIndex={-1}>设置</h1><p>让每一次启程，都合乎你的习惯。</p></div></header>
+    <div className="settings-layout"><div className="settings-main">
+      <Card title="外观" meta="本机保存，即时生效">
+        <div className="frow"><span className="lbl">昼与夜</span><div className="val option-group">{([{ value: "dark", label: "深林夜色", icon: "moon" }, { value: "light", label: "林间薄雾", icon: "sun" }] as const).map(item => <button key={item.value} className={`opt ${skin.theme === item.value ? "on" : ""}`} aria-pressed={skin.theme === item.value} onClick={() => setSkin({ theme: item.value })}><Icon name={item.icon} />{item.label}</button>)}</div></div>
+        <div className="frow"><span className="lbl">强调色</span><div className="val option-group">{ACCENTS.map(item => <button key={item.value} className={`accent-option ${skin.accent === item.value ? "on" : ""}`} aria-pressed={skin.accent === item.value} onClick={() => setSkin({ accent: item.value })}><i data-color={item.value} />{item.label}</button>)}</div></div>
+        <div className="frow"><span className="lbl">圆角</span><div className="val option-group">{([{ value: "sharp", label: "利落" }, { value: "default", label: "适中" }, { value: "soft", label: "柔和" }] as const).map(item => <button key={item.value} className={`opt ${skin.radius === item.value ? "on" : ""}`} aria-pressed={skin.radius === item.value} onClick={() => setSkin({ radius: item.value })}>{item.label}</button>)}</div></div>
+        <div className="frow"><span className="lbl">交互动效</span><div className="val option-group">{([{ value: "on", label: "轻柔过渡" }, { value: "off", label: "减少动效" }] as const).map(item => <button key={item.value} className={`opt ${skin.motion === item.value ? "on" : ""}`} aria-pressed={skin.motion === item.value} onClick={() => setSkin({ motion: item.value })}>{item.label}</button>)}<small className="field-note">遵循系统的减少动效偏好。</small></div></div>
       </Card>
-
-      <Card title="下载与目录">
-        <div className="frow">
-          <div className="lbl">下载源</div>
-          <div className="val">
-            <Select
-              value={cfg?.source ?? "official"}
-              options={[
-                { v: "official", label: "官方 CDN" },
-                { v: "bmclapi", label: "BMCLAPI 镜像" },
-              ]}
-              onPick={(v) => update({ source: v })}
-            />
-            <div className="note" style={{ marginTop: 6 }}>
-              镜像加速依赖库与资源文件；版本元数据、客户端 jar 仍走官方。
-            </div>
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">游戏目录</div>
-          <div className="val">
-            <div style={{ display: "flex", gap: 8 }}>
-              <div className="field" style={{ flex: 1 }}>
-                <span
-                  style={{
-                    fontSize: 12.5,
-                    color: "var(--t2)",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {cfg?.gameDir ?? "读取中…"}
-                </span>
-              </div>
-              <button
-                className="btn btn-ghost"
-                onClick={() => cfg && void openPath(cfg.gameDir)}
-              >
-                打开
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">离线用户名</div>
-          <div className="val">
-            <div className="field">
-              <input
-                value={cfg?.username ?? ""}
-                onChange={(e) => update({ username: e.target.value })}
-                placeholder="Player"
-              />
-            </div>
-          </div>
-        </div>
-      </Card>
-
-      <Card title="启动选项">
-        <div className="frow">
-          <div className="lbl">默认版本隔离</div>
-          <div className="val">
-            <StaticSelect text="隔离所有版本" />
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">游戏窗口标题</div>
-          <div className="val">
-            <div className="field">
-              <input placeholder="默认" />
-            </div>
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">自定义信息</div>
-          <div className="val">
-            <div className="field">
-              <input defaultValue="Astral" />
-            </div>
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">进程优先级</div>
-          <div className="val">
-            <StaticSelect text="中（平衡）" />
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">窗口大小</div>
-          <div className="val">
-            <StaticSelect text="默认" />
-          </div>
-        </div>
-      </Card>
-
-      <Card title="内存分配">
-        <div className="frow">
-          <div className="lbl">分配方式</div>
-          <div className="val">
-            <div className="radios">
-              <label>
-                <span className="rd on" />
-                自动配置
-              </label>
-              <label>
-                <span className="rd" />
-                自定义
-              </label>
-              <span style={{ color: "var(--t3)", fontSize: 12, marginLeft: 8 }}>
-                {system ? `4 GB / ${system.totalMemGB} GB` : "读取中…"}
-              </span>
-            </div>
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">启动前优化</div>
-          <div className="val">
-            <div className="radios">
-              <label>
-                <span className="rd on" />
-                启动游戏前进行内存优化
-              </label>
-            </div>
-          </div>
-        </div>
-        <div className="frow">
-          <div className="lbl">系统</div>
-          <div className="val">
-            <span style={{ fontSize: 12, color: "var(--t3)" }}>
-              {system
-                ? `${system.os} · ${system.cpuCores} 核 · 可用 ${system.freeMemGB} GB`
-                : "读取中…"}
-              {system?.demo ? "（未在 Tauri 内运行，为演示数据）" : ""}
-            </span>
-          </div>
-        </div>
-      </Card>
-    </section>
-  );
+      <form onSubmit={event => { event.preventDefault(); void save(); }}>
+        <Card title="下载与档案" meta={inTauri ? "修改后保存" : "桌面端可用"}>
+          <div className="frow"><label className="lbl" htmlFor="download-source">下载源</label><div className="val"><select id="download-source" className="sel" disabled={!config || saving} value={config?.source || "official"} onChange={event => edit({ source: event.target.value })}><option value="official">官方 CDN</option><option value="bmclapi">BMCLAPI 镜像</option></select><p className="field-note">镜像加速依赖库与资源；版本元数据和客户端仍使用官方来源。</p></div></div>
+          <div className="frow"><span className="lbl">游戏目录</span><div className="val path-field"><code>{config?.gameDir || (inTauri ? "尚未读取到目录" : "连接桌面端后读取")}</code><button type="button" className="icon-button" disabled={!config || !inTauri} onClick={() => config && void openPath(config.gameDir)} aria-label="打开游戏目录"><Icon name="folder" /></button></div></div>
+          <div className="frow"><label className="lbl" htmlFor="offline-name">离线用户名</label><div className="val"><input id="offline-name" className="text-input" disabled={!config || saving} value={config?.username || ""} placeholder={inTauri ? "填写用户名" : "尚未连接"} onChange={event => edit({ username: event.target.value })} /><p className="field-note">离线档案不代表已验证的 Microsoft 身份。</p></div></div>
+          <div className="form-actions"><span role="status">{saved ? "已保存到本机" : !inTauri ? "浏览器不会修改游戏配置" : ""}</span><button className="btn btn-primary" type="submit" disabled={!config || saving || !inTauri}>{saving ? "正在保存…" : "保存设置"}<Icon name="check" /></button></div>
+        </Card>
+      </form>
+      {error && <p className="error-message" role="alert">{error}</p>}
+      <Card title="设备信息"><div className="device-info">{system ? <><Icon name="compass" /><div><strong>{system.os}</strong><p>{system.cpuCores} 核 · 总内存 {system.totalMemGB} GB · 可用 {system.freeMemGB} GB</p></div></> : <><Icon name="compass" /><p>连接桌面端后读取真实设备信息。</p></>}</div></Card>
+    </div><aside className="settings-aside"><div className="theme-preview"><span>FOREST TALE</span><Icon name="star" /><strong>萤火夜航</strong><small>为每一个小小的世界，留一盏灯。</small></div><p>深林的绿，木屋的暖。<br />给冒险一个安静的开始。</p></aside></div>
+  </section>;
 }
