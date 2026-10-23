@@ -1,6 +1,7 @@
 mod core;
 mod error;
 mod instance;
+mod loader;
 mod mods;
 mod session;
 mod stats;
@@ -56,7 +57,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "mirror"],
     })
 }
 
@@ -373,8 +374,13 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
         };
         let t2 = tid.clone();
         let version = inst.game_version.clone();
-        let spawned = core::spawn(
+        let loader = inst
+            .loader
+            .as_ref()
+            .map(|l| (l.kind.clone(), l.version.clone()));
+        let spawned = core::spawn_with(
             &version,
+            loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
             &main_dir,
             mc_dir.as_deref(),
             &cfg.username,
@@ -448,6 +454,63 @@ fn get_stats(range: Option<String>) -> stats::Stats {
     stats::stats(range.as_deref().unwrap_or("7d"), &|id| {
         names.get(id).cloned().unwrap_or_else(|| id.to_string())
     })
+}
+
+// ── 加载器 ──────────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_loaders(game_version: String) -> Result<Vec<loader::LoaderCatalog>, String> {
+    loader::list(&game_version)
+}
+
+#[tauri::command]
+async fn start_install_loader(
+    instance_id: String,
+    kind: String,
+    version: String,
+) -> Result<Task, String> {
+    let inst = managed_instance(&instance_id)?;
+    let t = task::create(
+        "loader",
+        Some(instance_id.clone()),
+        Some(inst.game_version.clone()),
+        format!("安装 {kind} {version}"),
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let cfg = core::load_config();
+        let main_dir = PathBuf::from(&cfg.game_dir);
+        let t2 = tid.clone();
+        let res = core::install_loader(
+            &inst.game_version,
+            &kind,
+            &version,
+            &main_dir,
+            &cfg.username,
+            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+        );
+        match res {
+            Ok(_) => {
+                let game = game_root();
+                if let Some(mut meta) = instance::read_meta(&game, &instance_id) {
+                    meta.loader_kind = Some(kind.clone());
+                    meta.loader_version = Some(version.clone());
+                    let _ = instance::save_meta(&game, &meta);
+                }
+                emit_instance_changed(&instance_id, "updated");
+                task::finish(
+                    &tid,
+                    serde_json::json!({
+                        "kind": "loader",
+                        "loader": { "kind": kind, "version": version },
+                    }),
+                );
+            }
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
 }
 
 // ── 模组 ────────────────────────────────────────────────────────
@@ -627,6 +690,8 @@ pub fn run() {
             list_mods,
             set_mod_enabled,
             delete_mod,
+            list_loaders,
+            start_install_loader,
             install_version,
             launch_version,
             download_to
@@ -809,6 +874,17 @@ pub fn selftest() -> i32 {
     check!(
         "stats honest nulls",
         st.deaths.is_none() && st.achievements.is_none() && st.range == "7d"
+    );
+
+    // 加载器清单解析（纯函数，不依赖网络）
+    let sample = r#"[{"loader":{"version":"0.16.9","stable":true}},{"loader":{"version":"0.16.8","stable":false}}]"#;
+    check!(
+        "loader parse",
+        loader::parse_fabric(sample) == vec!["0.16.9".to_string(), "0.16.8".to_string()]
+    );
+    check!(
+        "loader empty safe",
+        loader::parse_fabric("[]").is_empty() && loader::parse_fabric("oops").is_empty()
     );
 
     let cfg = core::Config::default();

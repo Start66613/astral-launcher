@@ -506,7 +506,7 @@ Instance.managed: boolean
 | `cancel_task` | 后台 worker 没有停止检查；`accepted` 只是受理 |
 | `retry_task` | 未注册；不复用 `start_*` 冒充 |
 | `start_duplicate_instance` | 未实现 |
-| `list_loaders` / `start_install_loader` | 下一批 |
+| `list_loaders` / `start_install_loader` | 已实现 Fabric/Quilt；Forge/NeoForge 未做 |
 | `list_mods` / `set_mod_enabled` / `delete_mod` | 仅托管实例可用（兼容实例返回 `UNSUPPORTED`） |
 | `start_download`（实例级） | 现在只有 legacy `download_to`，写共享目录 |
 | `start_install_modpack` / `export_modpack` | 下一批 |
@@ -569,4 +569,49 @@ export async function deleteMod(instanceId: string, fileName: string): Promise<v
 - `name` / `version` / `loader` 是从 jar 里尽力读的（fabric/quilt json、forge/neoforge toml、mcmod.info）；读不到就是 `null` 或文件名，**不代表文件损坏**。
 - `delete_mod` 是物理删除，没有回收站；界面需要二次确认。
 - `iconPath` 目前恒为 `null`，界面用通用占位，不要当成"没有图标"的结论。
+
+---
+
+## 8. 加载器（Fabric / Quilt）
+
+### `types.ts` 追加
+
+```ts
+export interface LoaderCatalog {
+  kind: "fabric" | "quilt";
+  label: string;                 // "Fabric"
+  recommended: string | null;    // 稳定版优先
+  versions: string[];            // 新→旧
+}
+```
+
+### `bridge.ts` 追加
+
+```ts
+/* ---------- 第六组：加载器 ---------- */
+
+/** 某个游戏版本可装的加载器；没有适配会抛 VERSION_NOT_FOUND */
+export async function listLoaders(gameVersion: string): Promise<LoaderCatalog[]> {
+  return call<LoaderCatalog[]>("list_loaders", { gameVersion });
+}
+
+/** 装加载器：完成后实例的 loader 字段会被更新，并推 instance-changed */
+export async function startInstallLoader(
+  instanceId: string,
+  kind: "fabric" | "quilt",
+  version: string
+): Promise<Task> {
+  return call<Task>("start_install_loader", { instanceId, kind, version });
+}
+```
+
+要点：
+
+- 目前只支持 **Fabric / Quilt**；Forge / NeoForge 传进去会返回 `UNSUPPORTED`。
+- 加载器文件装在**共享** `versions/`（不是实例目录），实例里只记 `loader.kind/version`；
+  启动时核心会自动走对应加载器的装配流程。
+- `list_loaders` 走 Fabric 官方 meta 并本地缓存；没有适配版本时抛 `VERSION_NOT_FOUND`。
+- 装完必须重新 `getInstance(id)` 或等 `instance-changed` 再刷新卡片上的 loader 标签。
+- 创建实例时也可以直接带 `loaderKind` / `loaderVersion`，但**不会自动安装**加载器文件；
+  建议流程：创建 → `startInstallLoader` → 刷新实例 → 启动。
 

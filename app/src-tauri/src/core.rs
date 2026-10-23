@@ -175,6 +175,32 @@ impl<F: FnMut(Progress)> portablemc::moj::Handler for Fwd<F> {
     }
 }
 
+impl<F: FnMut(Progress)> portablemc::fabric::Handler for Fwd<F> {
+    fn on_event(&mut self, event: portablemc::fabric::Event) {
+        match event {
+            portablemc::fabric::Event::Mojang(e) => match e {
+                portablemc::moj::Event::Base(b) => {
+                    if let Some(p) = to_progress(&b) {
+                        (self.0)(p);
+                    }
+                }
+                portablemc::moj::Event::FetchVersion { version } => {
+                    (self.0)(blank("download", &format!("获取版本元数据 {version}")))
+                }
+                _ => {}
+            },
+            portablemc::fabric::Event::FetchVersion {
+                game_version,
+                loader_version,
+            } => (self.0)(blank(
+                "download",
+                &format!("获取 Fabric {loader_version} / {game_version} 元数据"),
+            )),
+            _ => {}
+        }
+    }
+}
+
 fn offline_uuid(name: &str) -> Uuid {
     Uuid::new_v3(&Uuid::NAMESPACE_OID, format!("OfflinePlayer:{name}").as_bytes())
 }
@@ -217,11 +243,23 @@ pub fn spawn(
     extra_args: &[String],
     on: impl FnMut(Progress),
 ) -> Result<std::process::Child, String> {
+    spawn_with(
+        version, None, main_dir, mc_dir, username, memory_mb, extra_args, on,
+    )
+}
+
+/// 带加载器启动：`loader = Some((kind, loader_version))`
+pub fn spawn_with(
+    version: &str,
+    loader: Option<(&str, &str)>,
+    main_dir: &Path,
+    mc_dir: Option<&Path>,
+    username: &str,
+    memory_mb: Option<u32>,
+    extra_args: &[String],
+    on: impl FnMut(Progress),
+) -> Result<std::process::Child, String> {
     portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
-    let mut inst = base_installer(version, main_dir, username);
-    if let Some(dir) = mc_dir {
-        inst.base_mut().set_mc_dir(dir);
-    }
 
     // 实例内存与自定义 JVM 参数（契约 v3 §7）
     let mut jvm: Vec<String> = Vec::new();
@@ -229,16 +267,52 @@ pub fn spawn(
         jvm.push(format!("-Xmx{mb}M"));
     }
     jvm.extend_from_slice(extra_args);
-    if !jvm.is_empty() {
-        inst.base_mut().set_extra_jvm_args(jvm);
-    }
 
-    let game = inst
-        .install(Fwd(on))
-        .map_err(|e| format!("INTERNAL|启动失败|{e:?}"))?;
-    let mut cmd = game.command();
-    cmd.spawn()
-        .map_err(|e| format!("JAVA_MISSING|无法启动 Java|{e}"))
+    match loader {
+        Some((kind, loader_version)) => {
+            let l = match kind {
+                "fabric" => portablemc::fabric::Loader::Fabric,
+                "quilt" => portablemc::fabric::Loader::Quilt,
+                other => {
+                    return Err(format!("UNSUPPORTED|暂不支持的加载器 {other}"));
+                }
+            };
+            let mut inst = portablemc::fabric::Installer::new(l, version, loader_version);
+            let moj = inst.mojang_mut();
+            moj.base_mut().set_main_dir(main_dir);
+            if let Some(dir) = mc_dir {
+                moj.base_mut().set_mc_dir(dir);
+            }
+            moj.base_mut().set_launcher_name("Astral");
+            moj.base_mut().set_launcher_version("0.1.0");
+            if !jvm.is_empty() {
+                moj.base_mut().set_extra_jvm_args(jvm);
+            }
+            moj.set_auth_offline(offline_uuid(username), username.to_string());
+
+            let game = inst
+                .install(Fwd(on))
+                .map_err(|e| format!("INTERNAL|加载器启动失败|{e:?}"))?;
+            let mut cmd = game.command();
+            cmd.spawn()
+                .map_err(|e| format!("JAVA_MISSING|无法启动 Java|{e}"))
+        }
+        None => {
+            let mut inst = base_installer(version, main_dir, username);
+            if let Some(dir) = mc_dir {
+                inst.base_mut().set_mc_dir(dir);
+            }
+            if !jvm.is_empty() {
+                inst.base_mut().set_extra_jvm_args(jvm);
+            }
+            let game = inst
+                .install(Fwd(on))
+                .map_err(|e| format!("INTERNAL|启动失败|{e:?}"))?;
+            let mut cmd = game.command();
+            cmd.spawn()
+                .map_err(|e| format!("JAVA_MISSING|无法启动 Java|{e}"))
+        }
+    }
 }
 
 /// legacy：装 + 启动，返回 PID
@@ -249,6 +323,32 @@ pub fn launch(
     on: impl FnMut(Progress),
 ) -> Result<u32, String> {
     Ok(spawn(version, dir, None, username, None, &[], on)?.id())
+}
+
+/// 只安装加载器（不启动），把版本文件补齐到共享 versions/
+pub fn install_loader(
+    game_version: &str,
+    loader_kind: &str,
+    loader_version: &str,
+    main_dir: &Path,
+    username: &str,
+    on: impl FnMut(Progress),
+) -> Result<(), String> {
+    portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
+    let l = match loader_kind {
+        "fabric" => portablemc::fabric::Loader::Fabric,
+        "quilt" => portablemc::fabric::Loader::Quilt,
+        other => return Err(format!("UNSUPPORTED|暂不支持的加载器 {other}")),
+    };
+    let mut inst = portablemc::fabric::Installer::new(l, game_version, loader_version);
+    let moj = inst.mojang_mut();
+    moj.base_mut().set_main_dir(main_dir);
+    moj.base_mut().set_launcher_name("Astral");
+    moj.base_mut().set_launcher_version("0.1.0");
+    moj.set_auth_offline(offline_uuid(username), username.to_string());
+    inst.install(Fwd(on))
+        .map(|_| ())
+        .map_err(|e| format!("INTERNAL|加载器安装失败|{e:?}"))
 }
 
 /// 判断某个版本是否已完整安装（有版本 json 和 client jar）

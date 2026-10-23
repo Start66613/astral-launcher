@@ -1,4 +1,4 @@
-# 前后端接口契约 v3.1
+﻿# 前后端接口契约 v3.3
 
 > **Rust 核心** 与 **React 界面** 之间唯一的对接约定。改接口先改本文档。
 >
@@ -633,6 +633,7 @@ payload: { instanceId: string; change: "created" | "updated" | "deleted"; }
 | v3 | 2026-10-23 | 按界面评审修订：实例目录布局与强制实例隔离、删除/覆盖/文件名规则、任务 revision 与订阅顺序、`GameSession` 与状态恢复、v1 参数与阻塞语义、`get_api_info`、`instance-changed`、诊断预览脱敏 |
 | v3.1 | 2026-10-23 | 回填接入评审：`start_install`/`start_launch`/`start_create_instance` 签名、`get_tasks` 顶层字段、`Instance.managed`、能力清单以注册为准、5 项实现缺陷修正、取消语义说明 |
 | v3.2 | 2026-10-23 | 模组命令落地：`list_mods` / `set_mod_enabled` / `delete_mod`（仅托管实例） |
+| v3.3 | 2026-10-23 | 加载器命令落地：`list_loaders` / `start_install_loader`（Fabric/Quilt），启动走 fabric 装配 |
 
 ### P2 待议（本版不实现）
 
@@ -705,9 +706,9 @@ instances, sessions, tasks, saves, stats, mirror
 
 ### 11.6 尚未实现（界面不要放入口）
 
-`retry_task`、`start_duplicate_instance`、`list_loaders`、`start_install_loader`、`start_download`（实例级）、`start_install_modpack`、`export_modpack`、`get_account` / MSA、`prepare_diagnosis` / `start_diagnose`。
+`retry_task`、`start_duplicate_instance`、`start_download`（实例级）、`start_install_modpack`、`export_modpack`、`get_account` / MSA、`prepare_diagnosis` / `start_diagnose`。
 
-> 模组命令（`list_mods` / `set_mod_enabled` / `delete_mod`）已于 v3.2 实现，见 11.8。
+> 模组命令已于 v3.2 实现（11.8），加载器命令已于 v3.3 实现（11.9）。
 
 ### 11.8 模组命令（v3.2 实现）
 
@@ -721,6 +722,20 @@ instances, sessions, tasks, saves, stats, mirror
 - 禁用通过把 `x.jar` 改名为 `x.jar.disabled` 实现；同名冲突依次加 `-1`…`-20`，调用方须以返回的 `fileName` 为准。
 - `delete_mod` 为物理删除，无回收站。
 - `ModFile` 的 `name` / `version` / `loader` 由 jar 内元数据（fabric/quilt json、forge/neoforge toml、mcmod.info）尽力解析，缺失为 `null`；`iconPath` 暂恒为 `null`。
+
+### 11.9 加载器命令（v3.3 实现）
+
+| 命令 | 参数 | 返回 |
+|---|---|---|
+| `list_loaders` | `gameVersion` | `LoaderCatalog[]` |
+| `start_install_loader` | `instanceId, kind, version` | `Task`（`result.kind = "loader"`） |
+
+- `LoaderCatalog = { kind, label, recommended, versions }`；`kind` 目前只有 `fabric` / `quilt`。
+- 数据来自 Fabric 官方 meta（`meta.fabricmc.net`），本地缓存；无适配版本返回 `VERSION_NOT_FOUND`。
+- 加载器文件装在**共享** `versions/`；实例只记录 `loader.kind/version`，启动时自动装配。
+- 仅托管实例可安装；成功后更新 `instance.json` 并推 `astral://instance-changed`。
+- Forge / NeoForge 尚未实现，传参会返回 `UNSUPPORTED`。
+- `create_instance` 的 `loaderKind/loaderVersion` **不会自动安装**加载器文件，需再调 `start_install_loader`。
 
 ### 11.7 桥接代码
 
