@@ -16,8 +16,8 @@ export default function More() {
   return (
     <section className="page">
       <div className="page-head">
-        <h1>帮助</h1>
-        <p>本地文档 + 在线问答</p>
+        <div><span className="eyebrow">A LITTLE HELP ALONG THE WAY</span><h1 id="page-title" tabIndex={-1}>帮助与说明</h1>
+        <p>遇到岔路时，先在这里找找方向。</p></div>
       </div>
 
       <div className="search">
@@ -27,6 +27,7 @@ export default function More() {
         </svg>
         <input
           placeholder="搜索帮助"
+          aria-label="搜索帮助"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Astral Launcher 森林物语：三个可交互的首页视觉提案。仅供设计评审，不连接游戏服务。" />
+    <title>Forest Tale · Astral Launcher 首页设计提案</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232e5845'/%3E%3Cpath d='m16 5 3 8 8 3-8 3-3 8-3-8-8-3 8-3Z' fill='%23f1efd9'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./prototype.css" />
+    <script src="./prototype.js" defer></script>
+  </head>
+  <body data-concept="daylight" data-mode="light">
+    <a class="skip-link" href="#home-heading">跳到首页内容</a>
+    <header class="review-bar">
+      <div class="review-brand"><span class="review-mark">A.</span><div><strong>FOREST TALE</strong><small>Astral Launcher · 首页视觉研究</small></div></div>
+      <nav class="concept-switch" aria-label="视觉方案">
+        <button type="button" data-concept="daylight" aria-pressed="true"><b>A</b> 林间晨光</button>
+        <button type="button" data-concept="nightfall" aria-pressed="false"><b>B</b> 萤火夜航</button>
+        <button type="button" data-concept="fieldnotes" aria-pressed="false"><b>C</b> 林野手札</button>
+      </nav>
+      <div class="review-tools"><button type="button" class="review-tool" data-action="theme" aria-label="切换深色或浅色主题"></button><button type="button" class="review-tool" data-action="motion" aria-pressed="false">动效开</button></div>
+    </header>
+    <div class="prototype-stage"><div id="prototype"></div></div>
+    <footer class="review-footer"><p id="concept-description"></p><span>PHASE 01 <i></i> 视觉原型 · 内容为示例，未连接游戏服务</span></footer>
+    <dialog id="interaction-dialog" aria-labelledby="dialog-title">
+      <div class="dialog-heading"><span class="eyebrow">ASTRAL / DESIGN PREVIEW</span><button type="button" class="icon-button" data-action="close-dialog" aria-label="关闭对话框"></button></div>
+      <div id="dialog-content"></div>
+    </dialog>
+    <dialog id="ai-dialog" class="ai-drawer" aria-labelledby="ai-title">
+      <div class="drawer-top"><span class="eyebrow">YOUR QUIET COMPANION</span><button type="button" class="icon-button" data-action="close-ai" aria-label="关闭 AI 诊断"></button></div>
+      <div class="drawer-intro"><span class="large-spark" aria-hidden="true"></span><h2 id="ai-title">AI 诊断</h2><p>先看看日志，再讨论原因。</p></div>
+      <div class="drawer-state"><span class="log-icon" aria-hidden="true"></span><h3>还没有导入日志</h3><p>选择一份启动或崩溃日志，帮助定位问题。<br />原型不会读取本地文件或上传任何内容。</p><button type="button" class="secondary-button" data-action="log-info">了解日志导入</button></div>
+      <details class="privacy-note"><summary>你的日志，始终由你决定</summary><p>正式接入时，应先展示待发送内容并脱敏；经你确认后再交给已配置的模型。当前未连接分析服务。</p></details>
+      <div class="drawer-bottom"><small>尚未导入日志 · AI 服务未连接</small><button type="button" class="primary-button" disabled>开始分析</button></div>
+    </dialog>
+    <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
+  </body>
+</html>

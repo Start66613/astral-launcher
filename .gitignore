@@ -12,6 +12,12 @@ vendor-probe/
 *.log
 *.tmp
 
+# 可复现的 UI 验证产物（保留在本机，不提交截图或运行结果）
+/preview/forest-tale/screenshots/
+/preview/forest-tale/test-results.json
+/preview/forest-tale/react/screenshots/
+/preview/forest-tale/react/test-results.json
+
 # 系统
 .DS_Store
 Thumbs.db

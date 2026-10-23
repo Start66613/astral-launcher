@@ -1,103 +1,36 @@
-/* ── 设计 Token ────────────────────────────────────────────────
-   主题市场里的每套皮肤 = 这组变量 + 一张背景图。
-   改动请只改这里，组件样式里不要写死颜色。 */
+/* Forest Tale / Nocturne. Shared tokens for every React page. */
 :root {
-  --font: -apple-system, "Segoe UI Variable Text", "Segoe UI",
-    "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  --mono: "Cascadia Mono", "Consolas", monospace;
-
-  --r: 8px;
-  --r-sm: 6px;
-
-  --bg: #f2f6fc;
-  --panel: #ffffff;
-  --panel2: #f7f8fa;
-  --line: #e4e8ef;
-  --line2: #d5dbe5;
-
-  --t1: #15181d;
-  --t2: #5b6472;
-  --t3: #8b95a3;
-
-  --accent: #1e6cd6;
-  --accent-bg: #eaf2fe;
-  --accent-line: #c6d9f5;
-
-  --red: #d1453b;
-  --green: #1b8a4b;
-
-  --hover: #f1f3f6;
-  --active: #e8ecf1;
-
-  --bar: var(--accent);
-  --sheen: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --serif: "Palatino Linotype", "Noto Serif SC", "Source Han Serif SC", "SimSun", Georgia, serif;
+  --mono: "Cascadia Mono", Consolas, monospace;
+  --r: 12px; --r-sm: 8px; --r-lg: 16px;
+  --bg: #edf2e8; --panel: #fafcf6; --panel2: #e5eddf; --line: #d2ddcb; --line2: #b4c7ab;
+  --t1: #263f31; --t2: #52694f; --t3: #62765e;
+  --accent: #35573c; --accent-ink: #fbfff1; --accent-bg: #e0ead5; --accent-line: #afc69c;
+  --red: #a34336; --green: #446c37; --hover: #58784812; --active: #adc59b30;
+  --bar: #f8fbf3; --sheen: none; --focus: #527b3c;
+  --scene-ink: #213c30; --scene-muted: #3a5743; --scene-line: #7d9b7160;
+  --scene-surface: #f5f8eeed; --scene-soft: #e9f0dfdf; --scene-accent: #35573c; --scene-on-accent: #f7fbe9;
+  --scene-overlay: linear-gradient(90deg, #edf2e9ed 0%, #edf2e7bd 42%, #e3eddf24 100%);
+  color-scheme: light;
 }
-
 :root[data-theme="dark"] {
-  --bg: #13161a;
-  --panel: #1b1e23;
-  --panel2: #202329;
-  --line: #2a2e35;
-  --line2: #363b44;
-
-  --t1: #e9ebef;
-  --t2: #9aa2ae;
-  --t3: #6f7783;
-
-  --accent: #4c86f5;
-  --accent-bg: #1a2438;
-  --accent-line: #2b3f63;
-
-  --red: #e06a60;
-  --green: #3fa96c;
-
-  --hover: #23272d;
-  --active: #2a2f36;
-
-  --bar: #21304a;
-  --sheen: none;
+  --bg: #0d1c1c; --panel: #142725; --panel2: #1c322c; --line: #2b443a; --line2: #49654e;
+  --t1: #edf2e2; --t2: #b5c6b8; --t3: #a0b3a4;
+  --accent: #d6e4b7; --accent-ink: #253b29; --accent-bg: #2a402d; --accent-line: #607851;
+  --red: #f0aa96; --green: #bbd79d; --hover: #bdcfa614; --active: #d1e2b024;
+  --bar: #101f1c; --focus: #d6e5af;
+  --scene-ink: #f2f3df; --scene-muted: #c6d3c1; --scene-line: #c5d9c52b;
+  --scene-surface: #0f2729e8; --scene-soft: #17352e9c; --scene-accent: #d7e5b6; --scene-on-accent: #263b28;
+  --scene-overlay: linear-gradient(90deg, #071d20bd, #081e2415 75%), linear-gradient(0deg, #071b2088, transparent 65%);
+  color-scheme: dark;
 }
-
-:root[data-accent="green"] {
-  --accent: #177f45;
-  --accent-bg: #e9f5ee;
-  --accent-line: #bfe3ce;
-}
-:root[data-accent="purple"] {
-  --accent: #6941da;
-  --accent-bg: #f0ecfd;
-  --accent-line: #d5cbf8;
-}
-:root[data-accent="orange"] {
-  --accent: #b85c0a;
-  --accent-bg: #fdf1e6;
-  --accent-line: #f2d5b4;
-}
-
-:root[data-theme="dark"][data-accent="green"] {
-  --accent: #4caf79;
-  --accent-bg: #16281e;
-  --accent-line: #28452f;
-  --bar: #1c3a2a;
-}
-:root[data-theme="dark"][data-accent="purple"] {
-  --accent: #9a86f0;
-  --accent-bg: #221c38;
-  --accent-line: #3a3059;
-  --bar: #2c2450;
-}
-:root[data-theme="dark"][data-accent="orange"] {
-  --accent: #d98a3c;
-  --accent-bg: #2a1f14;
-  --accent-line: #46331f;
-  --bar: #3d2a17;
-}
-
-:root[data-radius="sharp"] {
-  --r: 3px;
-  --r-sm: 2px;
-}
-:root[data-radius="soft"] {
-  --r: 12px;
-  --r-sm: 9px;
-}
+:root[data-accent="blue"] { --accent: #355f6a; --accent-ink: #f7fffe; --accent-bg: #e0eceb; --accent-line: #a9c7c9; }
+:root[data-accent="purple"] { --accent: #67576e; --accent-ink: #fffbff; --accent-bg: #ebe4ed; --accent-line: #c5b5cd; }
+:root[data-accent="orange"] { --accent: #885b3c; --accent-ink: #fffaf1; --accent-bg: #efe4d7; --accent-line: #d7bca0; }
+:root[data-theme="dark"][data-accent="blue"] { --accent: #bddbdd; --accent-ink: #253d43; --accent-bg: #233c41; --accent-line: #57737c; }
+:root[data-theme="dark"][data-accent="purple"] { --accent: #d7c5de; --accent-ink: #3a2e41; --accent-bg: #392f40; --accent-line: #716079; }
+:root[data-theme="dark"][data-accent="orange"] { --accent: #e6c6a2; --accent-ink: #463323; --accent-bg: #3e3326; --accent-line: #826b50; }
+:root[data-radius="sharp"] { --r: 4px; --r-sm: 3px; --r-lg: 6px; }
+:root[data-radius="default"] { --r: 9px; --r-sm: 6px; --r-lg: 12px; }
+:root[data-radius="soft"] { --r: 12px; --r-sm: 8px; --r-lg: 16px; }
