@@ -3,6 +3,7 @@ mod error;
 mod account;
 mod instance;
 mod loader;
+mod logs;
 mod mods;
 mod net;
 mod plan;
@@ -62,7 +63,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "mirror"],
     })
 }
 
@@ -565,6 +566,42 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         }
     });
     Ok(t)
+}
+
+// ── 日志与诊断 ──────────────────────────────────────────────────
+
+fn instance_dir_of(instance_id: &str) -> Result<PathBuf, String> {
+    let game = game_root();
+    let inst = instance::find(&game, instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    Ok(PathBuf::from(inst.dir))
+}
+
+#[tauri::command]
+fn list_logs(instance_id: String) -> Result<Vec<logs::LogFile>, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    Ok(logs::list(&dir))
+}
+
+#[tauri::command]
+fn read_log(
+    instance_id: String,
+    log_id: String,
+    limit: Option<u32>,
+) -> Result<logs::LogText, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    logs::read(&dir, &log_id, limit)
+}
+
+/// 只生成脱敏预览；上传由用户在界面上确认后另行处理
+#[tauri::command]
+fn prepare_diagnosis(
+    instance_id: String,
+    log_ids: Vec<String>,
+    max_lines: Option<u32>,
+) -> Result<logs::DiagnosisPreview, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    logs::prepare(&dir, &log_ids, max_lines.unwrap_or(300))
 }
 
 // ── 安装计划 ────────────────────────────────────────────────────
@@ -1482,6 +1519,42 @@ pub fn selftest() -> i32 {
             }
         }
     }
+
+    // 日志与诊断预览
+    let log_dir = std::env::temp_dir().join(format!("astral-logs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&log_dir);
+    let _ = std::fs::create_dir_all(log_dir.join("logs"));
+    let _ = std::fs::create_dir_all(log_dir.join("crash-reports"));
+    let _ = std::fs::write(
+        log_dir.join("logs/latest.log"),
+        "line1\nline2\nAuthorization: Bearer abc123\ncontact steve@example.com\nfrom 192.168.1.20\n",
+    );
+    let _ = std::fs::write(log_dir.join("crash-reports/crash-1.txt"), "boom\n");
+    let logs_list = logs::list(&log_dir);
+    check!("logs listed", logs_list.len() == 2);
+    let latest = logs_list.iter().find(|l| l.name == "latest.log").cloned();
+    check!(
+        "log id stable",
+        latest
+            .as_ref()
+            .map(|l| l.id.starts_with("log_") && l.kind == "game")
+            .unwrap_or(false)
+    );
+    let tail = logs::read(&log_dir, &latest.as_ref().unwrap().id, Some(2)).expect("read log");
+    check!("log tail limit", tail.lines == 2 && tail.truncated);
+    check!(
+        "log unknown id rejected",
+        logs::read(&log_dir, "log_00000000", None).is_err()
+    );
+    let preview = logs::prepare(&log_dir, &[latest.unwrap().id], 50).expect("preview");
+    check!(
+        "diagnosis redacted",
+        preview.redactions >= 3
+            && preview.text.contains("<email>")
+            && preview.text.contains("<ip>")
+            && preview.text.contains("<redacted>")
+    );
+    let _ = std::fs::remove_dir_all(&log_dir);
 
     let cfg = core::Config::default();
     check!(
