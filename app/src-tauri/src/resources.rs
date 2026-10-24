@@ -77,6 +77,19 @@ pub struct ResourcePlan {
     pub download_bytes: u64,
     pub replaces: Option<String>,
     pub issues: Vec<crate::plan::PlanIssue>,
+    /// 解析得到的必需依赖（按顺序先装）
+    pub dependencies: Vec<PlannedDep>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedDep {
+    pub project_id: String,
+    pub version_id: String,
+    pub file_name: String,
+    pub size: u64,
+    pub sha1: Option<String>,
+    pub sha512: Option<String>,
 }
 
 pub struct StoredResourcePlan {
@@ -84,6 +97,7 @@ pub struct StoredResourcePlan {
     pub url: String,
     pub sha1: Option<String>,
     pub sha512: Option<String>,
+    pub dep_urls: Vec<(String, String)>, // (url, file_name)
     pub created_ms: i64,
 }
 
@@ -285,6 +299,55 @@ pub fn prepare(
         None
     };
 
+    // 解析必需依赖：目标目录里已有同名文件就跳过（视为已安装）
+    let mut deps: Vec<PlannedDep> = Vec::new();
+    let mut dep_urls: Vec<(String, String)> = Vec::new();
+    if needs_mc {
+        let loader_kind = inst.loader.as_ref().map(|l| l.kind.clone());
+        let mut checked = 0;
+        for d in &file.dependencies {
+            if d.kind != "required" {
+                continue;
+            }
+            if checked >= 10 {
+                break;
+            }
+            checked += 1;
+            let Some(pid) = &d.project_id else { continue };
+            let candidate = match &d.version_id {
+                Some(vid) => file_of_version(vid).ok(),
+                None => files(pid, Some(&inst.game_version), loader_kind.as_deref())
+                    .ok()
+                    .and_then(|v| v.into_iter().next()),
+            };
+            let Some(df) = candidate else {
+                issues.push(issue(
+                    "DEPENDENCY_CONFLICT",
+                    format!("依赖 {pid} 找不到兼容版本，需要手动处理"),
+                    true,
+                ));
+                continue;
+            };
+            if dir.join(&df.file_name).exists() {
+                continue;
+            }
+            if deps.iter().any(|x| x.file_name == df.file_name) {
+                continue;
+            }
+            dep_urls.push((df.url.clone(), df.file_name.clone()));
+            deps.push(PlannedDep {
+                project_id: pid.clone(),
+                version_id: df.version_id.clone(),
+                file_name: df.file_name.clone(),
+                size: df.size,
+                sha1: df.sha1.clone(),
+                sha512: df.sha512.clone(),
+            });
+        }
+    }
+
+    let total_bytes = file.size + deps.iter().map(|d| d.size).sum::<u64>();
+
     let plan = ResourcePlan {
         plan_id: format!("rplan_{:x}", crate::time::now_unix_ms()),
         revision: 1,
@@ -294,9 +357,10 @@ pub fn prepare(
         version_id: request.version_id.clone(),
         file_name: file.file_name.clone(),
         target_dir: dir.to_string_lossy().to_string(),
-        download_bytes: file.size,
+        download_bytes: total_bytes,
         replaces,
         issues,
+        dependencies: deps,
     };
 
     let mut s = store();
@@ -310,6 +374,7 @@ pub fn prepare(
             url: file.url.clone(),
             sha1: file.sha1.clone(),
             sha512: file.sha512.clone(),
+            dep_urls,
             created_ms: now,
         },
     );
@@ -339,10 +404,26 @@ pub fn execute(
     stored: &StoredResourcePlan,
     mut on: impl FnMut(u32, u32),
 ) -> Result<PathBuf, String> {
-    let dest = PathBuf::from(&stored.plan.target_dir).join(&stored.plan.file_name);
-    std::fs::create_dir_all(&stored.plan.target_dir)
-        .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
+    let dir = PathBuf::from(&stored.plan.target_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
 
+    // 先装必需依赖，再装本体
+    for (i, dep) in stored.plan.dependencies.iter().enumerate() {
+        let (url, _name) = &stored.dep_urls[i];
+        let dep_dest = dir.join(&dep.file_name);
+        crate::net::download_atomic(url, &dep_dest, dep.sha1.as_deref(), |c, t, _s, _ts| {
+            on(c, t);
+        })?;
+        if let Some(want) = &dep.sha512 {
+            let got = crate::net::sha512_file(&dep_dest)?;
+            if !got.eq_ignore_ascii_case(want) {
+                let _ = std::fs::remove_file(&dep_dest);
+                return Err(format!("HASH_MISMATCH|依赖校验失败|{}", dep.file_name));
+            }
+        }
+    }
+
+    let dest = dir.join(&stored.plan.file_name);
     crate::net::download_atomic(&stored.url, &dest, stored.sha1.as_deref(), |c, t, _s, _ts| {
         on(c, t);
     })?;

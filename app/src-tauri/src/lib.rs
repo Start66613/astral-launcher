@@ -1434,7 +1434,10 @@ pub fn selftest() -> i32 {
 
     // 可选的真实资源安装验证：ASTRAL_LIVE_RESOURCE="gameDir"
     if let Ok(dir) = std::env::var("ASTRAL_LIVE_RESOURCE") {
-        let game = std::path::PathBuf::from(&dir);
+        let mut spec = dir.split(|c| c == '|');
+        let game_dir = spec.next().unwrap_or("").to_string();
+        let project_id = spec.next().unwrap_or("AANobbMI").to_string();
+        let game = std::path::PathBuf::from(&game_dir);
         log.push_str(&format!("LIVE resource start: {dir}\n"));
         let meta = instance::InstanceMeta {
             id: instance::new_id(),
@@ -1451,14 +1454,14 @@ pub fn selftest() -> i32 {
         };
         let run = || -> Result<String, String> {
             let inst = instance::create(&game, &meta)?;
-            let files = resources::files("AANobbMI", Some("1.20.1"), Some("fabric"))?;
+            let files = resources::files(&project_id, Some("1.20.1"), Some("fabric"))?;
             let first = files
                 .first()
                 .ok_or_else(|| "VERSION_NOT_FOUND|没有兼容文件".to_string())?;
             let req = resources::ResourceInstallRequest {
                 instance_id: inst.id.clone(),
                 kind: "mod".into(),
-                project_id: "AANobbMI".into(),
+                project_id: project_id.clone(),
                 version_id: first.version_id.clone(),
                 world_id: None,
                 overwrite: false,
