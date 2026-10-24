@@ -395,6 +395,130 @@ pub fn install_loader(
 }
 
 /// 判断某个版本是否已完整安装（有版本 json 和 client jar）
+/// Forge / NeoForge 的 installer 下载地址
+pub fn installer_url(kind: &str, mc: &str, ver: &str) -> Result<String, String> {
+    let url = match kind {
+        "forge" => format!(
+            "https://maven.minecraftforge.net/net/minecraftforge/forge/{mc}-{ver}/forge-{mc}-{ver}-installer.jar"
+        ),
+        "neoforge" if mc == "1.20.1" => format!(
+            "https://maven.neoforged.net/releases/net/neoforged/forge/1.20.1-{ver}/forge-1.20.1-{ver}-installer.jar"
+        ),
+        "neoforge" => format!(
+            "https://maven.neoforged.net/releases/net/neoforged/neoforge/{ver}/neoforge-{ver}-installer.jar"
+        ),
+        other => return Err(format!("UNSUPPORTED|未知的安装器类型 {other}")),
+    };
+    Ok(url)
+}
+
+/// 找一个可用的 java：JAVA_HOME → 共享 jvm 目录 → PATH
+pub fn find_java(main_dir: &Path) -> Result<std::path::PathBuf, String> {
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("JAVA_HOME") {
+        cands.push(std::path::PathBuf::from(home).join("bin").join("java.exe"));
+    }
+    if let Ok(rd) = std::fs::read_dir(main_dir.join("jvm")) {
+        for e in rd.flatten() {
+            for sub in ["bin/java.exe", "bin/javaw.exe"] {
+                let p = e.path().join(sub);
+                if p.is_file() {
+                    cands.push(p);
+                }
+            }
+        }
+    }
+    for c in cands {
+        if c.is_file() {
+            return Ok(c);
+        }
+    }
+    if std::process::Command::new("java")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Ok(std::path::PathBuf::from("java"));
+    }
+    Err("JAVA_MISSING|找不到可用的 Java，无法运行安装器".into())
+}
+
+/// 用官方 installer 安装 Forge / NeoForge，返回生成的 version id
+pub fn install_forge_like(
+    kind: &str,
+    mc: &str,
+    ver: &str,
+    main_dir: &Path,
+    mut on: impl FnMut(Progress),
+) -> Result<String, String> {
+    let url = installer_url(kind, mc, ver)?;
+
+    let cache = main_dir.join(".astral").join("installers");
+    std::fs::create_dir_all(&cache).map_err(|e| format!("PERMISSION|创建缓存目录失败|{e}"))?;
+    let dest = cache.join(format!("{kind}-{mc}-{ver}-installer.jar"));
+
+    if !dest.is_file() {
+        on(blank("download", &format!("下载 {kind} 安装器")));
+        let mut progress = |c: u32, t: u32, _s: u32, _ts: u32| {
+            on(blank("download", &format!("下载安装器 {c}/{t}")));
+        };
+        crate::net::download_atomic(&url, &dest, None, &mut progress)?;
+    }
+
+    let before = scan_installed(main_dir);
+    let java = find_java(main_dir)?;
+
+    // Forge/NeoForge 安装器要求目标目录里有 launcher_profiles.json，否则直接退出
+    let profiles = main_dir.join("launcher_profiles.json");
+    if !profiles.is_file() {
+        let _ = std::fs::write(
+            &profiles,
+            r#"{"profiles":{},"settings":{},"version":3}"#,
+        );
+    }
+
+    on(blank("install", &format!("运行 {kind} 安装器")));
+
+    let output = std::process::Command::new(&java)
+        .arg("-jar")
+        .arg(&dest)
+        .arg("--installClient")
+        .arg(main_dir)
+        .current_dir(main_dir)
+        .output()
+        .map_err(|e| format!("JAVA_MISSING|无法运行安装器|{e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        let tail: Vec<String> = err
+            .lines()
+            .chain(out.lines())
+            .filter(|l| !l.trim().is_empty())
+            .rev()
+            .take(4)
+            .map(|s| s.to_string())
+            .collect();
+        return Err(format!(
+            "INTERNAL|{kind} 安装器执行失败|{}",
+            tail.join(" / ")
+        ));
+    }
+
+    let created: Vec<String> = scan_installed(main_dir)
+        .into_iter()
+        .filter(|v| !before.contains(v))
+        .collect();
+
+    created
+        .iter()
+        .find(|v| v.to_ascii_lowercase().contains(kind))
+        .cloned()
+        .or_else(|| created.first().cloned())
+        .ok_or_else(|| format!("INTERNAL|{kind} 安装器没有生成新版本|检查 Java 与目录权限"))
+}
+
 pub fn version_installed(dir: &Path, version: &str) -> bool {
     let v = dir.join("versions").join(version);
     v.join(format!("{version}.json")).exists() && v.join(format!("{version}.jar")).exists()

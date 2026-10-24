@@ -250,6 +250,7 @@ async fn start_create_instance(request: CreateInstanceRequest) -> Result<Task, S
             game_version: request.game_version,
             loader_kind: request.loader_kind,
             loader_version: request.loader_version,
+            launch_version: None,
             memory_mb: request.memory_mb,
             jvm_args: vec![],
             java_path: None,
@@ -393,10 +394,20 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
         };
         let t2 = tid.clone();
         let version = inst.game_version.clone();
-        let loader = inst
-            .loader
-            .as_ref()
-            .map(|l| (l.kind.clone(), l.version.clone()));
+        // Forge/NeoForge：启动 installer 生成的版本，不再走 fabric 装配
+        let is_installer_loader = matches!(inst.loader.as_ref().map(|l| l.kind.as_str()), Some("forge") | Some("neoforge"));
+        let version = if is_installer_loader {
+            inst.launch_version.clone().unwrap_or(version)
+        } else {
+            version
+        };
+        let loader = if is_installer_loader {
+            None
+        } else {
+            inst.loader
+                .as_ref()
+                .map(|l| (l.kind.clone(), l.version.clone()))
+        };
         let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             core::spawn_with(
                 &version,
@@ -537,6 +548,7 @@ async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, Stri
                 game_version: v.clone(),
                 loader_kind: p.request.loader.as_ref().map(|l| l.kind.clone()),
                 loader_version: p.request.loader.as_ref().map(|l| l.version.clone()),
+                launch_version: None,
                 memory_mb: p.request.memory_mb,
                 jvm_args: vec![],
                 java_path: None,
@@ -549,9 +561,20 @@ async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, Stri
 
             if let Some(l) = &p.request.loader {
                 let t2 = tid.clone();
-                core::install_loader(&v, &l.kind, &l.version, &game, &cfg.username, move |pr| {
-                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
-                })?;
+                if l.kind == "forge" || l.kind == "neoforge" {
+                    // installer 会生成 {mc}-forge-{ver} 之类的版本，记下来供启动使用
+                    let generated = core::install_forge_like(&l.kind, &v, &l.version, &game, move |pr| {
+                        task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                    })?;
+                    let mut meta = instance::read_meta(&game, &inst.id)
+                        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例元数据丢失".to_string())?;
+                    meta.launch_version = Some(generated);
+                    instance::save_meta(&game, &meta)?;
+                } else {
+                    core::install_loader(&v, &l.kind, &l.version, &game, &cfg.username, move |pr| {
+                        task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                    })?;
+                }
             }
             task::check_cancel(&tid)?;
 
@@ -634,28 +657,40 @@ async fn start_install_loader(
         let cfg = core::load_config();
         let main_dir = PathBuf::from(&cfg.game_dir);
         let t2 = tid.clone();
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            core::install_loader(
-                &inst.game_version,
-                &kind,
-                &version,
-                &main_dir,
-                &cfg.username,
-                move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
-            )
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Option<String>, String> {
+            if kind == "forge" || kind == "neoforge" {
+                // installer 产出的 version id 要记进实例，启动时用它
+                core::install_forge_like(&kind, &inst.game_version, &version, &main_dir, move |p| {
+                    task::progress(&t2, &p.stage, p.label, p.done, p.total);
+                })
+                .map(Some)
+            } else {
+                core::install_loader(
+                    &inst.game_version,
+                    &kind,
+                    &version,
+                    &main_dir,
+                    &cfg.username,
+                    move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                )
+                .map(|_| None)
+            }
         }))
         .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|加载器线程崩溃".to_string()));
         let late = task::is_cancelled(&tid);
         match res {
             Err(_) if late => task::cancelled(&tid),
             Err(e) => task::fail(&tid, e),
-            Ok(_) => {
+            Ok(generated) => {
                 let game = game_root();
                 // 元数据写入失败必须让任务失败，否则前端以为装好了但实例仍记不到 loader
                 let saved = match instance::read_meta(&game, &instance_id) {
                     Some(mut meta) => {
                         meta.loader_kind = Some(kind.clone());
                         meta.loader_version = Some(version.clone());
+                        if generated.is_some() {
+                            meta.launch_version = generated.clone();
+                        }
                         instance::save_meta(&game, &meta)
                     }
                     None => Err("INSTANCE_NOT_FOUND|实例元数据丢失".to_string()),
@@ -936,6 +971,7 @@ pub fn selftest() -> i32 {
         game_version: "1.20.1".into(),
         loader_kind: None,
         loader_version: None,
+        launch_version: None,
         memory_mb: None,
         jvm_args: vec![],
         java_path: None,
@@ -1222,16 +1258,55 @@ pub fn selftest() -> i32 {
     });
     let p_forge = plan::prepare(&plan_game, forge_req).expect("prepare forge");
     check!(
-        "plan rejects forge install",
-        p_forge
-            .issues
-            .iter()
-            .any(|i| i.blocking && i.code == "UNSUPPORTED")
+        "plan accepts forge",
+        p_forge.issues.iter().all(|i| !i.blocking)
+    );
+
+    check!(
+        "installer url forge",
+        core::installer_url("forge", "1.20.1", "47.2.0")
+            .map(|u| u.ends_with("forge-1.20.1-47.2.0-installer.jar"))
+            .unwrap_or(false)
+    );
+    check!(
+        "installer url neoforge",
+        core::installer_url("neoforge", "1.21.1", "21.1.72")
+            .map(|u| u.ends_with("neoforge-21.1.72-installer.jar"))
+            .unwrap_or(false)
+    );
+    check!(
+        "installer url neoforge 1.20.1",
+        core::installer_url("neoforge", "1.20.1", "47.1.106")
+            .map(|u| u.contains("net/neoforged/forge/1.20.1-47.1.106/"))
+            .unwrap_or(false)
     );
 
     let p_rev = plan::prepare(&plan_game, req.clone()).expect("prepare rev");
     check!("plan revision guard", plan::take(&p_rev.plan_id, 2).is_err());
     let _ = std::fs::remove_dir_all(&plan_game);
+
+    // 可选的真实安装验证：ASTRAL_LIVE_FORGE="mc|ver|dir"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_FORGE") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 3 {
+            let dir = std::path::PathBuf::from(parts[2]);
+            log.push_str(&format!("LIVE forge start: {spec}\n"));
+            let mut progress_lines = 0;
+            let r = core::install_forge_like("forge", parts[0], parts[1], &dir, |p| {
+                progress_lines += 1;
+                if progress_lines <= 5 {
+                    log.push_str(&format!("  forge: {} {}\n", p.stage, p.label));
+                }
+            });
+            match r {
+                Ok(id) => log.push_str(&format!("LIVE forge ok: {id}\n")),
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE forge failed: {e}\n"));
+                }
+            }
+        }
+    }
 
     let cfg = core::Config::default();
     check!(

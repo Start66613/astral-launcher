@@ -114,12 +114,7 @@ pub fn prepare(game: &std::path::Path, request: GameInstallRequest) -> Result<Ga
 
     if let Some(loader) = &request.loader {
         match loader.kind.as_str() {
-            "fabric" | "quilt" => {}
-            "forge" | "neoforge" => issues.push(issue(
-                "UNSUPPORTED",
-                format!("{} 的安装尚未实现，只能查询版本", loader.kind),
-                true,
-            )),
+            "fabric" | "quilt" | "forge" | "neoforge" => {}
             other => issues.push(issue("UNSUPPORTED", format!("未知加载器 {other}"), true)),
         }
     }

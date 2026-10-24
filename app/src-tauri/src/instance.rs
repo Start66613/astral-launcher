@@ -28,6 +28,9 @@ pub struct InstanceMeta {
     pub loader_kind: Option<String>,
     #[serde(default)]
     pub loader_version: Option<String>,
+    /// Forge/NeoForge installer 产出的 version id
+    #[serde(default)]
+    pub launch_version: Option<String>,
     #[serde(default)]
     pub memory_mb: Option<u32>,
     #[serde(default)]
@@ -73,6 +76,8 @@ pub struct Instance {
     pub name: String,
     pub game_version: String,
     pub loader: Option<LoaderRef>,
+    /// Forge/NeoForge 安装后生成的真实 version id（启动时用它）
+    pub launch_version: Option<String>,
     pub dir: String,
     pub dirs: InstanceDirs,
     pub mods_count: u32,
@@ -202,6 +207,7 @@ fn build(game: &Path, meta: InstanceMeta, stats: PlayStats, managed: bool) -> In
         id: meta.id.clone(),
         name: meta.name.clone(),
         game_version: meta.game_version.clone(),
+        launch_version: meta.launch_version.clone(),
         loader: match (&meta.loader_kind, &meta.loader_version) {
             (Some(k), Some(v)) => Some(LoaderRef {
                 kind: k.clone(),
@@ -265,6 +271,7 @@ pub fn discover(game: &Path, stats: &dyn Fn(&str) -> PlayStats) -> Vec<Instance>
                 game_version: name.clone(),
                 loader_kind: None,
                 loader_version: None,
+                launch_version: None,
                 memory_mb: None,
                 jvm_args: vec![],
                 java_path: None,
@@ -357,6 +364,7 @@ mod tests {
             game_version: "1.20.1".into(),
             loader_kind: None,
             loader_version: None,
+            launch_version: None,
             memory_mb: None,
             jvm_args: vec![],
             java_path: None,
