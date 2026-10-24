@@ -333,11 +333,19 @@ async fn start_install(
         let dir = PathBuf::from(&cfg.game_dir);
         let t2 = tid.clone();
         let v = game_version.clone();
-        let res = core::install(&game_version, &dir, &cfg.username, move |p| {
-            task::progress(&t2, &p.stage, p.label, p.done, p.total);
-        });
+        // 后台线程 panic 必须变成任务失败，不能让任务永远 running
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            core::install(&game_version, &dir, &cfg.username, move |p| {
+                task::progress(&t2, &p.stage, p.label, p.done, p.total);
+            })
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()));
         match res {
-            Ok(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            // 活儿已经干完才收到取消：如实报告完成，不假装已取消
+            Ok(_) if task::is_cancelled(&tid) => task::finish(
+                &tid,
+                serde_json::json!({ "kind": "install", "gameVersion": v, "cancelledLate": true }),
+            ),
             Ok(_) => task::finish(&tid, serde_json::json!({ "kind": "install", "gameVersion": v })),
             Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
             Err(e) => {
@@ -388,16 +396,19 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
             .loader
             .as_ref()
             .map(|l| (l.kind.clone(), l.version.clone()));
-        let spawned = core::spawn_with(
-            &version,
-            loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
-            &main_dir,
-            mc_dir.as_deref(),
-            &cfg.username,
-            inst.memory_mb,
-            &inst.jvm_args,
-            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
-        );
+        let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            core::spawn_with(
+                &version,
+                loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
+                &main_dir,
+                mc_dir.as_deref(),
+                &cfg.username,
+                inst.memory_mb,
+                &inst.jvm_args,
+                move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+            )
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|启动线程崩溃".to_string()));
 
         match spawned {
             Ok(mut child) => {
@@ -510,16 +521,21 @@ async fn start_install_loader(
         let cfg = core::load_config();
         let main_dir = PathBuf::from(&cfg.game_dir);
         let t2 = tid.clone();
-        let res = core::install_loader(
-            &inst.game_version,
-            &kind,
-            &version,
-            &main_dir,
-            &cfg.username,
-            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
-        );
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            core::install_loader(
+                &inst.game_version,
+                &kind,
+                &version,
+                &main_dir,
+                &cfg.username,
+                move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+            )
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|加载器线程崩溃".to_string()));
+        let late = task::is_cancelled(&tid);
         match res {
-            Ok(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Err(_) if late => task::cancelled(&tid),
+            Err(e) => task::fail(&tid, e),
             Ok(_) => {
                 let game = game_root();
                 // 元数据写入失败必须让任务失败，否则前端以为装好了但实例仍记不到 loader
@@ -539,13 +555,13 @@ async fn start_install_loader(
                             serde_json::json!({
                                 "kind": "loader",
                                 "loader": { "kind": kind, "version": version },
+                                "cancelledLate": late,
                             }),
                         );
                     }
                     Err(e) => task::fail(&tid, e),
                 }
             }
-            Err(e) => task::fail(&tid, e),
         }
     });
     Ok(t)
