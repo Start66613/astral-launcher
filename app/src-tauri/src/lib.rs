@@ -1,3 +1,4 @@
+mod components;
 mod core;
 mod error;
 mod account;
@@ -65,7 +66,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "java", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "java", "components", "mirror"],
     })
 }
 
@@ -568,6 +569,20 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         }
     });
     Ok(t)
+}
+
+// ── 光影支持组件 ────────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_component_catalog(
+    game_version: String,
+    loader: Option<String>,
+) -> Result<components::ComponentCatalog, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        components::catalog(&game_version, loader.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ── Java ────────────────────────────────────────────────────────
@@ -1818,6 +1833,36 @@ pub fn selftest() -> i32 {
         if rts.is_empty() {
             fails += 1;
             log.push_str("LIVE java failed: 没有找到任何 Java\n");
+        }
+    }
+
+    // 光影组件匹配逻辑
+    check!(
+        "component loader match",
+        components::loader_allows(&["fabric", "quilt"], Some("fabric"))
+            && components::loader_allows(&["fabric", "quilt"], Some("QUILT"))
+            && !components::loader_allows(&["fabric"], Some("forge"))
+            && !components::loader_allows(&["fabric"], None)
+    );
+
+    // 可选的真实组件目录：ASTRAL_LIVE_COMPONENTS="1.20.1|fabric"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_COMPONENTS") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let cat = components::catalog(parts[0], Some(parts[1]));
+            for c in &cat.shader_support {
+                log.push_str(&format!(
+                    "  component {} available={} version={:?} reason={:?}\n",
+                    c.id, c.available, c.version, c.unavailable_reason
+                ));
+            }
+            let iris = cat.shader_support.iter().find(|c| c.id == "iris");
+            if iris.map(|c| c.available).unwrap_or(false) {
+                log.push_str("LIVE components ok\n");
+            } else {
+                fails += 1;
+                log.push_str("LIVE components failed: iris 不可用\n");
+            }
         }
     }
 
