@@ -2,6 +2,7 @@ mod core;
 mod error;
 mod account;
 mod instance;
+mod java;
 mod loader;
 mod logs;
 mod modpack;
@@ -64,7 +65,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "java", "mirror"],
     })
 }
 
@@ -567,6 +568,40 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         }
     });
     Ok(t)
+}
+
+// ── Java ────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JavaReport {
+    runtimes: Vec<java::JavaRuntime>,
+    /// 当前选中实例需要的 Java 主版本（读不到为 null）
+    required_major: Option<u32>,
+    /// 建议使用的运行时（路径）
+    recommended: Option<String>,
+}
+
+#[tauri::command]
+async fn list_java_runtimes(instance_id: Option<String>) -> Result<JavaReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game = game_root();
+        let runtimes = java::scan(&game);
+        let required = instance_id
+            .as_deref()
+            .and_then(|id| instance::find(&game, id, &play_stats))
+            .and_then(|i| java::required_major(&game, &i.game_version));
+        let recommended = required
+            .and_then(|m| java::pick_for(&runtimes, m))
+            .map(|r| r.path);
+        JavaReport {
+            runtimes,
+            required_major: required,
+            recommended,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ── 整合包 ──────────────────────────────────────────────────────
@@ -1744,6 +1779,30 @@ pub fn selftest() -> i32 {
             }
         }
     }
+
+    // Java 探测的纯逻辑
+    check!(
+        "java major parse",
+        java::parse_major("1.8.0_402") == Some(8)
+            && java::parse_major("17.0.9") == Some(17)
+            && java::parse_major("25.0.1+8-LTS") == Some(25)
+            && java::parse_major("garbage").is_none()
+    );
+    let mk_java = |m: u32| java::JavaRuntime {
+        path: format!("j{m}"),
+        version: m.to_string(),
+        major: m,
+        vendor: "t".into(),
+        bits: Some(64),
+        source: "t".into(),
+    };
+    let rts = vec![mk_java(25), mk_java(21), mk_java(17)];
+    check!(
+        "java pick",
+        java::pick_for(&rts, 17).map(|r| r.major) == Some(17)
+            && java::pick_for(&rts, 18).map(|r| r.major) == Some(21)
+            && java::pick_for(&rts, 30).is_none()
+    );
 
     let cfg = core::Config::default();
     check!(
