@@ -3,7 +3,7 @@
 > 给 `app/src/lib/types.ts` 与 `app/src/lib/bridge.ts` 的新增代码块。
 > 承接 `docs/api-contract-bridge.md`（v3.2 那批），**只新增，不改旧签名**。
 >
-> 对应后端：`feature/astral-v2-core`，命令 51 个，`--selftest` 66 项。
+> 对应后端：`feature/astral-v2-core`，命令 54 个，`--selftest` 81 项。
 > 所有参数名按 Tauri v2 约定：Rust 的 `snake_case` 在 JS 侧是 `camelCase`。
 
 ---

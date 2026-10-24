@@ -48,7 +48,7 @@ Rust 的 test harness 会链入 `std` 的测试运行时，而这里唯一与"�
 
 | 机制 | 说明 |
 |---|---|
-| `astral.exe --selftest` | 66 项断言，跑在真实 app 二进制里（同一个 linker 产物，能正常加载） |
+| `astral.exe --selftest` | 81 项断言，跑在真实 app 二进制里（同一个 linker 产物，能正常加载） |
 | `%TEMP%\astral-selftest.log` | 人类可读的 PASS/FAIL 清单 |
 | `%TEMP%\astral-selftest.json` | 机器可读：`{ total, failed, checks: [{name, ok}] }` |
 | GitHub Actions | windows-latest 上构建后执行 `--selftest`，退出码非 0 即失败 |
