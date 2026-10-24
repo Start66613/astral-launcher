@@ -1221,14 +1221,6 @@ fn legacy_msg(encoded: String) -> String {
     }
 }
 
-struct DlgHandler<F: FnMut(u32, u32, u32, u32)>(F);
-
-impl<F: FnMut(u32, u32, u32, u32)> portablemc::download::Handler for DlgHandler<F> {
-    fn on_progress(&mut self, count: u32, total: u32, size: u32, total_size: u32) {
-        (self.0)(count, total, size, total_size)
-    }
-}
-
 #[tauri::command]
 async fn download_to(
     app: AppHandle,
@@ -1330,6 +1322,22 @@ pub fn run() {
             start_install_loader,
             list_loader_builds,
             list_target_worlds,
+            get_resource_project,
+            list_resource_files,
+            prepare_resource_install,
+            start_resource_install,
+            export_modpack,
+            check_mod_updates,
+            start_mod_update,
+            msa_status,
+            get_account,
+            get_component_catalog,
+            list_java_runtimes,
+            prepare_modpack_install,
+            start_modpack_install,
+            list_logs,
+            read_log,
+            prepare_diagnosis,
             install_version,
             launch_version,
             download_to

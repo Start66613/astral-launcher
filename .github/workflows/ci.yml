@@ -58,6 +58,11 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm exec vite build
 
+      # 挡住"写了命令却忘了注册"这类错误（V2 开发中真实发生过 16 个）
+      - name: 校验命令注册
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-commands.ps1
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2

@@ -2,8 +2,11 @@
 //!
 //! 前端 `bridge.ts` 按前两个 `|` 切开还原成 ApiError。
 //! 命令一律返回 `Result<T, String>`，这里负责把错误编成那个字符串。
+//!
+//! 错误码常量是公开词表（文档与调用方引用），代码里多用字符串字面量拼接，
+//! 因此允许部分常量暂时没有直接引用。
 
-use serde::Serialize;
+#![allow(dead_code)]
 
 pub const NETWORK: &str = "NETWORK";
 pub const DISK_FULL: &str = "DISK_FULL";

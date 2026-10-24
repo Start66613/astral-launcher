@@ -49,6 +49,8 @@ pub struct ModpackPlan {
 pub struct StoredModpackPlan {
     pub plan: ModpackPlan,
     pub pack_path: PathBuf,
+    /// 从请求带下来，安装实例时写入 instance.json
+    pub memory_mb: Option<u32>,
     pub created_ms: i64,
 }
 
@@ -76,6 +78,8 @@ fn issue(code: &str, message: impl Into<String>, blocking: bool) -> crate::plan:
 pub struct IndexFile {
     pub path: String,
     pub url: String,
+    /// 预留给进度与校验展示，暂未参与计算
+    #[allow(dead_code)]
     pub size: u64,
     pub sha1: Option<String>,
 }
@@ -231,6 +235,12 @@ pub fn prepare(game: &Path, req: ModpackRequest) -> Result<ModpackPlan, String> 
         .and_then(|f| f.as_array())
         .and_then(|a| a.first())
         .ok_or_else(|| "VERSION_NOT_FOUND|该整合包版本没有文件".to_string())?;
+    // 版本必须属于请求的项目，避免装错东西
+    if let Some(vp) = ver.get("project_id").and_then(|x| x.as_str()) {
+        if vp != req.project_id {
+            return Err("INVALID_VALUE|版本与项目不匹配".into());
+        }
+    }
     let url = file
         .get("url")
         .and_then(|u| u.as_str())
@@ -304,6 +314,7 @@ pub fn prepare(game: &Path, req: ModpackRequest) -> Result<ModpackPlan, String> 
         StoredModpackPlan {
             plan: plan.clone(),
             pack_path,
+            memory_mb: req.memory_mb,
             created_ms: now,
         },
     );
@@ -432,7 +443,7 @@ pub fn install(
         loader_kind: index.loader_kind.clone(),
         loader_version: index.loader_version.clone(),
         launch_version: None,
-        memory_mb: None,
+        memory_mb: stored.memory_mb,
         jvm_args: vec![],
         java_path: None,
         cover: None,
