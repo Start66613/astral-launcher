@@ -139,24 +139,172 @@ fn count_mods(mods: &Path) -> (u32, u32) {
     (on, off)
 }
 
+/// 健康检查：跟着 inheritsFrom 链看版本文件、依赖库、资源索引
+///
+/// 只报"能确定缺什么"，不做耗时校验（不逐个比对资源对象哈希）。
+/// 按 Mojang 的 rules 判断某个库在当前平台是否适用
+fn lib_allowed_for_platform(lib: &serde_json::Value) -> bool {
+    let Some(rules) = lib.get("rules").and_then(|r| r.as_array()) else {
+        return true;
+    };
+    if rules.is_empty() {
+        return true;
+    }
+    let os = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "osx"
+    } else {
+        "linux"
+    };
+    let mut allowed = false;
+    for r in rules {
+        let action = r.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        let os_match = match r.get("os") {
+            None => true,
+            Some(osv) => osv
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n == os)
+                .unwrap_or(true),
+        };
+        if os_match {
+            allowed = action == "allow";
+        }
+    }
+    allowed
+}
+
 fn health_of(game: &Path, version: &str) -> InstanceHealth {
-    let vdir = game.join("versions").join(version);
-    let json = vdir.join(format!("{version}.json"));
-    let jar = vdir.join(format!("{version}.jar"));
-    let mut reasons = Vec::new();
-    if !json.exists() {
-        reasons.push(format!("缺少版本文件 {version}.json"));
+    let mut reasons: Vec<String> = Vec::new();
+
+    // 1) 沿着 inheritsFrom 收集整条链
+    let mut chain: Vec<String> = Vec::new();
+    let mut cur = version.to_string();
+    for _ in 0..5 {
+        if chain.contains(&cur) {
+            break;
+        }
+        chain.push(cur.clone());
+        let json_path = game
+            .join("versions")
+            .join(&cur)
+            .join(format!("{cur}.json"));
+        let Ok(text) = std::fs::read_to_string(&json_path) else {
+            if cur == version {
+                reasons.push(format!("缺少版本文件 {cur}.json"));
+            }
+            break;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            reasons.push(format!("版本文件 {cur}.json 无法解析"));
+            break;
+        };
+        match v.get("inheritsFrom").and_then(|x| x.as_str()) {
+            Some(parent) => cur = parent.to_string(),
+            None => break,
+        }
     }
-    if !jar.exists() {
-        reasons.push(format!("缺少客户端 {version}.jar"));
+
+    // 2) 客户端 jar：整条链里任意一层有就行（Forge/NeoForge 继承原版）
+    let has_jar = chain.iter().any(|v| {
+        game.join("versions")
+            .join(v)
+            .join(format!("{v}.jar"))
+            .exists()
+    });
+    if !has_jar {
+        reasons.push(format!("缺少客户端 {version}.jar（含继承层）"));
     }
-    if !game.join("assets").exists() {
+
+    // 3) 依赖库：把链上所有 json 的 artifact 路径并起来，缺的计数
+    let mut missing_libs: Vec<String> = Vec::new();
+    for v in &chain {
+        let p = game.join("versions").join(v).join(format!("{v}.json"));
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(libs) = json.get("libraries").and_then(|l| l.as_array()) else {
+            continue;
+        };
+        for lib in libs {
+            if !lib_allowed_for_platform(lib) {
+                continue;
+            }
+            let Some(path) = lib
+                .get("downloads")
+                .and_then(|d| d.get("artifact"))
+                .and_then(|a| a.get("path"))
+                .and_then(|p| p.as_str())
+            else {
+                continue;
+            };
+            if !game.join("libraries").join(path).exists() && missing_libs.len() < 3 {
+                missing_libs.push(path.to_string());
+            }
+        }
+    }
+    let missing_count = if missing_libs.len() >= 3 {
+        "至少 3".to_string()
+    } else if missing_libs.is_empty() {
+        "0".to_string()
+    } else {
+        missing_libs.len().to_string()
+    };
+    if !missing_libs.is_empty() {
+        reasons.push(format!("缺少 {missing_count} 个依赖库（如 {}）", missing_libs[0]));
+    }
+
+    // 4) 资源索引：从链尾（根版本）取 assetIndex.id
+    let mut asset_index: Option<String> = None;
+    for v in chain.iter().rev() {
+        let p = game.join("versions").join(v).join(format!("{v}.json"));
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(id) = json
+            .get("assetIndex")
+            .and_then(|a| a.get("id"))
+            .and_then(|i| i.as_str())
+        {
+            asset_index = Some(id.to_string());
+            break;
+        }
+    }
+    if let Some(id) = asset_index {
+        if !game
+            .join("assets")
+            .join("indexes")
+            .join(format!("{id}.json"))
+            .exists()
+        {
+            reasons.push(format!("缺少资源索引 {id}.json（首次启动会自动下载）"));
+        }
+    } else if !game.join("assets").exists() {
         reasons.push("缺少 assets 资源目录".to_string());
     }
+
     InstanceHealth {
         ok: reasons.is_empty(),
         reasons,
     }
+}
+
+/// 自检用的平台规则入口
+#[allow(dead_code)]
+pub fn lib_allowed_for_test(lib: &serde_json::Value) -> bool {
+    lib_allowed_for_platform(lib)
+}
+
+/// 自检用的健康检查入口
+pub fn health_for_test(game: &Path, version: &str) -> InstanceHealth {
+    health_of(game, version)
 }
 
 /// 新建实例：建目录 + 写 instance.json

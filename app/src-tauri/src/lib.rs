@@ -2466,6 +2466,69 @@ pub fn selftest() -> i32 {
         task::get(&pt.task_id).map(|x| x.phase == "done").unwrap_or(false)
     );
 
+    // 健康检查：跟着 inheritsFrom 看 jar / 依赖库 / 资源索引
+    let hgame = std::env::temp_dir().join(format!("astral-health-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&hgame);
+    let _ = std::fs::create_dir_all(hgame.join("versions/1.20.1"));
+    let _ = std::fs::create_dir_all(hgame.join("versions/1.20.1-forge-47.2.0"));
+    let parent = r#"{"assetIndex":{"id":"5"},"libraries":[{"downloads":{"artifact":{"path":"org/ow2/asm/asm/9.5/asm-9.5.jar"}}}]}"#;
+    let child = r#"{"inheritsFrom":"1.20.1","libraries":[{"downloads":{"artifact":{"path":"net/forge/fmlloader/1.0/fmlloader-1.0.jar"}}}]}"#;
+    let _ = std::fs::write(hgame.join("versions/1.20.1/1.20.1.json"), parent);
+    let _ = std::fs::write(
+        hgame.join("versions/1.20.1-forge-47.2.0/1.20.1-forge-47.2.0.json"),
+        child,
+    );
+    let broken = instance::health_for_test(&hgame, "1.20.1-forge-47.2.0");
+    check!(
+        "health reports missing",
+        !broken.ok
+            && broken.reasons.iter().any(|r| r.contains("依赖库"))
+            && broken.reasons.iter().any(|r| r.contains("资源索引"))
+    );
+    // 补齐 jar / 库 / 索引后应当健康
+    let _ = std::fs::create_dir_all(hgame.join("versions/1.20.1"));
+    let _ = std::fs::write(hgame.join("versions/1.20.1/1.20.1.jar"), b"x");
+    let _ = std::fs::create_dir_all(hgame.join("libraries/org/ow2/asm/asm/9.5"));
+    let _ = std::fs::write(hgame.join("libraries/org/ow2/asm/asm/9.5/asm-9.5.jar"), b"x");
+    let _ = std::fs::create_dir_all(hgame.join("libraries/net/forge/fmlloader/1.0"));
+    let _ = std::fs::write(hgame.join("libraries/net/forge/fmlloader/1.0/fmlloader-1.0.jar"), b"x");
+    let _ = std::fs::create_dir_all(hgame.join("assets/indexes"));
+    let _ = std::fs::write(hgame.join("assets/indexes/5.json"), b"{}");
+    let healthy = instance::health_for_test(&hgame, "1.20.1-forge-47.2.0");
+    check!(
+        "health ok after fill",
+        healthy.ok && healthy.reasons.is_empty()
+    );
+    let _ = std::fs::remove_dir_all(&hgame);
+
+    // 可选的真实健康检查：ASTRAL_LIVE_HEALTH="gameDir"
+    if let Ok(dir) = std::env::var("ASTRAL_LIVE_HEALTH") {
+        let game = std::path::PathBuf::from(&dir);
+        let list = instance::discover(&game, &play_stats);
+        log.push_str(&format!("LIVE health instances={}\n", list.len()));
+        for i in list.iter().take(6) {
+            log.push_str(&format!(
+                "  {} ok={} reasons={:?}\n",
+                i.name, i.health.ok, i.health.reasons
+            ));
+        }
+        if list.is_empty() {
+            fails += 1;
+            log.push_str("LIVE health failed: 没发现实例\n");
+        }
+    }
+
+    // 平台规则：macOS 专用库不应在 Windows 上被判为缺失
+    let osx_only = serde_json::json!({"rules":[{"action":"allow","os":{"name":"osx"}}]});
+    let win_only = serde_json::json!({"rules":[{"action":"allow","os":{"name":"windows"}}]});
+    let generic = serde_json::json!({});
+    check!(
+        "platform rules",
+        !instance::lib_allowed_for_test(&osx_only)
+            && instance::lib_allowed_for_test(&win_only)
+            && instance::lib_allowed_for_test(&generic)
+    );
+
     let cfg = core::Config::default();
     check!(
         "config defaults",
