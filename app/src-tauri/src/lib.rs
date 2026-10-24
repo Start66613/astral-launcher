@@ -1308,6 +1308,56 @@ pub fn selftest() -> i32 {
         }
     }
 
+    // 可选的真实启动验证：ASTRAL_LIVE_LAUNCH="dir|version"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_LAUNCH") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let dir = std::path::PathBuf::from(parts[0]);
+            log.push_str(&format!("LIVE launch start: {spec}\n"));
+            let r = core::spawn_with(
+                parts[1],
+                None,
+                &dir,
+                Some(&dir),
+                "Steve",
+                Some(2048),
+                &[],
+                None,
+                |_p| {},
+            );
+            match r {
+                Ok(mut child) => {
+                    let pid = child.id();
+                    let mut alive_ticks = 0;
+                    for _ in 0..20 {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                log.push_str(&format!(
+                                    "LIVE launch exited early: code={:?}\n",
+                                    status.code()
+                                ));
+                                fails += 1;
+                                break;
+                            }
+                            _ => alive_ticks += 1,
+                        }
+                    }
+                    if alive_ticks >= 20 {
+                        log.push_str(&format!(
+                            "LIVE launch ok: pid {pid} still running after 60s\n"
+                        ));
+                        let _ = child.kill();
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE launch failed: {e}\n"));
+                }
+            }
+        }
+    }
+
     let cfg = core::Config::default();
     check!(
         "config defaults",
