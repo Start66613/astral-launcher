@@ -537,7 +537,7 @@ export function LiveGameInstaller({ version }: { version: string }) {
               依赖安装计划未提供，因此不会静默下载任何推荐组件。
             </p>
           </section>
-          {task && <TaskView task={task} />}
+          {task && <TaskView key={task.taskId} task={task} />}
           {error && (
             <div className="banner error" role="alert">
               {error}

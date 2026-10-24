@@ -37,6 +37,21 @@ export const installLoader = (
   version: string,
 ) => invokeLive<Task>("start_install_loader", { instanceId, kind, version });
 
+// Incremental core fields; keep the coordinated shared DTO untouched.
+export function hasCooperativeCancellation(
+  task: Task,
+): task is Task & { bootId: string; cancelling: boolean } {
+  const snapshot = task as Task & { bootId?: unknown; cancelling?: unknown };
+  return (
+    typeof snapshot.bootId === "string" &&
+    snapshot.bootId.length > 0 &&
+    typeof snapshot.cancelling === "boolean"
+  );
+}
+
+export const requestTaskCancellation = (taskId: string) =>
+  invokeLive<{ accepted: boolean }>("cancel_task", { taskId });
+
 /** Subscribe first, then reconcile. Timers query real state; never advance progress. */
 export async function waitForTask(
   task: Task,

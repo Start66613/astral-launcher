@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { Badge, Icon } from "./icons";
 import { usePreview } from "./state";
 import { Empty, Modal, Toggle, Effect } from "./App";
-import { waitForTask } from "./live-api";
+import {
+  hasCooperativeCancellation,
+  requestTaskCancellation,
+  waitForTask,
+} from "./live-api";
 import {
   deleteMod,
   getStats,
@@ -24,6 +28,39 @@ import type {
 } from "../lib/types";
 
 export function TaskView({ task }: { task: Task }) {
+  const { runtime } = usePreview();
+  const [requesting, setRequesting] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [cancelError, setCancelError] = useState("");
+  const requestLock = useRef(false);
+  useEffect(() => {
+    setAccepted(false);
+    setCancelError("");
+  }, [task.taskId]);
+  const supportsCancel = hasCooperativeCancellation(task);
+  const active = task.state === "queued" || task.state === "running";
+  const cancelling =
+    active && (accepted || (supportsCancel && task.cancelling));
+  async function cancel() {
+    if (requestLock.current || cancelling || !active || !supportsCancel) return;
+    requestLock.current = true;
+    setRequesting(true);
+    setCancelError("");
+    try {
+      const result = await requestTaskCancellation(task.taskId);
+      setAccepted(result.accepted);
+      if (!result.accepted)
+        setCancelError(
+          "核心未受理取消请求，任务可能已经结束，请查看最新状态。",
+        );
+      await runtime?.core.refresh();
+    } catch (cause) {
+      setCancelError(parseApiError(cause).message);
+    } finally {
+      requestLock.current = false;
+      setRequesting(false);
+    }
+  }
   return (
     <article
       className={`task-item task-${task.state}`}
@@ -41,15 +78,19 @@ export function TaskView({ task }: { task: Task }) {
       <div>
         <h3>{task.title}</h3>
         <p>
-          {task.state === "done"
-            ? "完成"
-            : task.state === "error"
-              ? "失败"
-              : task.state === "queued"
-                ? "排队中"
-                : task.state === "cancelled"
-                  ? "已取消"
-                  : `${task.stage} · ${task.label}`}
+          {cancelling
+            ? "正在取消…等待当前阶段停止"
+            : task.error?.code === "INTERRUPTED"
+              ? "上次退出时未完成"
+              : task.state === "done"
+                ? "完成"
+                : task.state === "error"
+                  ? "失败"
+                  : task.state === "queued"
+                    ? "排队中"
+                    : task.state === "cancelled"
+                      ? "已取消"
+                      : `${task.stage} · ${task.label}`}
         </p>
         {["running", "queued"].includes(task.state) && (
           <progress
@@ -69,6 +110,29 @@ export function TaskView({ task }: { task: Task }) {
         <small className="muted">
           任务 {task.taskId} · 修订 {task.revision}
         </small>
+        {supportsCancel && active && (
+          <div className="task-cancel">
+            <button
+              className="button secondary"
+              disabled={requesting || cancelling}
+              onClick={() => void cancel()}
+            >
+              {cancelling
+                ? "正在取消…"
+                : requesting
+                  ? "正在请求取消…"
+                  : "取消任务"}
+            </button>
+            <small className="muted">
+              在阶段边界停止；已下载文件保留。取消任务不会关闭已启动的游戏。
+            </small>
+          </div>
+        )}
+        {cancelError && (
+          <p className="error-text" role="alert">
+            {cancelError}
+          </p>
+        )}
       </div>
     </article>
   );
@@ -95,7 +159,7 @@ export function LiveTasks({ close }: { close: () => void }) {
         tasks.map((task) => <TaskView key={task.taskId} task={task} />)
       )}
       <p className="muted">
-        取消与跨重启任务恢复尚待核心支持；关闭列表不会伪装任务停止。
+        支持新契约的任务可请求取消，收到核心“已取消”才表示停止；旧核心不开放取消。历史未结束任务显示“上次退出时未完成”，不会自动续传。关闭列表不会停止任务。
       </p>
     </Modal>
   );
@@ -251,7 +315,7 @@ export function LiveMore() {
             />
           </label>
           <p className="muted">只创建独立配置。游戏文件仍需从下载页补全。</p>
-          {task && <TaskView task={task} />}
+          {task && <TaskView key={task.taskId} task={task} />}
           {error && (
             <p className="error-text" role="alert">
               {error}

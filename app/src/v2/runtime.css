@@ -97,6 +97,13 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.task-cancel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
 .project-icon {
   width: 58px;
   height: 58px;
