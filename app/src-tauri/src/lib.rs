@@ -1607,12 +1607,18 @@ pub fn selftest() -> i32 {
     // 可选的真实启动验证：ASTRAL_LIVE_LAUNCH="dir|version"
     if let Ok(spec) = std::env::var("ASTRAL_LIVE_LAUNCH") {
         let parts: Vec<&str> = spec.split('|').collect();
-        if parts.len() == 2 {
+        if parts.len() == 2 || parts.len() == 4 {
             let dir = std::path::PathBuf::from(parts[0]);
+            // 2 段：dir|version；4 段：dir|version|loaderKind|loaderVersion
+            let loader = if parts.len() == 4 {
+                Some((parts[2].to_string(), parts[3].to_string()))
+            } else {
+                None
+            };
             log.push_str(&format!("LIVE launch start: {spec}\n"));
             let r = core::spawn_with(
                 parts[1],
-                None,
+                loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
                 &dir,
                 Some(&dir),
                 "Steve",
