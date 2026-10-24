@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
   pull_request:
   workflow_dispatch:
 
@@ -34,3 +34,51 @@ jobs:
       - name: 前端构建
         working-directory: app
         run: pnpm exec vite build
+
+  rust:
+    name: Rust 构建 + 自检
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      # tauri::generate_context! 在编译期就要读 dist，所以先构建前端
+      - name: 构建前端
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec vite build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: cargo check
+        working-directory: app/src-tauri
+        run: cargo check --release
+
+      - name: 构建
+        working-directory: app/src-tauri
+        run: cargo build --release
+
+      # 自检退出码 = 失败项数，非 0 即失败
+      - name: 运行 --selftest
+        working-directory: app/src-tauri
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".\target\release\astral.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if (Test-Path "$env:TEMP\astral-selftest.log") {
+            Get-Content "$env:TEMP\astral-selftest.log" | Select-Object -Last 5
+          }
+          if ($p.ExitCode -ne 0) { Write-Error "selftest failed: $($p.ExitCode)"; exit 1 }
