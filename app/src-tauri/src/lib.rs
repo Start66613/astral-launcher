@@ -1,4 +1,4 @@
-﻿mod core;
+mod core;
 mod error;
 mod account;
 mod instance;
@@ -406,6 +406,7 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
                 &cfg.username,
                 inst.memory_mb,
                 &inst.jvm_args,
+                inst.java_path.as_deref().map(std::path::Path::new),
                 move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
             )
         }))

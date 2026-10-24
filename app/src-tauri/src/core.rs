@@ -261,7 +261,7 @@ pub fn spawn(
     on: impl FnMut(Progress),
 ) -> Result<std::process::Child, String> {
     spawn_with(
-        version, None, main_dir, mc_dir, username, memory_mb, extra_args, on,
+        version, None, main_dir, mc_dir, username, memory_mb, extra_args, None, on,
     )
 }
 
@@ -274,9 +274,22 @@ pub fn spawn_with(
     username: &str,
     memory_mb: Option<u32>,
     extra_args: &[String],
+    java_path: Option<&Path>,
     on: impl FnMut(Progress),
 ) -> Result<std::process::Child, String> {
     portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
+
+    // 自定义 Java：显式指定后不再自动探测/下载 JVM
+    let java_override: Option<PathBuf> = match java_path {
+        Some(p) if p.is_file() => Some(p.to_path_buf()),
+        Some(p) => {
+            return Err(format!(
+                "JAVA_MISSING|指定的 Java 不存在|{}",
+                p.to_string_lossy()
+            ))
+        }
+        None => None,
+    };
 
     // 实例内存与自定义 JVM 参数（契约 v3 §7）
     let mut jvm: Vec<String> = Vec::new();
@@ -305,6 +318,9 @@ pub fn spawn_with(
             if !jvm.is_empty() {
                 moj.base_mut().set_extra_jvm_args(jvm);
             }
+            if let Some(java) = &java_override {
+                moj.base_mut().set_jvm_override(Some(java.clone()));
+            }
             let saves = mc_dir
                 .map(|d| d.join("saves"))
                 .unwrap_or_else(|| main_dir.join("saves"));
@@ -327,6 +343,9 @@ pub fn spawn_with(
             }
             if !jvm.is_empty() {
                 inst.base_mut().set_extra_jvm_args(jvm);
+            }
+            if let Some(java) = &java_override {
+                inst.base_mut().set_jvm_override(Some(java.clone()));
             }
             apply_auth(&mut inst, username, Some(&saves));
             let game = inst
