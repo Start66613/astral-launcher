@@ -1,10 +1,11 @@
-mod core;
+﻿mod core;
 mod error;
 mod account;
 mod instance;
 mod loader;
 mod mods;
 mod net;
+mod plan;
 mod worlds;
 mod session;
 mod stats;
@@ -60,7 +61,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "mirror"],
     })
 }
 
@@ -486,6 +487,117 @@ fn get_stats(range: Option<String>) -> stats::Stats {
     })
 }
 
+// ── 安装计划 ────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn prepare_game_install(
+    request: plan::GameInstallRequest,
+) -> Result<plan::GameInstallPlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || plan::prepare(&game, request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, String> {
+    let p = plan::take(&plan_id, revision)?;
+    if let Some(first) = plan::has_blocking(&p) {
+        return Err(format!("{}|{}", first.code, first.message));
+    }
+
+    let t = task::create(
+        "game-install",
+        None,
+        Some(p.request.game_version.clone()),
+        format!("安装 {}", p.request.name),
+    );
+    let tid = t.task_id.clone();
+
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let cfg = core::load_config();
+        let v = p.request.game_version.clone();
+        let mut created: Option<String> = None;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Instance, String> {
+            if !core::version_installed(&game, &v) {
+                let t2 = tid.clone();
+                core::install(&v, &game, &cfg.username, move |pr| {
+                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                })?;
+            }
+            task::check_cancel(&tid)?;
+
+            let meta = instance::InstanceMeta {
+                id: p.target.proposed_instance_id.clone(),
+                name: p.request.name.trim().to_string(),
+                game_version: v.clone(),
+                loader_kind: p.request.loader.as_ref().map(|l| l.kind.clone()),
+                loader_version: p.request.loader.as_ref().map(|l| l.version.clone()),
+                memory_mb: p.request.memory_mb,
+                jvm_args: vec![],
+                java_path: None,
+                cover: None,
+                created_at: time::now_iso(),
+            };
+            let inst = instance::create(&game, &meta)?;
+            created = Some(inst.id.clone());
+            task::check_cancel(&tid)?;
+
+            if let Some(l) = &p.request.loader {
+                let t2 = tid.clone();
+                core::install_loader(&v, &l.kind, &l.version, &game, &cfg.username, move |pr| {
+                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                })?;
+            }
+            task::check_cancel(&tid)?;
+
+            let fresh = instance::find(&game, &inst.id, &play_stats)
+                .ok_or_else(|| "INTERNAL|安装后读不到实例".to_string())?;
+            if !fresh.health.ok {
+                return Err(format!(
+                    "VERIFY_FAILED|安装完成但文件不完整|{}",
+                    fresh.health.reasons.join("; ")
+                ));
+            }
+            Ok(fresh)
+        }));
+
+        match result {
+            Ok(Ok(inst)) => {
+                emit_instance_changed(&inst.id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({ "kind": "game-install", "instance": inst }),
+                );
+            }
+            Ok(Err(_)) if task::is_cancelled(&tid) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::cancelled(&tid);
+            }
+            Ok(Err(e)) => {
+                // 失败回滚：只删本次新建的实例目录
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::fail(&tid, e);
+            }
+            Err(_) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::fail(&tid, "INTERNAL|后台任务异常|安装线程崩溃".into());
+            }
+        }
+    });
+
+    Ok(t)
+}
+
 // ── 加载器 ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -740,6 +852,8 @@ pub fn run() {
             start_install,
             start_launch,
             start_create_instance,
+            prepare_game_install,
+            start_game_install,
             get_active_session,
             list_sessions,
             list_saves,
@@ -1069,6 +1183,54 @@ pub fn selftest() -> i32 {
         account::has_legacy_identity(&id_dir, "Steve")
     );
     let _ = std::fs::remove_dir_all(&id_dir);
+
+    // 安装计划：校验 → 一次性取走 → 改写/过期拒绝
+    let plan_game = std::env::temp_dir().join(format!("astral-plan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&plan_game);
+    let _ = std::fs::create_dir_all(plan_game.join("versions/1.20.1"));
+    let _ = std::fs::write(plan_game.join("versions/1.20.1/1.20.1.json"), "{}");
+    let _ = std::fs::write(plan_game.join("versions/1.20.1/1.20.1.jar"), "x");
+
+    let req = plan::GameInstallRequest {
+        name: "计划测试".into(),
+        game_version: "1.20.1".into(),
+        loader: None,
+        memory_mb: Some(2048),
+    };
+    let p = plan::prepare(&plan_game, req.clone()).expect("prepare");
+    check!(
+        "plan prepared",
+        p.plan_id.starts_with("plan_") && p.issues.iter().all(|i| !i.blocking)
+    );
+    check!("plan reuses installed", p.files.is_empty());
+    check!("plan take", plan::take(&p.plan_id, 1).is_ok());
+    check!("plan single use", plan::take(&p.plan_id, 1).is_err());
+
+    let mut bad_name = req.clone();
+    bad_name.name = "bad/name".into();
+    let p_bad = plan::prepare(&plan_game, bad_name).expect("prepare bad");
+    check!(
+        "plan rejects bad name",
+        p_bad.issues.iter().any(|i| i.blocking && i.code == "INVALID_NAME")
+    );
+
+    let mut forge_req = req.clone();
+    forge_req.loader = Some(plan::LoaderSelection {
+        kind: "forge".into(),
+        version: "47.2.0".into(),
+    });
+    let p_forge = plan::prepare(&plan_game, forge_req).expect("prepare forge");
+    check!(
+        "plan rejects forge install",
+        p_forge
+            .issues
+            .iter()
+            .any(|i| i.blocking && i.code == "UNSUPPORTED")
+    );
+
+    let p_rev = plan::prepare(&plan_game, req.clone()).expect("prepare rev");
+    check!("plan revision guard", plan::take(&p_rev.plan_id, 2).is_err());
+    let _ = std::fs::remove_dir_all(&plan_game);
 
     let cfg = core::Config::default();
     check!(
