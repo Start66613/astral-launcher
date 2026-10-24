@@ -6,6 +6,7 @@ mod loader;
 mod mods;
 mod net;
 mod plan;
+mod resources;
 mod worlds;
 mod session;
 mod stats;
@@ -61,7 +62,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "mirror"],
     })
 }
 
@@ -497,6 +498,73 @@ fn get_stats(range: Option<String>) -> stats::Stats {
     stats::stats(range.as_deref().unwrap_or("7d"), &|id| {
         names.get(id).cloned().unwrap_or_else(|| id.to_string())
     })
+}
+
+// ── 资源（Modrinth） ────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_resource_project(project_id: String) -> Result<resources::ResourceProject, String> {
+    tauri::async_runtime::spawn_blocking(move || resources::project(&project_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn list_resource_files(
+    project_id: String,
+    game_version: Option<String>,
+    loader: Option<String>,
+) -> Result<Vec<resources::ResourceFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resources::files(&project_id, game_version.as_deref(), loader.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn prepare_resource_install(
+    request: resources::ResourceInstallRequest,
+) -> Result<resources::ResourcePlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || resources::prepare(&game, request, &play_stats))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, String> {
+    let stored = resources::take(&plan_id, revision)?;
+    if let Some(first) = stored.plan.issues.iter().find(|i| i.blocking) {
+        return Err(format!("{}|{}", first.code, first.message));
+    }
+    let title = format!("安装 {}", stored.plan.file_name);
+    let t = task::create("resource-install", None, None, title);
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let t2 = tid.clone();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            resources::execute(&stored, move |c, total| {
+                task::progress(&t2, "download", format!("下载 {c}/{total}"), c, total);
+            })
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|资源安装线程崩溃".to_string()));
+
+        match res {
+            Ok(path) => task::finish(
+                &tid,
+                serde_json::json!({
+                    "kind": "resource-install",
+                    "path": path.to_string_lossy(),
+                    "file": stored.plan.file_name,
+                }),
+            ),
+            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
 }
 
 // ── 安装计划 ────────────────────────────────────────────────────
@@ -1360,6 +1428,54 @@ pub fn selftest() -> i32 {
                     fails += 1;
                     log.push_str(&format!("LIVE launch failed: {e}\n"));
                 }
+            }
+        }
+    }
+
+    // 可选的真实资源安装验证：ASTRAL_LIVE_RESOURCE="gameDir"
+    if let Ok(dir) = std::env::var("ASTRAL_LIVE_RESOURCE") {
+        let game = std::path::PathBuf::from(&dir);
+        log.push_str(&format!("LIVE resource start: {dir}\n"));
+        let meta = instance::InstanceMeta {
+            id: instance::new_id(),
+            name: "resource-test".into(),
+            game_version: "1.20.1".into(),
+            loader_kind: Some("fabric".into()),
+            loader_version: Some("0.16.9".into()),
+            launch_version: None,
+            memory_mb: None,
+            jvm_args: vec![],
+            java_path: None,
+            cover: None,
+            created_at: time::now_iso(),
+        };
+        let run = || -> Result<String, String> {
+            let inst = instance::create(&game, &meta)?;
+            let files = resources::files("AANobbMI", Some("1.20.1"), Some("fabric"))?;
+            let first = files
+                .first()
+                .ok_or_else(|| "VERSION_NOT_FOUND|没有兼容文件".to_string())?;
+            let req = resources::ResourceInstallRequest {
+                instance_id: inst.id.clone(),
+                kind: "mod".into(),
+                project_id: "AANobbMI".into(),
+                version_id: first.version_id.clone(),
+                world_id: None,
+                overwrite: false,
+            };
+            let rp = resources::prepare(&game, req, &play_stats)?;
+            if let Some(b) = rp.issues.iter().find(|i| i.blocking) {
+                return Err(format!("{}|{}", b.code, b.message));
+            }
+            let stored = resources::take(&rp.plan_id, 1)?;
+            let p = resources::execute(&stored, |_, _| {})?;
+            Ok(p.to_string_lossy().to_string())
+        };
+        match run() {
+            Ok(p) => log.push_str(&format!("LIVE resource ok: {p}\n")),
+            Err(e) => {
+                fails += 1;
+                log.push_str(&format!("LIVE resource failed: {e}\n"));
             }
         }
     }

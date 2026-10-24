@@ -156,6 +156,43 @@ pub fn download_atomic(
     Ok(size)
 }
 
+/// 文件的 SHA512（小写十六进制）
+pub fn sha512_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha512};
+    let mut f = std::fs::File::open(path).map_err(|e| format!("INVALID_PATH|文件不可读|{e}"))?;
+    let mut hasher = Sha512::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("INVALID_PATH|读取失败|{e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+/// 拉取 JSON（临时文件，不缓存），用于 Modrinth API
+pub fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
+    check_url(url)?;
+    let tmp = std::env::temp_dir().join(format!(
+        "astral-api-{:x}.json",
+        crate::time::now_unix_ms()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let mut single = portablemc::download::single(url, tmp.clone());
+    let res = single.download(());
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("NETWORK|请求失败|{e:?}"));
+    }
+    let text = std::fs::read_to_string(&tmp).map_err(|e| format!("INTERNAL|读取响应失败|{e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+    serde_json::from_str(&text).map_err(|e| format!("INTERNAL|响应不是合法 JSON|{e}"))
+}
+
 struct BridgeHandler<'a>(&'a mut dyn FnMut(u32, u32, u32, u32));
 
 impl portablemc::download::Handler for BridgeHandler<'_> {
