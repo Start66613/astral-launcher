@@ -1,3 +1,4 @@
+import AstralV2 from "./v2/App";
 import { useEffect, useRef, useState } from "react";
 import TitleBar from "./components/TitleBar";
 import Sidebar from "./components/Sidebar";
@@ -35,7 +36,7 @@ function loadSkin(): Skin {
 }
 function initialView(): View { return choose(location.hash.slice(1), VIEWS, "launch"); }
 
-export default function App() {
+export function LegacyApp() {
   const [view, setView] = useState<View>(initialView);
   const [downloadsVisited, setDownloadsVisited] = useState(initialView() === "download");
   const [modsVisited, setModsVisited] = useState(initialView() === "mods");
@@ -96,3 +97,5 @@ export default function App() {
     <Modal open={Boolean(windowError)} title="窗口操作未完成" onClose={() => setWindowError("")}><p className="error-message">{windowError}</p></Modal>
   </div>;
 }
+
+export default function App() { const runtime = useLocalLauncher(); return <AstralV2 runtime={runtime} />; }

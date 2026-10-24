@@ -18,6 +18,14 @@ vendor-probe/
 /preview/forest-tale/react/screenshots/
 /preview/forest-tale/react/test-results.json
 
+# Astral V2 可复现的设计验证产物
+/preview/astral-v2/dist/
+/preview/astral-v2/.vite/
+/preview/astral-v2/screenshots/
+/preview/astral-v2/test-results.json
+/preview/astral-v2/native-test/
+/preview/astral-v2/production-test-results.json
+
 # 系统
 .DS_Store
 Thumbs.db

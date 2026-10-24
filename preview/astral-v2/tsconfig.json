@@ -1,0 +1,12 @@
+{
+  "extends": "../../app/tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".", "types": [],
+    "paths": {
+      "react": ["../../app/node_modules/@types/react/index.d.ts"],
+      "react/jsx-runtime": ["../../app/node_modules/@types/react/jsx-runtime.d.ts"],
+      "react-dom/client": ["../../app/node_modules/@types/react-dom/client.d.ts"]
+    }
+  },
+  "include": ["src"]
+}
