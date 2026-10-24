@@ -48,6 +48,9 @@ pub struct Task {
     /// 发起该任务时的参数，用于失败后重试（不对外承诺稳定结构）
     #[serde(default)]
     pub retry_spec: Option<serde_json::Value>,
+    /// 稳定的启动阶段名，供启动动画使用（见 docs/v2/07 §20）
+    #[serde(default)]
+    pub phase: String,
 }
 
 pub fn now_iso() -> String {
@@ -185,6 +188,7 @@ pub fn create(
         boot_id: s.boot_id.clone(),
         cancelling: false,
         retry_spec: None,
+        phase: "queued".into(),
     };
     s.tasks.insert(task.task_id.clone(), task.clone());
     s.tokens
@@ -252,6 +256,7 @@ pub fn progress(task_id: &str, stage: &str, label: impl Into<String>, done: u32,
         t.done = done;
         t.total = total;
         t.state = "running".into();
+        t.phase = phase_of(&t.stage).to_string();
     });
 }
 
@@ -259,6 +264,7 @@ pub fn start(task_id: &str) {
     update(task_id, |t| {
         t.state = "running".into();
         t.stage = "resolve".into();
+        t.phase = "checking-files".into();
         t.label = "开始".into();
     });
 }
@@ -267,6 +273,12 @@ pub fn finish(task_id: &str, result: serde_json::Value) {
     update(task_id, |t| {
         t.state = "done".into();
         t.stage = "done".into();
+        // 启动任务完成 = 进程已创建；其他任务完成 = 真的做完
+        t.phase = if t.kind == "launch" {
+            "process-created".into()
+        } else {
+            "done".into()
+        };
         t.label = "完成".into();
         t.result = Some(result);
         t.ended_at = Some(now_iso());
@@ -279,6 +291,7 @@ pub fn fail(task_id: &str, encoded: String) {
     update(task_id, |t| {
         t.state = "error".into();
         t.stage = "error".into();
+        t.phase = "failed".into();
         t.label = err.message.clone();
         t.error = Some(err);
         t.ended_at = Some(now_iso());
@@ -354,6 +367,23 @@ pub fn check_cancel(task_id: &str) -> Result<(), String> {
         Err("CANCELLED|任务已取消".into())
     } else {
         Ok(())
+    }
+}
+
+/// 把内部 stage 映射成稳定 phase（供前端动画使用）
+pub fn phase_of(stage: &str) -> &'static str {
+    match stage {
+        "validate" => "validating",
+        "resolve" | "assets" | "extract" => "checking-files",
+        "jvm" => "preparing-java",
+        "download" => "downloading",
+        "launch" => "launching",
+        "spawned" => "process-created",
+        "done" => "done",
+        "error" => "failed",
+        "cancelled" => "cancelled",
+        "queued" => "queued",
+        _ => "checking-files",
     }
 }
 

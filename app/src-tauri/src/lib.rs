@@ -435,6 +435,7 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
                 .map(|l| (l.kind.clone(), l.version.clone()))
         };
         let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            task::progress(&tid, "validate", "检查实例与版本文件", 0, 0);
             core::spawn_with(
                 &version,
                 loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
@@ -452,6 +453,7 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
         match spawned {
             Ok(mut child) => {
                 let pid = child.id();
+                task::progress(&tid, "spawned", "进程已创建", 1, 1);
                 let sess = session::begin(&instance_id, &tid, pid);
                 task::finish(
                     &tid,
@@ -2439,6 +2441,30 @@ pub fn selftest() -> i32 {
             }
         }
     }
+
+    // 启动阶段映射：内部 stage → 稳定 phase
+    check!(
+        "phase mapping",
+        task::phase_of("validate") == "validating"
+            && task::phase_of("resolve") == "checking-files"
+            && task::phase_of("jvm") == "preparing-java"
+            && task::phase_of("download") == "downloading"
+            && task::phase_of("spawned") == "process-created"
+            && task::phase_of("error") == "failed"
+    );
+    let pt = task::create("phase-demo", None, None, "阶段演示");
+    task::progress(&pt.task_id, "jvm", "准备 Java", 1, 2);
+    check!(
+        "phase set on progress",
+        task::get(&pt.task_id)
+            .map(|x| x.phase == "preparing-java")
+            .unwrap_or(false)
+    );
+    task::finish(&pt.task_id, serde_json::json!({"ok": true}));
+    check!(
+        "phase set on finish",
+        task::get(&pt.task_id).map(|x| x.phase == "done").unwrap_or(false)
+    );
 
     let cfg = core::Config::default();
     check!(
