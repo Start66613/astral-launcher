@@ -3,6 +3,7 @@ mod error;
 mod instance;
 mod loader;
 mod mods;
+mod net;
 mod session;
 mod stats;
 mod task;
@@ -608,6 +609,7 @@ async fn download_to(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let cfg = core::load_config();
+        let game = PathBuf::from(&cfg.game_dir);
         let sub = match kind.as_str() {
             "resourcepack" => "resourcepacks",
             "shaderpack" => "shaderpacks",
@@ -618,30 +620,31 @@ async fn download_to(
         // 指定实例时落到实例目录（契约 v3 §5.7）
         let dir = match instance_id {
             Some(id) => {
-                let game = PathBuf::from(&cfg.game_dir);
                 let inst = instance::find(&game, &id, &play_stats)
                     .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
                 PathBuf::from(inst.dir).join(sub)
             }
-            None => PathBuf::from(&cfg.game_dir).join(sub),
+            None => game.join(sub),
         };
-        std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
 
         let safe = PathBuf::from(&filename)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "download.bin".into());
-        let dest = dir.join(&safe);
 
-        let mut single = portablemc::download::single(url, dest.clone());
+        // 目标必须落在游戏目录内（防空目录穿越与 junction 逃逸），且先落 .part
+        let dest = net::ensure_within(&game, &dir.join(&safe))?;
+
         let name = safe.clone();
         let app2 = app.clone();
-        let mut handler = DlgHandler(move |c: u32, tc: u32, s: u32, ts: u32| {
-            let _ = app2.emit("astral://file", (&name, c, tc, s, ts));
-        });
-        single
-            .download(&mut handler)
-            .map_err(|e| format!("NETWORK|下载失败|{e:?}"))?;
+        net::download_atomic(
+            &url,
+            &dest,
+            None,
+            move |c: u32, tc: u32, s: u32, ts: u32| {
+                let _ = app2.emit("astral://file", (&name, c, tc, s, ts));
+            },
+        )?;
         Ok(dest.to_string_lossy().to_string())
     })
     .await
@@ -886,6 +889,33 @@ pub fn selftest() -> i32 {
         "loader empty safe",
         loader::parse_fabric("[]").is_empty() && loader::parse_fabric("oops").is_empty()
     );
+
+    // 下载安全：来源白名单与路径边界
+    check!(
+        "url allow",
+        net::check_url("https://cdn.modrinth.com/data/x/y.jar").is_ok()
+            && net::check_url("https://bmclapi2.bangbang93.com/maven/a.jar").is_ok()
+    );
+    check!(
+        "url deny",
+        net::check_url("http://cdn.modrinth.com/a.jar").is_err()
+            && net::check_url("https://evil.example.com/a.jar").is_err()
+            && net::check_url("https://127.0.0.1/a.jar").is_err()
+            && net::check_url("https://user@cdn.modrinth.com/a.jar").is_err()
+            && net::check_url("file:///C:/a.jar").is_err()
+    );
+    let net_root = std::env::temp_dir().join(format!("astral-net-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&net_root);
+    let _ = std::fs::create_dir_all(&net_root);
+    check!(
+        "path within",
+        net::ensure_within(&net_root, &net_root.join("mods/a.jar")).is_ok()
+    );
+    check!(
+        "path escape",
+        net::ensure_within(&net_root, &net_root.join("..").join("escaped.jar")).is_err()
+    );
+    let _ = std::fs::remove_dir_all(&net_root);
 
     let cfg = core::Config::default();
     check!(

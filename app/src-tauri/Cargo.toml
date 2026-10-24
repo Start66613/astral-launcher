@@ -20,6 +20,7 @@ sysinfo = "0.33"
 portablemc = { path = "vendor/portablemc" }
 uuid = { version = "1", features = ["v3"] }
 zip = "9"
+sha1 = "0.10"
 
 [profile.release]
 codegen-units = 1
