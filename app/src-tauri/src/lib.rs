@@ -1345,9 +1345,12 @@ pub fn run() {
 pub fn selftest() -> i32 {
     let mut fails = 0i32;
     let mut log = String::new();
+    let mut results: Vec<(String, bool)> = Vec::new();
     macro_rules! check {
         ($name:expr, $cond:expr) => {{
-            if $cond {
+            let ok = $cond;
+            results.push(($name.to_string(), ok));
+            if ok {
                 log.push_str(&format!("PASS {}\n", $name));
             } else {
                 fails += 1;
@@ -2217,6 +2220,15 @@ pub fn selftest() -> i32 {
         .filter(|l| l.starts_with("PASS ") || l.starts_with("FAIL "))
         .count();
     log.push_str(&format!("\n{total} checks, {fails} failed\n"));
+    let json = serde_json::json!({
+        "total": results.len(),
+        "failed": fails,
+        "checks": results.iter().map(|(n, ok)| serde_json::json!({"name": n, "ok": ok})).collect::<Vec<_>>(),
+    });
+    let _ = std::fs::write(
+        std::env::temp_dir().join("astral-selftest.json"),
+        serde_json::to_string_pretty(&json).unwrap_or_default(),
+    );
     let _ = std::fs::write(std::env::temp_dir().join("astral-selftest.log"), &log);
     fails
 }
