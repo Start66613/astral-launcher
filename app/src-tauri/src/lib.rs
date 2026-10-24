@@ -67,7 +67,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "java", "components", "accounts", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "java", "components", "accounts", "updates", "mirror"],
     })
 }
 
@@ -598,6 +598,51 @@ async fn check_mod_updates(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 原子更新：先下新文件并校验，成功后才删旧文件
+#[tauri::command]
+async fn start_mod_update(
+    instance_id: String,
+    file_name: String,
+    project_id: String,
+    version_id: String,
+) -> Result<Task, String> {
+    let t = task::create(
+        "mod-update",
+        Some(instance_id.clone()),
+        None,
+        format!("更新 {file_name}"),
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let t2 = tid.clone();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            updates::apply_update(
+                &game,
+                &instance_id,
+                &file_name,
+                &project_id,
+                &version_id,
+                move |c, t, _s, _ts| {
+                    task::progress(&t2, "download", format!("下载 {c}/{t}"), c, t);
+                },
+            )
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|更新线程崩溃".to_string()));
+
+        match res {
+            Ok((new_file, removed)) => task::finish(
+                &tid,
+                serde_json::json!({ "kind": "mod-update", "file": new_file, "removed": removed }),
+            ),
+            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
 }
 
 // ── 账号 ────────────────────────────────────────────────────────
@@ -2058,6 +2103,53 @@ pub fn selftest() -> i32 {
             } else {
                 fails += 1;
                 log.push_str("LIVE updates failed: 实例不存在\n");
+            }
+        }
+    }
+
+    // 可选的真实更新执行：ASTRAL_LIVE_UPDATE_APPLY="gameDir|instanceId"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_UPDATE_APPLY") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let game = std::path::PathBuf::from(parts[0]);
+            match instance::find(&game, parts[1], &play_stats) {
+                Some(inst) => {
+                    let loader = inst.loader.as_ref().map(|l| l.kind.clone());
+                    let rep = updates::check(
+                        std::path::Path::new(&inst.dirs.mods),
+                        &inst.game_version,
+                        loader.as_deref(),
+                        Some(5),
+                    );
+                    if let Some(u) = rep.updates.first() {
+                        log.push_str(&format!(
+                            "LIVE update-apply start: {} -> {}\n",
+                            u.file_name, u.latest_version
+                        ));
+                        match updates::apply_update(
+                            &game,
+                            parts[1],
+                            &u.file_name,
+                            &u.project_id,
+                            &u.latest_version_id,
+                            |_, _, _, _| {},
+                        ) {
+                            Ok((new, removed)) => log.push_str(&format!(
+                                "LIVE update-apply ok: {removed} -> {new}\n"
+                            )),
+                            Err(e) => {
+                                fails += 1;
+                                log.push_str(&format!("LIVE update-apply failed: {e}\n"));
+                            }
+                        }
+                    } else {
+                        log.push_str("LIVE update-apply skip: 没有可更新的模组\n");
+                    }
+                }
+                None => {
+                    fails += 1;
+                    log.push_str("LIVE update-apply failed: 实例不存在\n");
+                }
             }
         }
     }

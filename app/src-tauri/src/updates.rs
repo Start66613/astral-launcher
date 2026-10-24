@@ -4,7 +4,7 @@
 //! 下最新的兼容文件。全部只读，不会改动文件。
 
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const API: &str = "https://api.modrinth.com/v2";
 
@@ -151,6 +151,70 @@ pub fn check(
 /// Modrinth 的数组参数形如 `["1.20.1"]`，做最小转义
 fn urlencoding(value: &str) -> String {
     format!("%5B%22{}%22%5D", value.replace('"', "%22"))
+}
+
+/// 执行一次模组更新：先下新文件并校验，成功后才删旧文件。
+///
+/// 返回 (新文件名, 被删除的旧文件名)。任何一步失败都保留旧文件。
+pub fn apply_update(
+    game: &Path,
+    instance_id: &str,
+    old_file: &str,
+    project_id: &str,
+    version_id: &str,
+    mut on: impl FnMut(u32, u32, u32, u32),
+) -> Result<(String, String), String> {
+    let stats = |_: &str| crate::instance::PlayStats::default();
+    let inst = crate::instance::find(game, instance_id, &stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let dir = PathBuf::from(&inst.dirs.mods);
+
+    // 旧文件必须真的存在，避免"更新"变成凭空多一个
+    let old_path = dir.join(old_file);
+    if !old_path.is_file() {
+        return Err("INVALID_PATH|要更新的模组文件不存在".into());
+    }
+
+    // 取目标版本的下载信息
+    let v = crate::net::fetch_json(&format!("{API}/version/{version_id}"))?;
+    if str_of(&v, "project_id").as_deref() != Some(project_id) {
+        return Err("INVALID_VALUE|版本与项目不匹配".into());
+    }
+    let files = v
+        .get("files")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| "INTERNAL|版本缺少文件".to_string())?;
+    let f = files
+        .iter()
+        .find(|x| x.get("primary").and_then(|p| p.as_bool()).unwrap_or(false))
+        .or_else(|| files.first())
+        .ok_or_else(|| "INTERNAL|版本没有可用文件".to_string())?;
+    let url = str_of(f, "url").ok_or_else(|| "INTERNAL|缺少下载地址".to_string())?;
+    let new_name = str_of(f, "filename").ok_or_else(|| "INTERNAL|缺少文件名".to_string())?;
+    let sha1 = f
+        .get("hashes")
+        .and_then(|h| str_of(h, "sha1"));
+    let sha512 = f
+        .get("hashes")
+        .and_then(|h| str_of(h, "sha512"));
+
+    let dest = dir.join(&new_name);
+    crate::net::download_atomic(&url, &dest, sha1.as_deref(), |c, t, s, ts| on(c, t, s, ts))?;
+
+    if let Some(want) = &sha512 {
+        let got = crate::net::sha512_file(&dest)?;
+        if !got.eq_ignore_ascii_case(want) {
+            let _ = std::fs::remove_file(&dest);
+            return Err("HASH_MISMATCH|新文件校验失败，已保留旧文件".into());
+        }
+    }
+
+    // 新文件到位后才删旧的；同名则说明是原地替换
+    if new_name != old_file {
+        std::fs::remove_file(&old_path)
+            .map_err(|e| format!("PERMISSION|删除旧文件失败|{e}"))?;
+    }
+    Ok((new_name, old_file.to_string()))
 }
 
 #[cfg(test)]
