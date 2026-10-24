@@ -757,6 +757,12 @@ fn retry_task(task_id: String) -> Result<Task, String> {
     }
 }
 
+/// 本项目下载过的 JDK（只读列表，删除需用户单独确认）
+#[tauri::command]
+fn list_managed_jdks() -> Vec<jdk::ManagedJdk> {
+    jdk::list_managed(&game_root())
+}
+
 // ── JDK 下载 ────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1483,6 +1489,7 @@ pub fn run() {
             get_component_catalog,
             list_java_runtimes,
             install_java,
+            list_managed_jdks,
             prepare_modpack_install,
             start_modpack_install,
             list_logs,

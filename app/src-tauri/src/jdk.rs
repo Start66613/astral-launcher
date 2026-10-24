@@ -177,3 +177,57 @@ mod tests {
         assert!(!(8..=30).contains(&7));
     }
 }
+
+/// 列出本项目下载过的 JDK（只读，不删除）
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedJdk {
+    pub major: u32,
+    pub dir: String,
+    pub bytes: u64,
+    pub java_path: Option<String>,
+}
+
+pub fn list_managed(game_dir: &Path) -> Vec<ManagedJdk> {
+    let root = game_dir.join("jvm");
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix("adoptium-") else {
+            continue;
+        };
+        let Ok(major) = rest.parse::<u32>() else {
+            continue;
+        };
+        let dir = e.path();
+        let mut bytes = 0u64;
+        fn walk(p: &Path, acc: &mut u64, depth: u32) {
+            if depth > 8 {
+                return;
+            }
+            let Ok(rd) = std::fs::read_dir(p) else { return };
+            for e in rd.flatten() {
+                let path = e.path();
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => walk(&path, acc, depth + 1),
+                    Ok(t) if t.is_file() => {
+                        *acc += e.metadata().map(|m| m.len()).unwrap_or(0)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        walk(&dir, &mut bytes, 0);
+        out.push(ManagedJdk {
+            major,
+            dir: dir.to_string_lossy().to_string(),
+            bytes,
+            java_path: find_java_exe(&dir).map(|p| p.to_string_lossy().to_string()),
+        });
+    }
+    out.sort_by_key(|j| j.major);
+    out
+}

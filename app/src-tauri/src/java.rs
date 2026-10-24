@@ -95,12 +95,24 @@ pub fn scan(game_dir: &Path) -> Vec<JavaRuntime> {
         cands.push((PathBuf::from(home).join("bin").join("java.exe"), "java_home"));
     }
 
-    // 启动器管理的 JVM
+    // 启动器管理的 JVM：可能是 jvm/<name>/bin/java.exe，
+    // 也可能是我们自己解压的 jvm/adoptium-<major>/<jdk 目录>/bin/java.exe
     if let Ok(rd) = std::fs::read_dir(game_dir.join("jvm")) {
         for e in rd.flatten() {
-            let p = e.path().join("bin").join("java.exe");
-            if p.is_file() {
-                cands.push((p, "game_jvm"));
+            let root = e.path();
+            let direct = root.join("bin").join("java.exe");
+            if direct.is_file() {
+                cands.push((direct, "game_jvm"));
+                continue;
+            }
+            if let Ok(inner) = std::fs::read_dir(&root) {
+                for sub in inner.flatten() {
+                    let p = sub.path().join("bin").join("java.exe");
+                    if p.is_file() {
+                        cands.push((p, "game_jvm"));
+                        break;
+                    }
+                }
             }
         }
     }
