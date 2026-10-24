@@ -958,6 +958,17 @@ pub fn selftest() -> i32 {
         session::stats_for("inst_selftest").last_played.is_some()
     );
 
+    // 按 pid 对账：pid 0 永不存活，重启后应被收尾并标记 reconciled
+    let _dead = session::begin("inst_reconcile", "task_r", 0);
+    session::reconcile();
+    let rec = session::list(Some("inst_reconcile"), 1);
+    check!(
+        "session reconcile",
+        rec.first()
+            .map(|s| s.reconciled && s.exit_code.is_none() && s.state == "exited")
+            .unwrap_or(false)
+    );
+
     let save = game.join("saves").join("World1");
     let _ = std::fs::create_dir_all(&save);
     let _ = std::fs::write(save.join("level.dat"), "x");
