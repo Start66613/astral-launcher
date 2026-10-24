@@ -157,21 +157,37 @@ fn health_of(game: &Path, version: &str) -> InstanceHealth {
 /// 新建实例：建目录 + 写 instance.json
 pub fn create(game: &Path, meta: &InstanceMeta) -> Result<Instance, String> {
     let dir = instance_dir(game, &meta.id);
+    // 同 id 已存在 → 拒绝覆盖，不静默重建
+    if dir.join("instance.json").exists() {
+        return Err("INSTANCE_EXISTS|该实例已存在，拒绝覆盖".into());
+    }
     std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建实例目录失败|{e}"))?;
     for sub in SUB_DIRS {
         std::fs::create_dir_all(dir.join(sub)).map_err(|e| format!("PERMISSION|创建 {sub} 失败|{e}"))?;
     }
     let text = serde_json::to_string_pretty(meta).map_err(|e| format!("INTERNAL|序列化失败|{e}"))?;
-    std::fs::write(dir.join("instance.json"), text)
-        .map_err(|e| format!("PERMISSION|写入 instance.json 失败|{e}"))?;
+    if let Err(e) = write_atomic(&dir.join("instance.json"), &text) {
+        // 失败不留半成品目录
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
     Ok(build(game, meta.clone(), PlayStats::default(), true))
+}
+
+/// 先写 `.part` 再替换，避免半截 JSON
+fn write_atomic(path: &std::path::Path, text: &str) -> Result<(), String> {
+    let tmp = path.with_extension("json.part");
+    std::fs::write(&tmp, text).map_err(|e| format!("PERMISSION|写入临时文件失败|{e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("PERMISSION|替换 instance.json 失败|{e}")
+    })
 }
 
 pub fn save_meta(game: &Path, meta: &InstanceMeta) -> Result<(), String> {
     let dir = instance_dir(game, &meta.id);
     let text = serde_json::to_string_pretty(meta).map_err(|e| format!("INTERNAL|序列化失败|{e}"))?;
-    std::fs::write(dir.join("instance.json"), text)
-        .map_err(|e| format!("PERMISSION|写入 instance.json 失败|{e}"))
+    write_atomic(&dir.join("instance.json"), &text)
 }
 
 fn build(game: &Path, meta: InstanceMeta, stats: PlayStats, managed: bool) -> Instance {

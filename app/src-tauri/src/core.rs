@@ -1,4 +1,4 @@
-//! 启动器核心：配置 / 版本列表 / 安装 / 启动。
+﻿//! 启动器核心：配置 / 版本列表 / 安装 / 启动。
 //!
 //! 安装与启动来自 `portablemc`（Apache-2.0），这里只做：读配置、
 //! 拼路径、把 crate 的事件翻译成前端进度。
@@ -7,7 +7,6 @@ use portablemc::base::{Event, Game, Handler};
 use portablemc::moj;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use uuid::Uuid;
 
 const VERSION_MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const BMCLAPI_MANIFEST: &str = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
@@ -201,8 +200,17 @@ impl<F: FnMut(Progress)> portablemc::fabric::Handler for Fwd<F> {
     }
 }
 
-fn offline_uuid(name: &str) -> Uuid {
-    Uuid::new_v3(&Uuid::NAMESPACE_OID, format!("OfflinePlayer:{name}").as_bytes())
+fn apply_auth(inst: &mut moj::Installer, username: &str, saves: Option<&Path>) {
+    // 已有存档若用的是旧 UUID 算法，继续沿用，避免玩家数据对不上
+    let legacy = saves
+        .map(|s| crate::account::has_legacy_identity(s, username))
+        .unwrap_or(false);
+    if legacy {
+        inst.set_auth_offline(crate::account::legacy_uuid(username), username.to_string());
+    } else {
+        // 标准离线 UUID：MD5("OfflinePlayer:username")
+        inst.set_auth_offline_username(username);
+    }
 }
 
 fn base_installer(version: &str, dir: &Path, username: &str) -> moj::Installer {
@@ -211,7 +219,7 @@ fn base_installer(version: &str, dir: &Path, username: &str) -> moj::Installer {
     base.set_main_dir(dir);
     base.set_launcher_name("Astral");
     base.set_launcher_version("0.1.0");
-    inst.set_auth_offline(offline_uuid(username), username.to_string());
+    inst.set_auth_offline_username(username);
     inst
 }
 
@@ -288,7 +296,10 @@ pub fn spawn_with(
             if !jvm.is_empty() {
                 moj.base_mut().set_extra_jvm_args(jvm);
             }
-            moj.set_auth_offline(offline_uuid(username), username.to_string());
+            let saves = mc_dir
+                .map(|d| d.join("saves"))
+                .unwrap_or_else(|| main_dir.join("saves"));
+            apply_auth(moj, username, Some(&saves));
 
             let game = inst
                 .install(Fwd(on))
@@ -298,6 +309,9 @@ pub fn spawn_with(
                 .map_err(|e| format!("JAVA_MISSING|无法启动 Java|{e}"))
         }
         None => {
+            let saves = mc_dir
+                .map(|d| d.join("saves"))
+                .unwrap_or_else(|| main_dir.join("saves"));
             let mut inst = base_installer(version, main_dir, username);
             if let Some(dir) = mc_dir {
                 inst.base_mut().set_mc_dir(dir);
@@ -305,6 +319,7 @@ pub fn spawn_with(
             if !jvm.is_empty() {
                 inst.base_mut().set_extra_jvm_args(jvm);
             }
+            apply_auth(&mut inst, username, Some(&saves));
             let game = inst
                 .install(Fwd(on))
                 .map_err(|e| format!("INTERNAL|启动失败|{e:?}"))?;
@@ -345,7 +360,7 @@ pub fn install_loader(
     moj.base_mut().set_main_dir(main_dir);
     moj.base_mut().set_launcher_name("Astral");
     moj.base_mut().set_launcher_version("0.1.0");
-    moj.set_auth_offline(offline_uuid(username), username.to_string());
+    moj.set_auth_offline_username(username);
     inst.install(Fwd(on))
         .map(|_| ())
         .map_err(|e| format!("INTERNAL|加载器安装失败|{e:?}"))

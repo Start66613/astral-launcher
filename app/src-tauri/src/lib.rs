@@ -1,5 +1,6 @@
 mod core;
 mod error;
+mod account;
 mod instance;
 mod loader;
 mod mods;
@@ -94,6 +95,8 @@ fn set_config(config: serde_json::Value) -> Result<Config, String> {
         }
     }
     cur = serde_json::from_value(merged).map_err(|e| format!("INVALID_NAME|配置格式不对|{e}"))?;
+    // 用户名会进 JVM 参数，必须是合法 ASCII，否则 portablemc 截断时可能 panic
+    account::validate_username(&cur.username)?;
     core::save_config(&cur)?;
     Ok(cur)
 }
@@ -351,6 +354,9 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
     let game = game_root();
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    // 启动前再校验一次用户名（配置可能是旧版本写的）
+    let cfg_now = core::load_config();
+    account::validate_username(&cfg_now.username)?;
     if session::active(Some(&instance_id)).is_some() {
         return error::fail(error::INSTANCE_BUSY, "该实例正在运行");
     }
@@ -516,19 +522,28 @@ async fn start_install_loader(
             Ok(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
             Ok(_) => {
                 let game = game_root();
-                if let Some(mut meta) = instance::read_meta(&game, &instance_id) {
-                    meta.loader_kind = Some(kind.clone());
-                    meta.loader_version = Some(version.clone());
-                    let _ = instance::save_meta(&game, &meta);
+                // 元数据写入失败必须让任务失败，否则前端以为装好了但实例仍记不到 loader
+                let saved = match instance::read_meta(&game, &instance_id) {
+                    Some(mut meta) => {
+                        meta.loader_kind = Some(kind.clone());
+                        meta.loader_version = Some(version.clone());
+                        instance::save_meta(&game, &meta)
+                    }
+                    None => Err("INSTANCE_NOT_FOUND|实例元数据丢失".to_string()),
+                };
+                match saved {
+                    Ok(_) => {
+                        emit_instance_changed(&instance_id, "updated");
+                        task::finish(
+                            &tid,
+                            serde_json::json!({
+                                "kind": "loader",
+                                "loader": { "kind": kind, "version": version },
+                            }),
+                        );
+                    }
+                    Err(e) => task::fail(&tid, e),
                 }
-                emit_instance_changed(&instance_id, "updated");
-                task::finish(
-                    &tid,
-                    serde_json::json!({
-                        "kind": "loader",
-                        "loader": { "kind": kind, "version": version },
-                    }),
-                );
             }
             Err(e) => task::fail(&tid, e),
         }
@@ -1000,6 +1015,33 @@ pub fn selftest() -> i32 {
         worlds::resolve(&saves_dir, "w_00000000").is_none()
     );
     let _ = std::fs::remove_dir_all(&saves_dir);
+
+    // 离线身份：用户名校验 + 旧 UUID 兼容检测
+    check!(
+        "username valid",
+        account::validate_username("Steve").is_ok() && account::validate_username("a_b1").is_ok()
+    );
+    check!(
+        "username invalid",
+        account::validate_username("ab").is_err()
+            && account::validate_username("玩家").is_err()
+            && account::validate_username("bad name").is_err()
+    );
+    let id_dir = std::env::temp_dir().join(format!("astral-identity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&id_dir);
+    check!(
+        "no legacy identity on empty",
+        !account::has_legacy_identity(&id_dir, "Steve")
+    );
+    let pd = id_dir.join("World1").join("playerdata");
+    let _ = std::fs::create_dir_all(&pd);
+    let legacy_file = format!("{}.dat", account::legacy_uuid("Steve").hyphenated());
+    let _ = std::fs::write(pd.join(&legacy_file), b"x");
+    check!(
+        "legacy identity detected",
+        account::has_legacy_identity(&id_dir, "Steve")
+    );
+    let _ = std::fs::remove_dir_all(&id_dir);
 
     let cfg = core::Config::default();
     check!(
