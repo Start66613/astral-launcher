@@ -51,6 +51,9 @@ pub struct Task {
     /// 稳定的启动阶段名，供启动动画使用（见 docs/v2/07 §20）
     #[serde(default)]
     pub phase: String,
+    /// 阶段的中文可读名（界面不必自己维护映射表）
+    #[serde(default)]
+    pub stage_label: String,
 }
 
 pub fn now_iso() -> String {
@@ -189,6 +192,7 @@ pub fn create(
         cancelling: false,
         retry_spec: None,
         phase: "queued".into(),
+        stage_label: "排队中".into(),
     };
     s.tasks.insert(task.task_id.clone(), task.clone());
     s.tokens
@@ -257,6 +261,7 @@ pub fn progress(task_id: &str, stage: &str, label: impl Into<String>, done: u32,
         t.total = total;
         t.state = "running".into();
         t.phase = phase_of(&t.stage).to_string();
+        t.stage_label = stage_label_of(&t.stage).to_string();
     });
 }
 
@@ -265,6 +270,7 @@ pub fn start(task_id: &str) {
         t.state = "running".into();
         t.stage = "resolve".into();
         t.phase = "checking-files".into();
+        t.stage_label = stage_label_of(&t.stage).to_string();
         t.label = "开始".into();
     });
 }
@@ -279,6 +285,7 @@ pub fn finish(task_id: &str, result: serde_json::Value) {
         } else {
             "done".into()
         };
+        t.stage_label = stage_label_of(&t.stage).to_string();
         t.label = "完成".into();
         t.result = Some(result);
         t.ended_at = Some(now_iso());
@@ -292,6 +299,7 @@ pub fn fail(task_id: &str, encoded: String) {
         t.state = "error".into();
         t.stage = "error".into();
         t.phase = "failed".into();
+        t.stage_label = "失败".into();
         t.label = err.message.clone();
         t.error = Some(err);
         t.ended_at = Some(now_iso());
@@ -384,6 +392,25 @@ pub fn phase_of(stage: &str) -> &'static str {
         "cancelled" => "cancelled",
         "queued" => "queued",
         _ => "checking-files",
+    }
+}
+
+/// 阶段的中文名，供界面直接显示
+pub fn stage_label_of(stage: &str) -> &'static str {
+    match stage {
+        "queued" => "排队中",
+        "validate" => "检查实例与版本",
+        "resolve" => "解析版本",
+        "download" => "下载文件",
+        "assets" => "校验资源文件",
+        "jvm" => "准备 Java",
+        "extract" => "解包文件",
+        "launch" => "组装启动参数",
+        "spawned" => "进程已创建",
+        "done" => "完成",
+        "error" => "失败",
+        "cancelled" => "已取消",
+        _ => "处理中",
     }
 }
 

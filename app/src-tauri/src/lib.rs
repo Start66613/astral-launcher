@@ -2529,6 +2529,22 @@ pub fn selftest() -> i32 {
             && instance::lib_allowed_for_test(&generic)
     );
 
+    // 阶段中文名
+    check!(
+        "stage label mapping",
+        task::stage_label_of("jvm") == "准备 Java"
+            && task::stage_label_of("download") == "下载文件"
+            && task::stage_label_of("spawned") == "进程已创建"
+    );
+    let lbl = task::create("label-demo", None, None, "标签演示");
+    task::progress(&lbl.task_id, "download", "下载中", 1, 2);
+    check!(
+        "stage label set",
+        task::get(&lbl.task_id)
+            .map(|x| x.stage_label == "下载文件" && x.phase == "downloading")
+            .unwrap_or(false)
+    );
+
     let cfg = core::Config::default();
     check!(
         "config defaults",
