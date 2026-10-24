@@ -16,6 +16,7 @@ mod session;
 mod stats;
 mod task;
 mod time;
+mod updates;
 
 use core::Config;
 use instance::Instance;
@@ -574,6 +575,29 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         }
     });
     Ok(t)
+}
+
+// ── 模组更新检查 ────────────────────────────────────────────────
+
+#[tauri::command]
+async fn check_mod_updates(
+    instance_id: String,
+    limit: Option<u32>,
+) -> Result<updates::UpdateReport, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || {
+        let inst = instance::find(&game, &instance_id, &play_stats)
+            .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+        let loader = inst.loader.as_ref().map(|l| l.kind.clone());
+        Ok(updates::check(
+            std::path::Path::new(&inst.dirs.mods),
+            &inst.game_version,
+            loader.as_deref(),
+            limit,
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 账号 ────────────────────────────────────────────────────────
@@ -1999,6 +2023,43 @@ pub fn selftest() -> i32 {
             }
         }
         log.push_str("LIVE reskinds done\n");
+    }
+
+    // 可选的真实更新检查：ASTRAL_LIVE_UPDATES="gameDir|instanceId"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_UPDATES") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let game = std::path::PathBuf::from(parts[0]);
+            if let Some(inst) = instance::find(&game, parts[1], &play_stats) {
+                let loader = inst.loader.as_ref().map(|l| l.kind.clone());
+                let rep = updates::check(
+                    std::path::Path::new(&inst.dirs.mods),
+                    &inst.game_version,
+                    loader.as_deref(),
+                    Some(20),
+                );
+                log.push_str(&format!(
+                    "LIVE updates checked={} unknown={} updates={} skipped={}\n",
+                    rep.checked,
+                    rep.unknown,
+                    rep.updates.len(),
+                    rep.skipped
+                ));
+                for u in rep.updates.iter().take(5) {
+                    log.push_str(&format!(
+                        "  update {} {} -> {}\n",
+                        u.file_name, u.current_version, u.latest_version
+                    ));
+                }
+                if rep.checked == 0 {
+                    fails += 1;
+                    log.push_str("LIVE updates failed: 没有识别出任何 Modrinth 文件\n");
+                }
+            } else {
+                fails += 1;
+                log.push_str("LIVE updates failed: 实例不存在\n");
+            }
+        }
     }
 
     let cfg = core::Config::default();
