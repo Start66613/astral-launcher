@@ -1285,24 +1285,30 @@ pub fn selftest() -> i32 {
     check!("plan revision guard", plan::take(&p_rev.plan_id, 2).is_err());
     let _ = std::fs::remove_dir_all(&plan_game);
 
-    // 可选的真实安装验证：ASTRAL_LIVE_FORGE="mc|ver|dir"
+    // 可选的真实安装验证：ASTRAL_LIVE_FORGE="mc|ver|dir" 或 "kind|mc|ver|dir"
     if let Ok(spec) = std::env::var("ASTRAL_LIVE_FORGE") {
-        let parts: Vec<&str> = spec.split('|').collect();
+        let raw: Vec<&str> = spec.split('|').collect();
+        let parts: Vec<&str> = if raw.len() == 4 {
+            raw[1..].to_vec()
+        } else {
+            raw.clone()
+        };
+        let kind = if raw.len() == 4 { raw[0] } else { "forge" };
         if parts.len() == 3 {
             let dir = std::path::PathBuf::from(parts[2]);
-            log.push_str(&format!("LIVE forge start: {spec}\n"));
+            log.push_str(&format!("LIVE {kind} start: {spec}\n"));
             let mut progress_lines = 0;
-            let r = core::install_forge_like("forge", parts[0], parts[1], &dir, |p| {
+            let r = core::install_forge_like(kind, parts[0], parts[1], &dir, |p| {
                 progress_lines += 1;
                 if progress_lines <= 5 {
-                    log.push_str(&format!("  forge: {} {}\n", p.stage, p.label));
+                    log.push_str(&format!("  {kind}: {} {}\n", p.stage, p.label));
                 }
             });
             match r {
-                Ok(id) => log.push_str(&format!("LIVE forge ok: {id}\n")),
+                Ok(id) => log.push_str(&format!("LIVE {kind} ok: {id}\n")),
                 Err(e) => {
                     fails += 1;
-                    log.push_str(&format!("LIVE forge failed: {e}\n"));
+                    log.push_str(&format!("LIVE {kind} failed: {e}\n"));
                 }
             }
         }
@@ -1366,7 +1372,11 @@ pub fn selftest() -> i32 {
 
     let _ = std::fs::remove_dir_all(&game);
 
-    let total = log.lines().count();
+    // 只统计 PASS/FAIL 行，避免把 LIVE 等诊断行算进断言数
+    let total = log
+        .lines()
+        .filter(|l| l.starts_with("PASS ") || l.starts_with("FAIL "))
+        .count();
     log.push_str(&format!("\n{total} checks, {fails} failed\n"));
     let _ = std::fs::write(std::env::temp_dir().join("astral-selftest.log"), &log);
     fails

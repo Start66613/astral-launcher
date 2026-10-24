@@ -444,6 +444,22 @@ pub fn find_java(main_dir: &Path) -> Result<std::path::PathBuf, String> {
     Err("JAVA_MISSING|找不到可用的 Java，无法运行安装器".into())
 }
 
+/// 从环境变量取代理（http://host:port 或 host:port）
+fn proxy_from_env() -> Option<(String, String)> {
+    for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        if let Ok(raw) = std::env::var(key) {
+            let s = raw.trim().trim_start_matches("http://").trim_start_matches("https://");
+            let s = s.trim_end_matches('/');
+            if let Some((host, port)) = s.rsplit_once(':') {
+                if !host.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+                    return Some((host.to_string(), port.to_string()));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 用官方 installer 安装 Forge / NeoForge，返回生成的 version id
 pub fn install_forge_like(
     kind: &str,
@@ -480,16 +496,39 @@ pub fn install_forge_like(
 
     on(blank("install", &format!("运行 {kind} 安装器")));
 
-    let output = std::process::Command::new(&java)
-        .arg("-jar")
-        .arg(&dest)
-        .arg("--installClient")
-        .arg(main_dir)
-        .current_dir(main_dir)
-        .output()
-        .map_err(|e| format!("JAVA_MISSING|无法运行安装器|{e}"))?;
+    // 安装器可重入（已下载的库会跳过），网络抖动时重试一次往往就过了
+    let mut last_tail = String::new();
+    let mut succeeded = false;
+    for attempt in 0..2u32 {
+        let mut cmd = std::process::Command::new(&java);
+        // JVM 参数必须在 -jar 之前，否则会被安装器当成自己的参数
+        if let Some((host, port)) = proxy_from_env() {
+            for scheme in ["http", "https"] {
+                cmd.arg(format!("-D{scheme}.proxyHost={host}"))
+                    .arg(format!("-D{scheme}.proxyPort={port}"));
+            }
+        }
+        cmd.arg("-jar")
+            .arg(&dest)
+            .arg("--installClient")
+            .arg(main_dir);
 
-    if !output.status.success() {
+        let output = cmd
+            .current_dir(main_dir)
+            .output()
+            .map_err(|e| format!("JAVA_MISSING|无法运行安装器|{e}"))?;
+
+        if output.status.success() {
+            succeeded = true;
+            break;
+        }
+
+        // 失败：清掉这次写出来的半成品版本目录
+        for v in scan_installed(main_dir) {
+            if !before.contains(&v) {
+                let _ = std::fs::remove_dir_all(main_dir.join("versions").join(&v));
+            }
+        }
         let err = String::from_utf8_lossy(&output.stderr);
         let out = String::from_utf8_lossy(&output.stdout);
         let tail: Vec<String> = err
@@ -500,10 +539,16 @@ pub fn install_forge_like(
             .take(4)
             .map(|s| s.to_string())
             .collect();
-        return Err(format!(
-            "INTERNAL|{kind} 安装器执行失败|{}",
-            tail.join(" / ")
-        ));
+        last_tail = tail.join(" / ");
+
+        if attempt == 0 {
+            on(blank("install", &format!("{kind} 安装器失败，重试一次")));
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+
+    if !succeeded {
+        return Err(format!("INTERNAL|{kind} 安装器执行失败|{last_tail}"));
     }
 
     let created: Vec<String> = scan_installed(main_dir)
