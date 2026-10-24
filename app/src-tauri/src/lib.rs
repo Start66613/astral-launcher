@@ -5,6 +5,7 @@ mod export;
 mod account;
 mod instance;
 mod java;
+mod jdk;
 mod loader;
 mod logs;
 mod modpack;
@@ -756,6 +757,44 @@ fn retry_task(task_id: String) -> Result<Task, String> {
     }
 }
 
+// ── JDK 下载 ────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn install_java(major: u32) -> Result<Task, String> {
+    if task::has_running_kind("jdk", None, None) {
+        return Err("BUSY|已有 Java 下载任务在运行".into());
+    }
+    let t = task::create("jdk", None, None, format!("下载 Java {major}"));
+    task::set_retry_spec(&t.task_id, serde_json::json!({ "kind": "install-java", "major": major }));
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let t2 = tid.clone();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            jdk::install(major, &game, move |stage, done, total| {
+                task::progress(&t2, stage, format!("Java {major} {done}/{total}"), done, total);
+            })
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|Java 下载线程崩溃".to_string()));
+
+        match res {
+            Ok(r) => task::finish(
+                &tid,
+                serde_json::json!({
+                    "kind": "install-java",
+                    "major": r.major,
+                    "version": r.version,
+                    "path": r.path,
+                }),
+            ),
+            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
+}
+
 // ── 账号 ────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
@@ -1443,6 +1482,7 @@ pub fn run() {
             get_account,
             get_component_catalog,
             list_java_runtimes,
+            install_java,
             prepare_modpack_install,
             start_modpack_install,
             list_logs,
@@ -2357,6 +2397,41 @@ pub fn selftest() -> i32 {
         "retry accepts known kind",
         retry_spec_of(&ok_spec.task_id).map(|(k, _)| k == "install").unwrap_or(false)
     );
+
+    // 可选的真实 JDK 下载：ASTRAL_LIVE_JDK="major|gameDir"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_JDK") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let major: u32 = parts[0].parse().unwrap_or(21);
+            let game = std::path::PathBuf::from(parts[1]);
+            log.push_str(&format!("LIVE jdk start: java {major}\n"));
+            match jdk::install(major, &game, |_s, _d, _t| {}) {
+                Ok(r) => {
+                    log.push_str(&format!(
+                        "LIVE jdk ok: version={} path={} bytes={}\n",
+                        r.version, r.path, r.bytes
+                    ));
+                    match std::process::Command::new(&r.path).arg("-version").output() {
+                        Ok(o) => {
+                            let txt = String::from_utf8_lossy(&o.stderr).to_string();
+                            log.push_str(&format!(
+                                "LIVE jdk runs: {}\n",
+                                txt.lines().next().unwrap_or("")
+                            ));
+                        }
+                        Err(e) => {
+                            fails += 1;
+                            log.push_str(&format!("LIVE jdk runs failed: {e}\n"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE jdk failed: {e}\n"));
+                }
+            }
+        }
+    }
 
     let cfg = core::Config::default();
     check!(

@@ -28,6 +28,9 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "maven.neoforged.net",
     "meta.quiltmc.org",
     "maven.quiltmc.org",
+    // JDK 下载（Adoptium；下载后另有 SHA256 校验）
+    "api.adoptium.net",
+    "github.com",
     // 国内镜像
     "bmclapi2.bangbang93.com",
 ];
@@ -161,6 +164,24 @@ pub fn sha512_file(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha512};
     let mut f = std::fs::File::open(path).map_err(|e| format!("INVALID_PATH|文件不可读|{e}"))?;
     let mut hasher = Sha512::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("INVALID_PATH|读取失败|{e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+/// 文件的 SHA256（小写十六进制）
+pub fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(path).map_err(|e| format!("INVALID_PATH|文件不可读|{e}"))?;
+    let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = f
