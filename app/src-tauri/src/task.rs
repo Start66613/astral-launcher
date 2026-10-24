@@ -388,6 +388,23 @@ pub fn snapshot(state: Option<&str>, kind: Option<&str>, instance: Option<&str>)
     list
 }
 
+/// 是否已有同类的运行中任务（用于去重，避免重复下载）
+pub fn has_running_kind(
+    kind: &str,
+    instance_id: Option<&str>,
+    game_version: Option<&str>,
+) -> bool {
+    let s = store().lock().unwrap();
+    s.tasks.values().any(|t| {
+        t.kind == kind
+            && !is_terminal(&t.state)
+            && instance_id.map(|v| t.instance_id.as_deref() == Some(v)).unwrap_or(true)
+            && game_version
+                .map(|v| t.game_version.as_deref() == Some(v))
+                .unwrap_or(true)
+    })
+}
+
 pub fn has_running(instance_id: &str) -> bool {
     let s = store().lock().unwrap();
     s.tasks.values().any(|t| {

@@ -246,6 +246,9 @@ struct CreateInstanceRequest {
 #[tauri::command]
 async fn start_create_instance(request: CreateInstanceRequest) -> Result<Task, String> {
     instance::validate_name(&request.name)?;
+    if task::has_running_kind("create", None, Some(&request.game_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
     let t = task::create(
         "create",
         None,
@@ -333,6 +336,9 @@ async fn start_install(
     app: AppHandle,
     game_version: String,
 ) -> Result<Task, String> {
+    if task::has_running_kind("install", None, Some(&game_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
     let t = task::create(
         "install",
         None,
@@ -619,6 +625,9 @@ async fn start_mod_update(
     project_id: String,
     version_id: String,
 ) -> Result<Task, String> {
+    if task::has_running_kind("mod-update", Some(&instance_id), None) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
     let t = task::create(
         "mod-update",
         Some(instance_id.clone()),
@@ -775,6 +784,9 @@ async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, S
     let stored = modpack::take(&plan_id, revision)?;
     if let Some(first) = stored.plan.issues.iter().find(|i| i.blocking) {
         return Err(format!("{}|{}", first.code, first.message));
+    }
+    if task::has_running_kind("modpack", None, Some(&stored.plan.info.mc_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
     }
     let t = task::create(
         "modpack",
@@ -947,6 +959,9 @@ async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, Stri
         return Err(format!("{}|{}", first.code, first.message));
     }
 
+    if task::has_running_kind("game-install", None, Some(&p.request.game_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
     let t = task::create(
         "game-install",
         None,
@@ -1074,6 +1089,9 @@ async fn start_install_loader(
     version: String,
 ) -> Result<Task, String> {
     let inst = managed_instance(&instance_id)?;
+    if task::has_running_kind("loader", Some(&instance_id), Some(&inst.game_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
     let t = task::create(
         "loader",
         Some(instance_id.clone()),
@@ -2213,6 +2231,22 @@ pub fn selftest() -> i32 {
             }
         }
     }
+
+    // 任务去重：同 kind + 同版本视为重复
+    let dup = task::create("dedupe-test", None, Some("9.9.9".into()), "去重测试");
+    check!(
+        "task dedupe detects",
+        task::has_running_kind("dedupe-test", None, Some("9.9.9"))
+    );
+    check!(
+        "task dedupe ignores other version",
+        !task::has_running_kind("dedupe-test", None, Some("8.8.8"))
+    );
+    task::cancelled(&dup.task_id);
+    check!(
+        "task dedupe ignores terminal",
+        !task::has_running_kind("dedupe-test", None, Some("9.9.9"))
+    );
 
     let cfg = core::Config::default();
     check!(
