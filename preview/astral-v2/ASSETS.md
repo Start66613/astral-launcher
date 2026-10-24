@@ -6,11 +6,11 @@
 
 原始制作记录在 `../forest-tale/assets/prompts.json`：此前通过 image_gen 生成的背景插画，不是真实玩家存档截图，也不是 Mojang 官方美术。三张均为已有 WebP quality 88，本轮没有重新编码或覆盖。正式与评审统一从 app/public/forest/ 引用；补齐 A/C 两张，原素材保留，hash一致。
 
-- 森林晨光：`daylight.webp`，435,094 bytes。
+- 森林晨光：`app/public/forest/daylight.webp`，435,094 bytes。
   SHA256 `6C503476E6E30B92925C8867B940219153E522EC51B17CC2F2ADFD2C000AC76B`
-- 深林秘境：`nightfall.webp`，217,712 bytes。保留此前 B 案的月色湖泊与松绿氛围，统一对玩家使用新主题名。
+- 深林秘境：`app/public/forest/nightfall.webp`，217,712 bytes。保留此前 B 案的月色湖泊与松绿氛围，统一对玩家使用新主题名。
   SHA256 `60A5044FA2D6307968A35AD06B79A6B5B58D5C5DD531F1BF5DF2F22924A56B7A`
-- 林野手札：`fieldnotes.webp`，536,042 bytes。根据原有纸感水粉森林素材命名。
+- 林野手札：`app/public/forest/fieldnotes.webp`，536,042 bytes。根据原有纸感水粉森林素材命名。
   SHA256 `924017AAA12C829ACDEA70BA98C6A98CC32542E0DD12D8227B70BCE683542F59`
 
 合计 1,188,848 bytes。背景交叉淡化只改变 opacity，不使用帧序列或视频。缩略图懒加载并复用缓存；图片失败后隐藏图片，保留 Token 背景和可操作控件。正式阶段可按真实 WebView2 内存测试再决定缩略图专用尺寸，而非重复下载原图。
@@ -31,7 +31,7 @@
 - `data/loader-catalog.json`：Fabric 官方 meta 的 Minecraft 1.21.1 构建目录，保存版本号和 stable 字段；其他游戏版本不冒充可查询。推荐是 stable 候选入口，不禁止其他构建。
 - `data/resource-catalog.json`：Modrinth v2 的项目事实数据、公开团队名称与部分 1.21.1 发行文件元数据（每项目最多 16 个发行项）。保留来源、抓取时间、projectUrl 与项目许可字段；不保存项目正文、第三方图标、资源文件内容或下载文件。作者展示为公开团队中的 Owner 或少量维护者，完整作者列表见项目主页。
 
-游戏配置、存档和 Task/GameSession 为明确标记的样例，仅存于原型内存；不是用户真实数据。真实项目的许可字段不意味着可以任意重新分发其资源文件，本轮没有重新分发。
+设计评审室中的游戏配置、存档和 Task/GameSession 为明确标记的样例，仅存于原型内存；正式入口使用核心真实返回，不会将这些样例回退成用户数据。真实项目的许可字段不意味着可以任意重新分发其资源文件，本轮没有重新分发。
 
 ## 外部研究图像
 

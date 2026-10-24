@@ -1,8 +1,10 @@
-# Astral V2：给 DSH 的接口需求（提案，尚未实现）
+# Astral V2：给 DSH 的接口需求与实现状态
 
 日期：2026-10-24。以 main `6868a47` 的契约 v3.3 和实际注册／实现为准。此文不修改契约或共享层，也不声称下列新命令存在。命名可由 DSH 调整，但返回语义、隔离和失败恢复需要双方确认。
 
 **本轮不修改 bridge.ts / types.ts；等 DSH 给出共享层代码块后再应用。** 新能力必须通过 get_api_info.features 门控，不能凭 apiVersion≥3 推断所有组件可用。保留 legacy 原签名，不将其“返回即完成”语义改成 Task。
+
+2026-10-24收尾更新：已只读核对 `origin/feature/astral-v2-core@9f77843`，任务取消与持久化已由DSH完成。下文P1-F已更新，不能继续将这两项当作核心缺口。共享DTO未改；当前UI在适配层按任务的bootId/cancelling字段识别增量契约，旧核心不开放取消。
 
 ## P0-A：下载 Minecraft → 新版本配置的完整安装计划
 
@@ -114,8 +116,8 @@ type ResourceFile = { versionId:string; projectId:string; version:string;
 
 ## P1-F：真实队列、恢复、重试与诊断
 
-- Task IDs 当前仅进程内序号；若要跨启动恢复，增加全局唯一 ID 与持久化任务快照、boot/session epoch。restart 后明确 interrupted／reconcile，不能把旧 running 一直亮着。
-- 取消须 worker 协作停止并确认不再写，当前不开放。retry 应创建新 Task 并指向 retryOf，保留原失败详情；无命令不做假重试按钮。
+- **已实现（9f77843）**：Task带bootId与布尔cancelling；ID为毫秒时间戳加序号，任务快照落盘；重启把未结束任务改成error/INTERRUPTED并增加revision。UI显示“上次退出时未完成”，不保持旧running常亮，不宣称自动续传。
+- **已实现并有条件接入**：cancel_task({taskId})返回accepted只代表受理；worker阶段边界确认后发cancelled，UI才显示停止。新任务按钮已开放，旧字段缺失时隐藏；单文件即时中断、自动续传和统一retry_task仍未支持。retry将来应创建新Task并指向retryOf，保留原错误；目前不做假重试按钮。
 - Task 总阶段、阶段内单位、bytes/totalBytes 缺失要区分 unknown，不把文件数百分比当总体安装百分比。
 - 日志／诊断建议 `list_logs({instanceId,sessionId?})`、`read_log({logId,limit})`、`prepare_diagnosis({logIds}) → {previewId,redactedText,warnings}`，用户确认后才分析／上传；文件路径白名单、内容脱敏，不读取任意私聊或密钥。原型复制的是明确标记的示例错误。
 
