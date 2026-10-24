@@ -65,3 +65,29 @@ mod tests {
         assert_ne!(legacy_uuid("Steve"), legacy_uuid("Alex"));
     }
 }
+
+/// Azure 应用（客户端）ID 必须是 GUID 形式
+pub fn validate_client_id(id: &str) -> Result<(), String> {
+    let s = id.trim();
+    let parts: Vec<&str> = s.split('-').collect();
+    let shape_ok = parts.len() == 5
+        && parts.iter().map(|p| p.len()).eq([8usize, 4, 4, 4, 12].iter().copied())
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    if shape_ok {
+        Ok(())
+    } else {
+        Err("INVALID_VALUE|Azure 应用 ID 应为 GUID 格式".into())
+    }
+}
+
+#[cfg(test)]
+mod msa_tests {
+    use super::*;
+
+    #[test]
+    fn client_id_shape() {
+        assert!(validate_client_id("12345678-1234-1234-1234-123456789abc").is_ok());
+        assert!(validate_client_id("not-a-guid").is_err());
+        assert!(validate_client_id("").is_err());
+    }
+}

@@ -22,6 +22,8 @@ pub struct Config {
     pub username: String,
     /// 当前选中实例（契约 v3 §3）
     pub active_instance_id: Option<String>,
+    /// 微软登录用的 Azure 应用 ID（BYOK；未配置时 MSA 不可用）
+    pub msa_client_id: Option<String>,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
             source: "official".into(),
             username: "Player".into(),
             active_instance_id: None,
+            msa_client_id: None,
         }
     }
 }

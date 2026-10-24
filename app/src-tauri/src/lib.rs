@@ -66,7 +66,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "java", "components", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "java", "components", "accounts", "mirror"],
     })
 }
 
@@ -103,6 +103,11 @@ fn set_config(config: serde_json::Value) -> Result<Config, String> {
     cur = serde_json::from_value(merged).map_err(|e| format!("INVALID_NAME|配置格式不对|{e}"))?;
     // 用户名会进 JVM 参数，必须是合法 ASCII，否则 portablemc 截断时可能 panic
     account::validate_username(&cur.username)?;
+    if let Some(id) = &cur.msa_client_id {
+        if !id.trim().is_empty() {
+            account::validate_client_id(id)?;
+        }
+    }
     core::save_config(&cur)?;
     Ok(cur)
 }
@@ -569,6 +574,60 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         }
     });
     Ok(t)
+}
+
+// ── 账号 ────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MsaStatus {
+    configured: bool,
+    client_id_masked: Option<String>,
+    reason: Option<String>,
+    steps: Vec<String>,
+}
+
+#[tauri::command]
+fn msa_status() -> MsaStatus {
+    let cfg = core::load_config();
+    match cfg.msa_client_id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(id) => MsaStatus {
+            configured: true,
+            client_id_masked: Some(format!("{}…{}", &id[..8.min(id.len())], &id[id.len().saturating_sub(4)..])),
+            reason: None,
+            steps: vec![],
+        },
+        None => MsaStatus {
+            configured: false,
+            client_id_masked: None,
+            reason: Some("未配置 Azure 应用 ID，微软登录不可用".into()),
+            steps: vec![
+                "在 Azure Portal 注册一个应用（个人账号即可，选择「移动和桌面应用」）".into(),
+                "在「身份验证」里启用「允许公共客户端流」，不需要回调地址".into(),
+                "把应用（客户端）ID 填进配置项 msaClientId".into(),
+                "本启动器不内置任何第三方客户端 ID，必须用你自己的应用".into(),
+            ],
+        },
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountView {
+    kind: String,
+    name: String,
+    online: bool,
+    note: Option<String>,
+}
+
+#[tauri::command]
+fn get_account() -> AccountView {
+    AccountView {
+        kind: "offline".into(),
+        name: core::load_config().username,
+        online: false,
+        note: Some("离线档案：联机时由服务器分配身份".into()),
+    }
 }
 
 // ── 光影支持组件 ────────────────────────────────────────────────
@@ -1871,6 +1930,20 @@ pub fn selftest() -> i32 {
             }
         }
     }
+
+    // 账号：客户端 ID 校验与离线档案
+    check!(
+        "msa client id shape",
+        account::validate_client_id("12345678-1234-1234-1234-123456789abc").is_ok()
+            && account::validate_client_id("not-a-guid").is_err()
+    );
+    let acct = get_account();
+    check!(
+        "account is offline",
+        acct.kind == "offline" && !acct.online && !acct.name.is_empty()
+    );
+    let msa = msa_status();
+    check!("msa status honest", msa.configured == msa.reason.is_none());
 
     let cfg = core::Config::default();
     check!(
