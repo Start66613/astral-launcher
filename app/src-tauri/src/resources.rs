@@ -284,6 +284,22 @@ pub fn prepare(
         }
     }
 
+    // 资源包/光影包跨版本通常可用，但不相符时给出非阻塞提示
+    if !needs_mc
+        && !file.game_versions.is_empty()
+        && !file.game_versions.iter().any(|g| g == &inst.game_version)
+    {
+        issues.push(issue(
+            "VERSION_HINT",
+            format!(
+                "该文件标注支持 {}，与实例版本 {} 不一致，通常仍可使用",
+                file.game_versions.join(", "),
+                inst.game_version
+            ),
+            false,
+        ));
+    }
+
     let dir = target_dir(&inst, &request.kind, request.world_id.as_deref())?;
     let dest = dir.join(&file.file_name);
     let replaces = if dest.exists() {
@@ -437,6 +453,50 @@ pub fn execute(
         }
     }
     Ok(dest)
+}
+
+/// 测试辅助：把某个项目的一个兼容版本装进实例，返回落地路径。
+/// 只在自检/诊断里用，不对外暴露命令。
+pub fn live_probe(
+    game: &Path,
+    instance_id: &str,
+    kind: &str,
+    project_id: &str,
+    world_id: Option<&str>,
+    game_version: &str,
+    loader: Option<&str>,
+) -> Result<String, String> {
+    // 资源包/光影包与游戏版本无关，不按版本过滤
+    let version_filter = if kind == "resourcepack" || kind == "shaderpack" {
+        None
+    } else {
+        Some(game_version)
+    };
+    let loader_filter = if kind == "mod" || kind == "datapack" {
+        loader
+    } else {
+        None
+    };
+    let files = files(project_id, version_filter, loader_filter)?;
+    let first = files
+        .first()
+        .ok_or_else(|| format!("VERSION_NOT_FOUND|{project_id} 没有兼容文件"))?;
+    let req = ResourceInstallRequest {
+        instance_id: instance_id.to_string(),
+        kind: kind.to_string(),
+        project_id: project_id.to_string(),
+        version_id: first.version_id.clone(),
+        world_id: world_id.map(|s| s.to_string()),
+        overwrite: false,
+    };
+    let stats = |_: &str| crate::instance::PlayStats::default();
+    let plan = prepare(game, req, &stats)?;
+    if let Some(b) = plan.issues.iter().find(|i| i.blocking) {
+        return Err(format!("{}|{}", b.code, b.message));
+    }
+    let stored = take(&plan.plan_id, 1)?;
+    let p = execute(&stored, |_, _| {})?;
+    Ok(p.to_string_lossy().to_string())
 }
 
 #[cfg(test)]

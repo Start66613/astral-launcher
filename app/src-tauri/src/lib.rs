@@ -1945,6 +1945,62 @@ pub fn selftest() -> i32 {
     let msa = msa_status();
     check!("msa status honest", msa.configured == msa.reason.is_none());
 
+    // 可选的真实多类型资源安装：ASTRAL_LIVE_RESKINDS="gameDir"
+    if let Ok(dir) = std::env::var("ASTRAL_LIVE_RESKINDS") {
+        let game = std::path::PathBuf::from(&dir);
+        log.push_str(&format!("LIVE reskinds start: {dir}\n"));
+        let run = || -> Result<Vec<String>, String> {
+            let meta = instance::InstanceMeta {
+                id: instance::new_id(),
+                name: "reskinds-test".into(),
+                game_version: "1.20.1".into(),
+                loader_kind: Some("fabric".into()),
+                loader_version: Some("0.16.9".into()),
+                launch_version: None,
+                memory_mb: None,
+                jvm_args: vec![],
+                java_path: None,
+                cover: None,
+                created_at: time::now_iso(),
+            };
+            let inst = instance::create(&game, &meta)?;
+            let saves = std::path::Path::new(&inst.dirs.saves);
+            std::fs::create_dir_all(saves.join("TestWorld"))
+                .map_err(|e| e.to_string())?;
+            std::fs::write(saves.join("TestWorld/level.dat"), b"x").map_err(|e| e.to_string())?;
+            let world = worlds::list(saves).into_iter().next()
+                .ok_or_else(|| "INTERNAL|测试存档没被识别".to_string())?;
+
+            let mut out = Vec::new();
+            for (kind, pid, wid) in [
+                ("resourcepack", "w0TnApzs", None),
+                ("shaderpack", "HVnmMxH1", None),
+                ("datapack", "8oi3bsk5", Some(world.world_id.as_str())),
+            ] {
+                match resources::live_probe(&game, &inst.id, kind, pid, wid, "1.20.1", Some("fabric")) {
+                    Ok(p) => out.push(format!("{kind} ok: {p}")),
+                    Err(e) => out.push(format!("{kind} failed: {e}")),
+                }
+            }
+            Ok(out)
+        };
+        match run() {
+            Ok(lines) => {
+                for l in &lines {
+                    log.push_str(&format!("  LIVE {l}\n"));
+                    if l.contains("failed") {
+                        fails += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                fails += 1;
+                log.push_str(&format!("LIVE reskinds failed: {e}\n"));
+            }
+        }
+        log.push_str("LIVE reskinds done\n");
+    }
+
     let cfg = core::Config::default();
     check!(
         "config defaults",
