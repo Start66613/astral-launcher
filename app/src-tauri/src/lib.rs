@@ -4,6 +4,7 @@ mod instance;
 mod loader;
 mod mods;
 mod net;
+mod worlds;
 mod session;
 mod stats;
 mod task;
@@ -58,7 +59,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "mirror"],
     })
 }
 
@@ -447,6 +448,15 @@ fn list_saves(instance_id: Option<String>) -> Result<Vec<stats::SaveEntry>, Stri
     Ok(stats::list_saves(&game, inst.as_ref()))
 }
 
+/// 存档目标：给数据包安装用的稳定 `worldId`（不是目录名）
+#[tauri::command]
+fn list_target_worlds(instance_id: String) -> Result<Vec<worlds::WorldTarget>, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    Ok(worlds::list(std::path::Path::new(&inst.dirs.saves)))
+}
+
 #[tauri::command]
 fn get_stats(range: Option<String>) -> stats::Stats {
     let game = game_root();
@@ -464,6 +474,15 @@ fn get_stats(range: Option<String>) -> stats::Stats {
 #[tauri::command]
 fn list_loaders(game_version: String) -> Result<Vec<loader::LoaderCatalog>, String> {
     loader::list(&game_version)
+}
+
+/// 某个游戏版本 + 加载器类型的**全部**可用构建（不只是推荐版本）
+#[tauri::command]
+fn list_loader_builds(
+    game_version: String,
+    kind: String,
+) -> Result<Vec<loader::LoaderBuild>, String> {
+    loader::builds(&game_version, &kind)
 }
 
 #[tauri::command]
@@ -699,6 +718,8 @@ pub fn run() {
             delete_mod,
             list_loaders,
             start_install_loader,
+            list_loader_builds,
+            list_target_worlds,
             install_version,
             launch_version,
             download_to
@@ -919,9 +940,10 @@ pub fn selftest() -> i32 {
 
     // 加载器清单解析（纯函数，不依赖网络）
     let sample = r#"[{"loader":{"version":"0.16.9","stable":true}},{"loader":{"version":"0.16.8","stable":false}}]"#;
+    let parsed = loader::parse_fabric(sample);
     check!(
         "loader parse",
-        loader::parse_fabric(sample) == vec!["0.16.9".to_string(), "0.16.8".to_string()]
+        parsed.len() == 2 && parsed[0].0 == "0.16.9" && parsed[0].1 && !parsed[1].1
     );
     check!(
         "loader empty safe",
@@ -954,6 +976,30 @@ pub fn selftest() -> i32 {
         net::ensure_within(&net_root, &net_root.join("..").join("escaped.jar")).is_err()
     );
     let _ = std::fs::remove_dir_all(&net_root);
+
+    // 世界 ID：稳定且能反解
+    let saves_dir = std::env::temp_dir().join(format!("astral-worlds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&saves_dir);
+    let _ = std::fs::create_dir_all(saves_dir.join("World1"));
+    let _ = std::fs::write(saves_dir.join("World1/level.dat"), b"x");
+    let ws = worlds::list(&saves_dir);
+    check!(
+        "worlds listed",
+        ws.len() == 1 && ws[0].display_name == "World1"
+    );
+    check!(
+        "world id stable",
+        !ws.is_empty() && worlds::world_id("World1") == ws[0].world_id
+    );
+    check!(
+        "world resolve",
+        !ws.is_empty() && worlds::resolve(&saves_dir, &ws[0].world_id).is_some()
+    );
+    check!(
+        "world resolve rejects unknown",
+        worlds::resolve(&saves_dir, "w_00000000").is_none()
+    );
+    let _ = std::fs::remove_dir_all(&saves_dir);
 
     let cfg = core::Config::default();
     check!(

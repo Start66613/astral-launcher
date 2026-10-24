@@ -24,6 +24,7 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "meta.fabricmc.net",
     "maven.fabricmc.net",
     "maven.minecraftforge.net",
+    "files.minecraftforge.net",
     "maven.neoforged.net",
     "meta.quiltmc.org",
     "maven.quiltmc.org",
