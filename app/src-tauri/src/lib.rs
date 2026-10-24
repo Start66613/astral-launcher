@@ -1,6 +1,7 @@
 mod components;
 mod core;
 mod error;
+mod export;
 mod account;
 mod instance;
 mod java;
@@ -575,6 +576,16 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         }
     });
     Ok(t)
+}
+
+// ── 整合包导出 ──────────────────────────────────────────────────
+
+#[tauri::command]
+async fn export_modpack(request: export::ExportRequest) -> Result<export::ExportResult, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || export::export(&game, &request, &play_stats))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ── 模组更新检查 ────────────────────────────────────────────────
@@ -2149,6 +2160,44 @@ pub fn selftest() -> i32 {
                 None => {
                     fails += 1;
                     log.push_str("LIVE update-apply failed: 实例不存在\n");
+                }
+            }
+        }
+    }
+
+    // 可选的真实导出：ASTRAL_LIVE_EXPORT="gameDir|instanceId"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_EXPORT") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let game = std::path::PathBuf::from(parts[0]);
+            let req = export::ExportRequest {
+                instance_id: parts[1].to_string(),
+                name: "Astral Export Test".into(),
+                version: Some("1.0.0".into()),
+                include_config: false,
+            };
+            match export::export(&game, &req, &play_stats) {
+                Ok(r) => {
+                    log.push_str(&format!(
+                        "LIVE export ok: {} (indexed={} overrides={} bytes={})\n",
+                        r.path, r.indexed_files, r.override_files, r.bytes
+                    ));
+                    match modpack::read_index(std::path::Path::new(&r.path)) {
+                        Ok(idx) => log.push_str(&format!(
+                            "LIVE export roundtrip: mc={} files={} loader={:?}\n",
+                            idx.mc_version,
+                            idx.files.len(),
+                            idx.loader_kind
+                        )),
+                        Err(e) => {
+                            fails += 1;
+                            log.push_str(&format!("LIVE export roundtrip failed: {e}\n"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE export failed: {e}\n"));
                 }
             }
         }
