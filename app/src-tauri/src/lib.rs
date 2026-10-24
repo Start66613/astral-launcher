@@ -333,7 +333,9 @@ async fn start_install(
             task::progress(&t2, &p.stage, p.label, p.done, p.total);
         });
         match res {
+            Ok(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
             Ok(_) => task::finish(&tid, serde_json::json!({ "kind": "install", "gameVersion": v })),
+            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
             Err(e) => {
                 task::fail(&tid, e);
             }
@@ -492,6 +494,7 @@ async fn start_install_loader(
             move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
         );
         match res {
+            Ok(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
             Ok(_) => {
                 let game = game_root();
                 if let Some(mut meta) = instance::read_meta(&game, &instance_id) {
@@ -662,6 +665,7 @@ pub fn run() {
             let handle = app.handle().clone();
             let _ = APP_HANDLE.set(handle.clone());
             task::init(handle);
+            task::boot();
             session::load();
             session::reconcile();
             Ok(())
@@ -720,6 +724,12 @@ pub fn selftest() -> i32 {
             }
         }};
     }
+
+    // 任务持久化用临时目录，避免污染真实配置
+    let task_dir = std::env::temp_dir().join(format!("astral-tasks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&task_dir);
+    std::env::set_var("ASTRAL_DATA_DIR", &task_dir);
+    task::boot();
 
     let e = error::ApiError::with_detail(error::NETWORK, "下载失败", "a|b");
     let d = task::decode(&e.encode());
@@ -852,6 +862,34 @@ pub fn selftest() -> i32 {
                 .unwrap_or(false)
     );
     check!("task snapshot", !task::snapshot(None, None, None).is_empty());
+
+    // 取消：受理 → worker 确认 → 终态粘滞
+    let t3 = task::create("install", None, Some("1.20.1".into()), "取消测试");
+    check!(
+        "task boot id",
+        task::get(&t3.task_id)
+            .map(|t| !t.boot_id.is_empty())
+            .unwrap_or(false)
+    );
+    check!(
+        "task cancel accepted",
+        task::cancel_task(&t3.task_id) && task::is_cancelled(&t3.task_id)
+    );
+    task::cancelled(&t3.task_id);
+    check!(
+        "task cancel terminal",
+        task::get(&t3.task_id)
+            .map(|t| t.state == "cancelled" && !t.cancelling)
+            .unwrap_or(false)
+    );
+    task::progress(&t3.task_id, "download", "迟到的进度", 1, 2);
+    check!(
+        "task cancel sticky",
+        task::get(&t3.task_id)
+            .map(|t| t.state == "cancelled")
+            .unwrap_or(false)
+    );
+    check!("task persisted", task_dir.join("tasks.json").exists());
 
     let sess = session::begin("inst_selftest", &t.task_id, 0);
     check!("session begin", !sess.session_id.is_empty());

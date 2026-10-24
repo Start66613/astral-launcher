@@ -20,7 +20,7 @@ pub const BUSY: &str = "BUSY";
 pub const UNSUPPORTED: &str = "UNSUPPORTED";
 pub const INTERNAL: &str = "INTERNAL";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiError {
     pub code: String,
