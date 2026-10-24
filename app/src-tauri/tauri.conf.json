@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://cdn.modrinth.com https://cdn-raw.modrinth.com; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://api.modrinth.com https://cdn.modrinth.com; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'"
     }
   },
   "bundle": {
