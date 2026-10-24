@@ -1,4 +1,4 @@
-﻿//! 启动器核心：配置 / 版本列表 / 安装 / 启动。
+//! 启动器核心：配置 / 版本列表 / 安装 / 启动。
 //!
 //! 安装与启动来自 `portablemc`（Apache-2.0），这里只做：读配置、
 //! 拼路径、把 crate 的事件翻译成前端进度。
@@ -60,7 +60,16 @@ pub fn save_config(cfg: &Config) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(&p, text).map_err(|e| e.to_string())
+    // 先写 .part，再备份旧配置，最后替换：断电也不会留下半截 JSON
+    let tmp = p.with_extension("json.part");
+    std::fs::write(&tmp, &text).map_err(|e| e.to_string())?;
+    if p.exists() {
+        let _ = std::fs::copy(&p, p.with_extension("json.bak"));
+    }
+    std::fs::rename(&tmp, &p).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
 }
 
 #[derive(Serialize, Clone)]
