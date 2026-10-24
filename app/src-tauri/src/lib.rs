@@ -1804,6 +1804,23 @@ pub fn selftest() -> i32 {
             && java::pick_for(&rts, 30).is_none()
     );
 
+    // 可选的真实 Java 探测：ASTRAL_LIVE_JAVA="gameDir"
+    if let Ok(dir) = std::env::var("ASTRAL_LIVE_JAVA") {
+        let game = std::path::PathBuf::from(&dir);
+        let rts = java::scan(&game);
+        log.push_str(&format!("LIVE java found {} runtimes\n", rts.len()));
+        for r in rts.iter().take(5) {
+            log.push_str(&format!(
+                "  java {} (major {}) {} {}\n",
+                r.version, r.major, r.vendor, r.path
+            ));
+        }
+        if rts.is_empty() {
+            fails += 1;
+            log.push_str("LIVE java failed: 没有找到任何 Java\n");
+        }
+    }
+
     let cfg = core::Config::default();
     check!(
         "config defaults",

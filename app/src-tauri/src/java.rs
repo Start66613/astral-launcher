@@ -98,11 +98,9 @@ pub fn scan(game_dir: &Path) -> Vec<JavaRuntime> {
     // 启动器管理的 JVM
     if let Ok(rd) = std::fs::read_dir(game_dir.join("jvm")) {
         for e in rd.flatten() {
-            for sub in ["bin/java.exe", "bin/javaw.exe"] {
-                let p = e.path().join(sub);
-                if p.is_file() {
-                    cands.push((p, "game_jvm"));
-                }
+            let p = e.path().join("bin").join("java.exe");
+            if p.is_file() {
+                cands.push((p, "game_jvm"));
             }
         }
     }
