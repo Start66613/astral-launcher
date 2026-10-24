@@ -4,6 +4,7 @@ mod account;
 mod instance;
 mod loader;
 mod logs;
+mod modpack;
 mod mods;
 mod net;
 mod plan;
@@ -63,7 +64,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "mirror"],
     })
 }
 
@@ -563,6 +564,140 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
             ),
             Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
             Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
+}
+
+// ── 整合包 ──────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn prepare_modpack_install(
+    request: modpack::ModpackRequest,
+) -> Result<modpack::ModpackPlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || modpack::prepare(&game, request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, String> {
+    let stored = modpack::take(&plan_id, revision)?;
+    if let Some(first) = stored.plan.issues.iter().find(|i| i.blocking) {
+        return Err(format!("{}|{}", first.code, first.message));
+    }
+    let t = task::create(
+        "modpack",
+        None,
+        Some(stored.plan.info.mc_version.clone()),
+        format!("安装整合包 {}", stored.plan.info.name),
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let cfg = core::load_config();
+        let mut created: Option<String> = None;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<Instance, String> {
+                let index = modpack::read_index(&stored.pack_path)?;
+                let meta = instance::InstanceMeta {
+                    id: instance::new_id(),
+                    name: stored.plan.info.name.clone(),
+                    game_version: index.mc_version.clone(),
+                    loader_kind: index.loader_kind.clone(),
+                    loader_version: index.loader_version.clone(),
+                    launch_version: None,
+                    memory_mb: None,
+                    jvm_args: vec![],
+                    java_path: None,
+                    cover: None,
+                    created_at: time::now_iso(),
+                };
+                let inst = instance::create(&game, &meta)?;
+                created = Some(inst.id.clone());
+
+                if !core::version_installed(&game, &index.mc_version) {
+                    let t2 = tid.clone();
+                    core::install(&index.mc_version, &game, &cfg.username, move |p| {
+                        task::progress(&t2, &p.stage, format!("游戏本体 {}", p.label), p.done, p.total);
+                    })?;
+                }
+                task::check_cancel(&tid)?;
+
+                if let (Some(kind), Some(ver)) = (&index.loader_kind, &index.loader_version) {
+                    let t2 = tid.clone();
+                    if kind == "forge" || kind == "neoforge" {
+                        let generated = core::install_forge_like(
+                            kind,
+                            &index.mc_version,
+                            ver,
+                            &game,
+                            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                        )?;
+                        let mut m = instance::read_meta(&game, &inst.id)
+                            .ok_or_else(|| "INSTANCE_NOT_FOUND|元数据丢失".to_string())?;
+                        m.launch_version = Some(generated);
+                        instance::save_meta(&game, &m)?;
+                    } else {
+                        core::install_loader(
+                            &index.mc_version,
+                            kind,
+                            ver,
+                            &game,
+                            &cfg.username,
+                            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                        )?;
+                    }
+                }
+                task::check_cancel(&tid)?;
+
+                let inst_dir = instance::instance_dir(&game, &inst.id);
+                let t2 = tid.clone();
+                modpack::download_files(&index, &inst_dir, move |d, total| {
+                    task::progress(&t2, "download", format!("整合包文件 {d}/{total}"), d, total);
+                })?;
+                task::check_cancel(&tid)?;
+
+                let t3 = tid.clone();
+                modpack::extract_overrides(&stored.pack_path, &inst_dir, move |d, _| {
+                    task::progress(&t3, "extract", format!("解压覆盖文件 {d}"), d, 0);
+                })?;
+
+                let fresh = instance::find(&game, &inst.id, &play_stats)
+                    .ok_or_else(|| "INTERNAL|安装后读不到实例".to_string())?;
+                Ok(fresh)
+            },
+        ));
+
+        match result {
+            Ok(Ok(inst)) => {
+                emit_instance_changed(&inst.id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({ "kind": "modpack", "instance": inst }),
+                );
+            }
+            Ok(Err(_)) if task::is_cancelled(&tid) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::cancelled(&tid);
+            }
+            Ok(Err(e)) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::fail(&tid, e);
+            }
+            Err(_) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::fail(&tid, "INTERNAL|后台任务异常|整合包线程崩溃".into());
+            }
         }
     });
     Ok(t)
@@ -1555,6 +1690,60 @@ pub fn selftest() -> i32 {
             && preview.text.contains("<redacted>")
     );
     let _ = std::fs::remove_dir_all(&log_dir);
+
+    // 可选的真实整合包安装：ASTRAL_LIVE_MODPACK="gameDir|projectId"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_MODPACK") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let game = std::path::PathBuf::from(parts[0]);
+            let pid = parts[1].to_string();
+            log.push_str(&format!("LIVE modpack start: {spec}\n"));
+            let r = (|| -> Result<String, String> {
+                let vers = crate::net::fetch_json(&format!(
+                    "https://api.modrinth.com/v2/project/{pid}/version"
+                ))?;
+                let arr = vers
+                    .as_array()
+                    .ok_or_else(|| "INTERNAL|版本列表格式异常".to_string())?;
+                let pick = arr
+                    .iter()
+                    .find(|v| {
+                        v.get("game_versions")
+                            .and_then(|g| g.as_array())
+                            .map(|a| a.iter().any(|x| x.as_str() == Some("1.20.1")))
+                            .unwrap_or(false)
+                    })
+                    .or_else(|| arr.first())
+                    .ok_or_else(|| "VERSION_NOT_FOUND|没有版本".to_string())?;
+                let vid = pick
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "INTERNAL|版本缺少 id".to_string())?
+                    .to_string();
+                let plan = modpack::prepare(
+                    &game,
+                    modpack::ModpackRequest {
+                        project_id: pid.clone(),
+                        version_id: vid,
+                        name: None,
+                        memory_mb: None,
+                    },
+                )?;
+                if let Some(b) = plan.issues.iter().find(|i| i.blocking) {
+                    return Err(format!("{}|{}", b.code, b.message));
+                }
+                let stored = modpack::take(&plan.plan_id, 1)?;
+                modpack::install(&stored, &game, "Steve", |_s, _l, _d, _t| {})
+            })();
+            match r {
+                Ok(id) => log.push_str(&format!("LIVE modpack ok: {id}\n")),
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE modpack failed: {e}\n"));
+                }
+            }
+        }
+    }
 
     let cfg = core::Config::default();
     check!(
