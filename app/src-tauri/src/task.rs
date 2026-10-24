@@ -45,6 +45,9 @@ pub struct Task {
     /// 已请求取消，等待 worker 停止
     #[serde(default)]
     pub cancelling: bool,
+    /// 发起该任务时的参数，用于失败后重试（不对外承诺稳定结构）
+    #[serde(default)]
+    pub retry_spec: Option<serde_json::Value>,
 }
 
 pub fn now_iso() -> String {
@@ -181,6 +184,7 @@ pub fn create(
         retry_of: None,
         boot_id: s.boot_id.clone(),
         cancelling: false,
+        retry_spec: None,
     };
     s.tasks.insert(task.task_id.clone(), task.clone());
     s.tokens
@@ -350,6 +354,15 @@ pub fn check_cancel(task_id: &str) -> Result<(), String> {
         Err("CANCELLED|任务已取消".into())
     } else {
         Ok(())
+    }
+}
+
+/// 记录发起参数，供 retry_task 复用
+pub fn set_retry_spec(task_id: &str, spec: serde_json::Value) {
+    let mut s = store().lock().unwrap();
+    if let Some(t) = s.tasks.get_mut(task_id) {
+        t.retry_spec = Some(spec);
+        persist(&s);
     }
 }
 

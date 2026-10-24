@@ -346,35 +346,42 @@ async fn start_install(
         format!("安装 {game_version}"),
     );
     let tid = t.task_id.clone();
-    let app2 = app.clone();
-    std::thread::spawn(move || {
-        task::start(&tid);
-        let cfg = core::load_config();
-        let dir = PathBuf::from(&cfg.game_dir);
-        let t2 = tid.clone();
-        let v = game_version.clone();
-        // 后台线程 panic 必须变成任务失败，不能让任务永远 running
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            core::install(&game_version, &dir, &cfg.username, move |p| {
-                task::progress(&t2, &p.stage, p.label, p.done, p.total);
-            })
-        }))
-        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()));
-        match res {
-            // 活儿已经干完才收到取消：如实报告完成，不假装已取消
-            Ok(_) if task::is_cancelled(&tid) => task::finish(
-                &tid,
-                serde_json::json!({ "kind": "install", "gameVersion": v, "cancelledLate": true }),
-            ),
-            Ok(_) => task::finish(&tid, serde_json::json!({ "kind": "install", "gameVersion": v })),
-            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
-            Err(e) => {
-                task::fail(&tid, e);
-            }
-        }
-        let _ = app2;
-    });
+    task::set_retry_spec(
+        &t.task_id,
+        serde_json::json!({ "kind": "install", "gameVersion": game_version }),
+    );
+    let gv = game_version.clone();
+    let _ = app;
+    std::thread::spawn(move || run_install(&tid, gv));
     Ok(t)
+}
+
+/// 安装游戏本体的 worker：命令与「重试」共用同一份逻辑
+fn run_install(tid: &str, game_version: String) {
+    task::start(tid);
+    let cfg = core::load_config();
+    let dir = PathBuf::from(&cfg.game_dir);
+    let t2 = tid.to_string();
+    let v = game_version.clone();
+    // 后台线程 panic 必须变成任务失败，不能让任务永远 running
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        core::install(&game_version, &dir, &cfg.username, move |p| {
+            task::progress(&t2, &p.stage, p.label, p.done, p.total);
+        })
+    }))
+    .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()));
+    match res {
+        // 活儿已经干完才收到取消：如实报告完成，不假装已取消
+        Ok(_) if task::is_cancelled(tid) => task::finish(
+            tid,
+            serde_json::json!({ "kind": "install", "gameVersion": v, "cancelledLate": true }),
+        ),
+        Ok(_) => task::finish(tid, serde_json::json!({ "kind": "install", "gameVersion": v })),
+        Err(_) if task::is_cancelled(tid) => task::cancelled(tid),
+        Err(e) => {
+            task::fail(tid, e);
+        }
+    }
 }
 
 #[tauri::command]
@@ -635,34 +642,118 @@ async fn start_mod_update(
         format!("更新 {file_name}"),
     );
     let tid = t.task_id.clone();
+    task::set_retry_spec(
+        &t.task_id,
+        serde_json::json!({
+            "kind": "mod-update",
+            "instanceId": instance_id,
+            "fileName": file_name,
+            "projectId": project_id,
+            "versionId": version_id,
+        }),
+    );
     std::thread::spawn(move || {
-        task::start(&tid);
-        let game = game_root();
-        let t2 = tid.clone();
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            updates::apply_update(
-                &game,
-                &instance_id,
-                &file_name,
-                &project_id,
-                &version_id,
-                move |c, t, _s, _ts| {
-                    task::progress(&t2, "download", format!("下载 {c}/{t}"), c, t);
-                },
-            )
-        }))
-        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|更新线程崩溃".to_string()));
-
-        match res {
-            Ok((new_file, removed)) => task::finish(
-                &tid,
-                serde_json::json!({ "kind": "mod-update", "file": new_file, "removed": removed }),
-            ),
-            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
-            Err(e) => task::fail(&tid, e),
-        }
+        run_mod_update(&tid, &instance_id, &file_name, &project_id, &version_id)
     });
     Ok(t)
+}
+
+/// 模组更新的 worker：命令与「重试」共用
+fn run_mod_update(tid: &str, instance_id: &str, file_name: &str, project_id: &str, version_id: &str) {
+    task::start(tid);
+    let game = game_root();
+    let t2 = tid.to_string();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        updates::apply_update(
+            &game,
+            instance_id,
+            file_name,
+            project_id,
+            version_id,
+            move |c, t, _s, _ts| {
+                task::progress(&t2, "download", format!("下载 {c}/{t}"), c, t);
+            },
+        )
+    }))
+    .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|更新线程崩溃".to_string()));
+
+    match res {
+        Ok((new_file, removed)) => task::finish(
+            tid,
+            serde_json::json!({ "kind": "mod-update", "file": new_file, "removed": removed }),
+        ),
+        Err(_) if task::is_cancelled(tid) => task::cancelled(tid),
+        Err(e) => task::fail(tid, e),
+    }
+}
+
+// ── 任务重试 ────────────────────────────────────────────────────
+
+/// 校验任务能否重试，返回 (kind, 发起参数)
+fn retry_spec_of(task_id: &str) -> Result<(String, serde_json::Value), String> {
+    let old = task::get(task_id).ok_or_else(|| "INVALID_VALUE|任务不存在".to_string())?;
+    if !matches!(old.state.as_str(), "error" | "cancelled") {
+        return Err("INVALID_VALUE|只有失败或已取消的任务可以重试".into());
+    }
+    let spec = old
+        .retry_spec
+        .ok_or_else(|| "UNSUPPORTED|该任务没有记录发起参数，无法重试".to_string())?;
+    let kind = spec
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .unwrap_or("")
+        .to_string();
+    if kind.is_empty() {
+        return Err("UNSUPPORTED|任务缺少类型信息".into());
+    }
+    Ok((kind, spec))
+}
+
+#[tauri::command]
+fn retry_task(task_id: String) -> Result<Task, String> {
+    let (kind, spec) = retry_spec_of(&task_id)?;
+    let get = |k: &str| {
+        spec.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("UNSUPPORTED|缺少参数 {k}"))
+    };
+
+    match kind.as_str() {
+        "install" => {
+            let gv = get("gameVersion")?;
+            if task::has_running_kind("install", None, Some(&gv)) {
+                return Err("BUSY|该版本已在安装中".into());
+            }
+            let t = task::create("install", None, Some(gv.clone()), format!("重试安装 {gv}"));
+            task::set_retry_spec(&t.task_id, spec.clone());
+            task::update(&t.task_id, |x| x.retry_of = Some(task_id.clone()));
+            let tid = t.task_id.clone();
+            std::thread::spawn(move || run_install(&tid, gv));
+            Ok(t)
+        }
+        "mod-update" => {
+            let inst = get("instanceId")?;
+            let file = get("fileName")?;
+            let pid = get("projectId")?;
+            let vid = get("versionId")?;
+            if task::has_running_kind("mod-update", Some(&inst), None) {
+                return Err("BUSY|该实例已有更新任务在运行".into());
+            }
+            let t = task::create(
+                "mod-update",
+                Some(inst.clone()),
+                None,
+                format!("重试更新 {file}"),
+            );
+            task::set_retry_spec(&t.task_id, spec.clone());
+            task::update(&t.task_id, |x| x.retry_of = Some(task_id.clone()));
+            let tid = t.task_id.clone();
+            std::thread::spawn(move || run_mod_update(&tid, &inst, &file, &pid, &vid));
+            Ok(t)
+        }
+        _ => Err("UNSUPPORTED|该任务需要重新规划，请从界面重新发起".into()),
+    }
 }
 
 // ── 账号 ────────────────────────────────────────────────────────
@@ -1324,6 +1415,7 @@ pub fn run() {
             get_tasks,
             get_task,
             cancel_task,
+            retry_task,
             start_install,
             start_launch,
             start_create_instance,
@@ -2246,6 +2338,24 @@ pub fn selftest() -> i32 {
     check!(
         "task dedupe ignores terminal",
         !task::has_running_kind("dedupe-test", None, Some("9.9.9"))
+    );
+
+    // 重试：只有终态 + 有参数 + 已知类型才允许
+    let rt = task::create("retry-demo", None, None, "重试演示");
+    check!("retry rejects running", retry_spec_of(&rt.task_id).is_err());
+    task::fail(&rt.task_id, "NETWORK|演示失败".into());
+    check!("retry rejects missing spec", retry_spec_of(&rt.task_id).is_err());
+    task::set_retry_spec(&rt.task_id, serde_json::json!({"kind":"unknown-kind"}));
+    check!(
+        "retry rejects unknown kind",
+        retry_task(rt.task_id.clone()).is_err()
+    );
+    let ok_spec = task::create("retry-demo-2", None, None, "重试演示2");
+    task::fail(&ok_spec.task_id, "NETWORK|x".into());
+    task::set_retry_spec(&ok_spec.task_id, serde_json::json!({"kind":"install","gameVersion":"1.2.3"}));
+    check!(
+        "retry accepts known kind",
+        retry_spec_of(&ok_spec.task_id).map(|(k, _)| k == "install").unwrap_or(false)
     );
 
     let cfg = core::Config::default();
