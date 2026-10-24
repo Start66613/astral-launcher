@@ -238,6 +238,47 @@ export interface JavaReport {
   recommended: string | null;
 }
 
+/* ===== V2：JDK 管理 ===== */
+
+export interface ManagedJdk {
+  major: number;
+  dir: string;
+  bytes: number;
+  javaPath: string | null;
+}
+
+/* ===== V2：Task / Session 字段增补 ===== */
+
+/** Task 在 v3 基础上新增： */
+export interface TaskV2Fields {
+  /** 产出该任务的进程启动标识；重启后旧任务会变成 INTERRUPTED */
+  bootId: string;
+  /** 已请求取消，等 worker 停下；此时还不能显示"已取消" */
+  cancelling: boolean;
+  /** 稳定阶段枚举，驱动启动动画 */
+  phase: "queued" | "validating" | "checking-files" | "preparing-java"
+       | "downloading" | "launching" | "process-created"
+       | "done" | "failed" | "cancelled";
+  /** 阶段中文名，直接显示，不要自己映射 */
+  stageLabel: string;
+  /** 发起参数，用于 retry_task；结构不承诺稳定，界面只读不看 */
+  retrySpec: unknown | null;
+}
+
+/** GameSession 新增：启动器重启后按 pid 对账收尾，退出码与时长不精确 */
+export interface GameSessionV2Fields {
+  reconciled: boolean;
+}
+
+/** astral://game-exit 载荷新增 */
+export interface GameExitPayloadV2Fields {
+  /** 是否拿到了退出码；false 时不要显示成"崩溃" */
+  exitKnown: boolean;
+  /** 只有 exitKnown 且退出码非 0 才为 true */
+  crashed: boolean;
+  reconciled: boolean;
+}
+
 /* ===== V2：日志 / 账号 ===== */
 
 export interface LogFile {
@@ -377,6 +418,25 @@ export async function exportModpack(
   });
 }
 
+/* ---------- 任务重试 ---------- */
+
+/** 只有失败/已取消的任务能重试；计划类任务会返回 UNSUPPORTED */
+export async function retryTask(taskId: string): Promise<Task> {
+  return call<Task>("retry_task", { taskId });
+}
+
+/* ---------- JDK ---------- */
+
+/** 下载指定主版本的 Temurin JDK（约 180–200 MB），完成后返回 java.exe 路径 */
+export async function installJava(major: number): Promise<Task> {
+  return call<Task>("install_java", { major });
+}
+
+/** 本项目下载过的 JDK（只读） */
+export async function listManagedJdks(): Promise<ManagedJdk[]> {
+  return call<ManagedJdk[]>("list_managed_jdks", {});
+}
+
 /* ---------- 组件 / Java / 日志 / 账号 ---------- */
 
 export async function getComponentCatalog(
@@ -498,6 +558,7 @@ for (const u of report.updates) {
 
 - 真正的 MSA 登录（`msa_begin` / `msa_poll` 不存在）
 - AI 诊断（`start_diagnose` 不存在）
-- 任务重试（`retry_task` 不存在）
-- JDK 下载（`list_java_runtimes` 只探测）
 - 依赖版本约束匹配（只取第一个兼容版本）
+- JDK 删除/清理（`list_managed_jdks` 只读）
+
+> 任务重试与 JDK 下载**已实现**，见上面的 `retryTask` / `installJava`。
