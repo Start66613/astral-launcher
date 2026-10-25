@@ -520,6 +520,40 @@ fn proxy_from_env() -> Option<(String, String)> {
     None
 }
 
+/// 修复计划：返回需要补做的步骤（只补缺失，不动已有文件）
+///
+/// - `base`：游戏本体（版本 json / jar / 依赖库 / 资源索引任一缺失）
+/// - `loader`：加载器版本目录缺失（例如 Forge 的版本 json 被删）
+pub fn repair_steps(game: &Path, meta: &crate::instance::InstanceMeta) -> Vec<&'static str> {
+    let mut steps = Vec::new();
+
+    let version = meta
+        .launch_version
+        .clone()
+        .unwrap_or_else(|| meta.game_version.clone());
+    let health = crate::instance::health_for_test(game, &version);
+    if !health.ok {
+        // 版本链本身缺东西 → 重跑安装（已存在的文件会跳过）
+        steps.push("base");
+    }
+
+    if let Some(kind) = &meta.loader_kind {
+        let done = match meta.launch_version.as_deref() {
+            Some(lv) => game
+                .join("versions")
+                .join(lv)
+                .join(format!("{lv}.json"))
+                .is_file(),
+            None => false,
+        };
+        if !done {
+            steps.push("loader");
+        }
+        let _ = kind;
+    }
+
+    steps
+}
 /// 启动前自动挑一个 Java：按版本要求的主版本扫描本机运行时
 ///
 /// 显式配置的 javaPath 优先；这里只在没有配置时使用。

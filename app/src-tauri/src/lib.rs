@@ -1326,6 +1326,98 @@ fn run_game_install(
     }
 }
 
+/// 修复实例：只补缺失的文件，不动已有内容
+#[tauri::command]
+async fn repair_instance(instance_id: String) -> Result<Task, String> {
+    let inst = managed_instance(&instance_id)?;
+    if session::active(Some(&instance_id)).is_some() {
+        return Err("INSTANCE_BUSY|实例正在运行，先退出游戏".into());
+    }
+    if task::has_running_kind("repair", Some(&instance_id), None) {
+        return Err("BUSY|该实例已有修复任务在运行".into());
+    }
+    let t = task::create(
+        "repair",
+        Some(instance_id.clone()),
+        Some(inst.game_version.clone()),
+        format!("修复 {}", inst.name),
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let cfg = core::load_config();
+        let meta = match instance::read_meta(&game, &instance_id) {
+            Some(m) => m,
+            None => {
+                task::fail(&tid, "INSTANCE_NOT_FOUND|实例不存在".into());
+                return;
+            }
+        };
+        let steps = core::repair_steps(&game, &meta);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+            for step in &steps {
+                task::check_cancel(&tid)?;
+                match *step {
+                    "base" => {
+                        let t2 = tid.to_string();
+                        core::install(&meta.game_version, &game, &cfg.username, move |pr| {
+                            task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                        })?;
+                    }
+                    "loader" => {
+                        if let (Some(kind), Some(ver)) = (&meta.loader_kind, &meta.loader_version) {
+                            let t2 = tid.to_string();
+                            if kind == "forge" || kind == "neoforge" {
+                                let generated = core::install_forge_like(kind, &meta.game_version, ver, &game, move |pr| {
+                                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                                })?;
+                                let mut m = meta.clone();
+                                m.launch_version = Some(generated);
+                                instance::save_meta(&game, &m)?;
+                            } else {
+                                core::install_loader(&meta.game_version, kind, ver, &game, &cfg.username, move |pr| {
+                                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                                })?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|修复线程崩溃".to_string()));
+
+        match res {
+            Ok(()) => {
+                let version = instance::read_meta(&game, &instance_id)
+                    .and_then(|m| m.launch_version)
+                    .unwrap_or_else(|| meta.game_version.clone());
+                let health = instance::health_for_test(&game, &version);
+                if health.ok {
+                    task::finish(
+                        &tid,
+                        serde_json::json!({
+                            "kind": "repair",
+                            "instanceId": instance_id,
+                            "steps": steps,
+                            "ok": true
+                        }),
+                    );
+                } else {
+                    task::fail(
+                        &tid,
+                        format!("VERIFY_FAILED|修复后仍不完整|{}", health.reasons.join("; ")),
+                    );
+                }
+            }
+            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
+}
 // ── 加载器 ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1651,6 +1743,7 @@ pub fn run() {
             list_loaders,
             start_install_loader,
             list_loader_builds,
+            repair_instance,
             list_target_worlds,
             get_resource_project,
             list_resource_files,
@@ -3048,6 +3141,41 @@ pub fn selftest() -> i32 {
             && java::required_major(&jgame, "1.20.1") == Some(17)
     );
     let _ = std::fs::remove_dir_all(&jgame);
+    // 修复计划：只补缺失，不乱动已有文件
+    let rgame = std::env::temp_dir().join(format!("astral-repair-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&rgame);
+    let _ = std::fs::create_dir_all(rgame.join("versions/1.20.1"));
+    let _ = std::fs::write(rgame.join("versions/1.20.1/1.20.1.json"), "{}");
+    let mut rmeta = instance::InstanceMeta {
+        id: "inst_repair".into(),
+        name: "修复测试".into(),
+        game_version: "1.20.1".into(),
+        loader_kind: Some("fabric".into()),
+        loader_version: Some("0.16.9".into()),
+        launch_version: None,
+        memory_mb: None,
+        jvm_args: vec![],
+        java_path: None,
+        cover: None,
+        created_at: time::now_iso(),
+    };
+    let steps = core::repair_steps(&rgame, &rmeta);
+    check!(
+        "repair plans base and loader",
+        steps.contains(&"base") && steps.contains(&"loader")
+    );
+    // 补齐后不该再有步骤
+    let _ = std::fs::write(rgame.join("versions/1.20.1/1.20.1.jar"), "x");
+    let _ = std::fs::create_dir_all(rgame.join("assets/indexes"));
+    let _ = std::fs::create_dir_all(rgame.join("versions/fabric-1.20.1-0.16.9"));
+    let _ = std::fs::write(
+        rgame.join("versions/fabric-1.20.1-0.16.9/fabric-1.20.1-0.16.9.json"),
+        r#"{"inheritsFrom":"1.20.1"}"#,
+    );
+    rmeta.launch_version = Some("fabric-1.20.1-0.16.9".into());
+    let fixed = core::repair_steps(&rgame, &rmeta);
+    check!("repair nothing left", fixed.is_empty());
+    let _ = std::fs::remove_dir_all(&rgame);
     let cfg = core::Config::default();
     check!(
         "config defaults",

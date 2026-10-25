@@ -455,6 +455,12 @@ export async function downloadTo(
     overwrite: options?.overwrite,
   });
 }
+/* ---------- 实例修复 ---------- */
+
+/** 只补缺失文件，不动已有内容；实例运行中会被拒绝 */
+export async function repairInstance(instanceId: string): Promise<Task> {
+  return call<Task>("repair_instance", { instanceId });
+}
 /* ---------- 光影组件 ---------- */
 
 /** 列出某个组件的全部兼容版本（供玩家自选；第一个是推荐版本） */
