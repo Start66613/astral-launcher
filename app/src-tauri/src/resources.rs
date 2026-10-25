@@ -215,7 +215,7 @@ pub fn files(
 }
 
 /// 版本详情 + 它所属的项目 id（用于校验请求里的 projectId）
-fn version_detail(version_id: &str) -> Result<(ResourceFile, Option<String>), String> {
+pub fn version_detail(version_id: &str) -> Result<(ResourceFile, Option<String>), String> {
     let v = crate::net::fetch_json(&format!("{API}/version/{version_id}"))?;
     let file = parse_file(&v).ok_or_else(|| "VERSION_NOT_FOUND|拿不到该文件信息".to_string())?;
     let project_id = v

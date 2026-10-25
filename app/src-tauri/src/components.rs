@@ -85,6 +85,116 @@ pub fn loader_allows(allowed: &[&str], loader: Option<&str>) -> bool {
 }
 
 /// 列光影支持组件；只查网络，不写文件
+/// 某个组件的静态信息（供计划校验与版本列表使用）
+pub struct SpecInfo {
+    pub project_id: &'static str,
+    pub label: &'static str,
+    pub allowed: &'static [&'static str],
+    pub note: Option<&'static str>,
+}
+
+pub fn spec_info(id: &str) -> Option<SpecInfo> {
+    SPECS.iter().find(|s| s.id == id).map(|s| SpecInfo {
+        project_id: s.project_id,
+        label: s.label,
+        allowed: s.allowed,
+        note: s.note,
+    })
+}
+
+/// 组件的全部兼容发行版本（供玩家自选）
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentVersion {
+    pub version_id: String,
+    pub version_number: String,
+    pub channel: String,
+    pub game_versions: Vec<String>,
+    pub loaders: Vec<String>,
+    pub file_name: String,
+    pub size: u64,
+    pub published_at: String,
+    pub recommended: bool,
+}
+
+pub fn versions(
+    id: &str,
+    game_version: &str,
+    loader: Option<&str>,
+) -> Result<Vec<ComponentVersion>, String> {
+    let spec = spec_info(id)
+        .ok_or_else(|| "INVALID_VALUE|不认识的光影组件".to_string())?;
+    if let Some(note) = spec.note {
+        return Err(format!("UNSUPPORTED|{}|{note}", spec.label));
+    }
+    if !loader_allows(spec.allowed, loader) {
+        return Err(format!(
+            "INCOMPATIBLE|{} 需要 {}，当前是 {}",
+            spec.label,
+            spec.allowed.join(" / "),
+            loader.unwrap_or("原版")
+        ));
+    }
+    let files = crate::resources::files(spec.project_id, Some(game_version), loader)?;
+    let mut out: Vec<ComponentVersion> = files
+        .into_iter()
+        .filter(|f| f.game_versions.iter().any(|g| g == game_version))
+        .map(|f| ComponentVersion {
+            version_id: f.version_id,
+            version_number: f.version_number,
+            channel: f.channel,
+            game_versions: f.game_versions,
+            loaders: f.loaders,
+            file_name: f.file_name,
+            size: f.size,
+            published_at: f.published_at,
+            recommended: false,
+        })
+        .collect();
+    // 稳定性优先级：release > beta > alpha，同级别按接口返回顺序（新的在前）
+    out.sort_by_key(|v| match v.channel.as_str() {
+        "release" => 0,
+        "beta" => 1,
+        _ => 2,
+    });
+    if let Some(first) = out.first_mut() {
+        first.recommended = true;
+    }
+    Ok(out)
+}
+
+/// 校验"玩家选中的版本"确实属于该组件、且与游戏版本/加载器兼容
+pub fn validate_choice(
+    id: &str,
+    version_id: &str,
+    game_version: &str,
+    loader: Option<&str>,
+) -> Result<(crate::resources::ResourceFile, String), String> {
+    let spec = spec_info(id)
+        .ok_or_else(|| "INVALID_VALUE|不认识的光影组件".to_string())?;
+    if let Some(note) = spec.note {
+        return Err(format!("UNSUPPORTED|{}|{note}", spec.label));
+    }
+    let (file, project) = crate::resources::version_detail(version_id)?;
+    if project.as_deref() != Some(spec.project_id) {
+        return Err("INVALID_VALUE|该版本不属于所选组件".into());
+    }
+    if !file.game_versions.iter().any(|g| g == game_version) {
+        return Err(format!(
+            "INCOMPATIBLE|{} {} 不支持 Minecraft {}",
+            spec.label, file.version_number, game_version
+        ));
+    }
+    if let Some(l) = loader {
+        if !file.loaders.iter().any(|x| x.eq_ignore_ascii_case(l)) {
+            return Err(format!(
+                "INCOMPATIBLE|{} {} 不支持加载器 {}",
+                spec.label, file.version_number, l
+            ));
+        }
+    }
+    Ok((file, spec.project_id.to_string()))
+}
 pub fn catalog(game_version: &str, loader: Option<&str>) -> ComponentCatalog {
     let mut out = Vec::new();
 

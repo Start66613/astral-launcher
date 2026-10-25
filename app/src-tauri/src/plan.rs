@@ -26,6 +26,9 @@ pub struct GameInstallRequest {
     /// 光影支持组件：iris | oculus | optifine（null 表示不装）
     #[serde(default)]
     pub shader_support: Option<String>,
+    /// 指定组件版本（Modrinth versionId）；不传则由后端挑推荐版本
+    #[serde(default)]
+    pub shader_support_version: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -168,8 +171,34 @@ pub fn prepare(game: &std::path::Path, request: GameInstallRequest) -> Result<Ga
     // 光影支持组件：按真实兼容性挑，不可用时给出阻塞原因
     let mut components: Vec<PlanComponent> = Vec::new();
     if let Some(want) = request.shader_support.as_deref() {
-        if want != "none" {
-            let loader_kind = request.loader.as_ref().map(|l| l.kind.as_str());
+        let loader_kind = request.loader.as_ref().map(|l| l.kind.as_str());
+        // 玩家指定了具体版本：只认真实存在、属于该组件且兼容的版本
+        if let Some(vid) = request.shader_support_version.as_deref() {
+            match crate::components::validate_choice(
+                want,
+                vid,
+                &request.game_version,
+                loader_kind,
+            ) {
+                Ok((file, project_id)) => {
+                    let label = crate::components::spec_info(want)
+                        .map(|s| s.label.to_string())
+                        .unwrap_or_else(|| want.to_string());
+                    components.push(PlanComponent {
+                        id: want.to_string(),
+                        label,
+                        project_id,
+                        version_id: file.version_id.clone(),
+                        file_name: file.file_name.clone(),
+                        size_bytes: file.size,
+                    });
+                }
+                Err(e) => {
+                    let err = crate::task::decode(&e);
+                    issues.push(issue(&err.code, err.message, true));
+                }
+            }
+        } else if want != "none" {
             let catalog = crate::components::catalog(&request.game_version, loader_kind);
             match catalog.shader_support.iter().find(|c| c.id == want) {
                 None => issues.push(issue(

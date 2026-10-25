@@ -238,6 +238,19 @@ export interface JavaReport {
   recommended: string | null;
 }
 
+/* ===== V2：光影组件版本 ===== */
+
+export interface ComponentVersion {
+  versionId: string;
+  versionNumber: string;
+  channel: "release" | "beta" | "alpha";
+  gameVersions: string[];
+  loaders: string[];
+  fileName: string;
+  size: number;
+  publishedAt: string;
+  recommended: boolean;
+}
 /* ===== V2：JDK 管理 ===== */
 
 export interface ManagedJdk {
@@ -418,6 +431,16 @@ export async function exportModpack(
   });
 }
 
+/* ---------- 光影组件 ---------- */
+
+/** 列出某个组件的全部兼容版本（供玩家自选；第一个是推荐版本） */
+export async function listComponentVersions(
+  id: string,
+  gameVersion: string,
+  loader?: string
+): Promise<ComponentVersion[]> {
+  return call<ComponentVersion[]>("list_component_versions", { id, gameVersion, loader });
+}
 /* ---------- 任务重试 ---------- */
 
 /** 只有失败/已取消的任务能重试；计划类任务会返回 UNSUPPORTED */

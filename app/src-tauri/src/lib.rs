@@ -794,6 +794,15 @@ fn list_managed_jdks() -> Vec<jdk::ManagedJdk> {
     jdk::list_managed(&game_root())
 }
 
+/// 列出某个光影组件的全部兼容发行版本（供玩家自选）
+#[tauri::command]
+fn list_component_versions(
+    id: String,
+    game_version: String,
+    loader: Option<String>,
+) -> Result<Vec<components::ComponentVersion>, String> {
+    components::versions(&id, &game_version, loader.as_deref())
+}
 // ── JDK 下载 ────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1589,6 +1598,7 @@ pub fn run() {
             msa_status,
             get_account,
             get_component_catalog,
+            list_component_versions,
             list_java_runtimes,
             install_java,
             list_managed_jdks,
@@ -1933,6 +1943,7 @@ pub fn selftest() -> i32 {
         loader: None,
         memory_mb: Some(2048),
         shader_support: None,
+        shader_support_version: None,
     };
     let p = plan::prepare(&plan_game, req.clone()).expect("prepare");
     check!(
@@ -2757,6 +2768,7 @@ pub fn selftest() -> i32 {
         }),
         memory_mb: None,
         shader_support: Some("optifine".into()),
+        shader_support_version: None,
     };
     let opti = plan::prepare(&comp_game, optifine_req);
     let opti_blocking = opti
@@ -2787,6 +2799,7 @@ pub fn selftest() -> i32 {
                 }),
                 memory_mb: None,
                 shader_support: Some(parts[4].to_string()),
+                shader_support_version: None,
             };
             match plan::prepare(&game, req) {
                 Ok(p) => {
@@ -2812,7 +2825,7 @@ pub fn selftest() -> i32 {
     // 可选：真机跑完整安装计划（含光影组件），ASTRAL_LIVE_PLAN_INSTALL="gameDir|mc|loader|ver|shader"
     if let Ok(spec) = std::env::var("ASTRAL_LIVE_PLAN_INSTALL") {
         let parts: Vec<&str> = spec.split('|').collect();
-        if parts.len() == 5 {
+        if parts.len() == 5 || parts.len() == 6 {
             let game = std::path::PathBuf::from(parts[0]);
             // 让 game_root() 指向测试目录
             let mut cfg = core::load_config();
@@ -2830,6 +2843,7 @@ pub fn selftest() -> i32 {
                     }),
                     memory_mb: Some(2048),
                     shader_support: Some(parts[4].to_string()),
+                    shader_support_version: parts.get(5).map(|s| s.to_string()),
                 };
                 match plan::prepare(&game, req) {
                     Ok(p) => {
@@ -2904,6 +2918,37 @@ pub fn selftest() -> i32 {
             .unwrap_or(false)
     );
     let _ = std::fs::remove_dir_all(&bad_forge);
+    // 可选：真机验证组件版本列表与越权版本拦截
+    // ASTRAL_LIVE_COMPONENT_VERSIONS="id|mc|loader"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_COMPONENT_VERSIONS") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 3 {
+            match components::versions(parts[0], parts[1], Some(parts[2])) {
+                Ok(list) => {
+                    log.push_str(&format!(
+                        "LIVE component versions={} first={} {} recommended={}\n",
+                        list.len(),
+                        list.first().map(|v| v.version_id.clone()).unwrap_or_default(),
+                        list.first().map(|v| v.version_number.clone()).unwrap_or_default(),
+                        list.first().map(|v| v.recommended).unwrap_or(false)
+                    ));
+                    // 用别的组件版本 id 去校验，必须被拒
+                    let foreign = components::validate_choice(parts[0], "NotARealVersionId", parts[1], Some(parts[2]));
+                    log.push_str(&format!(
+                        "LIVE foreign version rejected={}\n",
+                        foreign.is_err()
+                    ));
+                    if foreign.is_ok() {
+                        fails += 1;
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE component versions failed: {e}\n"));
+                }
+            }
+        }
+    }
     let cfg = core::Config::default();
     check!(
         "config defaults",
