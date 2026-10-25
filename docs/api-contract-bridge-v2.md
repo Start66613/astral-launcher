@@ -431,6 +431,30 @@ export async function exportModpack(
   });
 }
 
+/* ---------- 旧下载接口（不推荐，仅资源包/光影包） ---------- */
+
+/** @deprecated 新代码请用 prepareResourceInstall + startResourceInstall */
+export async function downloadTo(
+  url: string,
+  kind: "mod" | "resourcepack" | "shaderpack" | "datapack" | "modpack",
+  filename: string,
+  options?: {
+    instanceId?: string;   // mod / datapack 必填
+    sha1?: string;
+    sha512?: string;
+    overwrite?: boolean;   // 默认 false，已存在会报 FILE_EXISTS
+  }
+): Promise<string> {
+  return call<string>("download_to", {
+    url,
+    kind,
+    filename,
+    instanceId: options?.instanceId,
+    sha1: options?.sha1,
+    sha512: options?.sha512,
+    overwrite: options?.overwrite,
+  });
+}
 /* ---------- 光影组件 ---------- */
 
 /** 列出某个组件的全部兼容版本（供玩家自选；第一个是推荐版本） */

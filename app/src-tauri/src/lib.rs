@@ -1486,6 +1486,33 @@ fn legacy_msg(encoded: String) -> String {
     }
 }
 
+/// 旧版下载命令的目录规则（可单独测试）
+///
+/// 规则：Mod / 数据包必须指定实例，不允许直接写共享游戏目录；
+/// 资源包 / 光影包 / 整合包允许落到全局目录（它们本来就不是实例专属）。
+pub fn legacy_sub_dir(kind: &str) -> &'static str {
+    match kind {
+        "resourcepack" => "resourcepacks",
+        "shaderpack" => "shaderpacks",
+        "modpack" => "modpacks",
+        "datapack" => "datapacks",
+        _ => "mods",
+    }
+}
+
+pub fn legacy_requires_instance(kind: &str) -> bool {
+    matches!(kind, "mod" | "datapack")
+}
+
+/// ⚠️ 旧接口：新代码请用 prepare_resource_install + start_resource_install。
+///
+/// 本轮安全加固：
+/// - Mod / 数据包必须给 instanceId，禁止写共享目录；
+/// - 目标已存在时默认拒绝覆盖（除非显式 overwrite=true）；
+/// - 可选传入 sha1 / sha512，下载后校验（校验通过才落正式文件）；
+/// - 目标路径同时校验落在实例目录（若给了实例）与游戏目录内。
+///
+/// 已知限制：重定向由底层下载器跟随，白名单只校验初始 URL。
 #[tauri::command]
 async fn download_to(
     app: AppHandle,
@@ -1493,25 +1520,29 @@ async fn download_to(
     kind: String,
     filename: String,
     instance_id: Option<String>,
+    sha1: Option<String>,
+    sha512: Option<String>,
+    overwrite: Option<bool>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let cfg = core::load_config();
         let game = PathBuf::from(&cfg.game_dir);
-        let sub = match kind.as_str() {
-            "resourcepack" => "resourcepacks",
-            "shaderpack" => "shaderpacks",
-            "modpack" => "modpacks",
-            "datapack" => "datapacks",
-            _ => "mods",
-        };
-        // 指定实例时落到实例目录（契约 v3 §5.7）
-        let dir = match instance_id {
+        let sub = legacy_sub_dir(&kind);
+
+        if instance_id.is_none() && legacy_requires_instance(&kind) {
+            return Err(
+                "INVALID_VALUE|Mod / 数据包必须指定实例；建议改用 prepare_resource_install".into(),
+            );
+        }
+
+        let (dir, root) = match instance_id {
             Some(id) => {
                 let inst = instance::find(&game, &id, &play_stats)
                     .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
-                PathBuf::from(inst.dir).join(sub)
+                let d = PathBuf::from(&inst.dir);
+                (d.join(sub), d)
             }
-            None => game.join(sub),
+            None => (game.join(sub), game.clone()),
         };
 
         let safe = PathBuf::from(&filename)
@@ -1519,15 +1550,24 @@ async fn download_to(
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "download.bin".into());
 
-        // 目标必须落在游戏目录内（防空目录穿越与 junction 逃逸），且先落 .part
-        let dest = net::ensure_within(&game, &dir.join(&safe))?;
+        // 目标必须落在（实例或游戏）目录内，且先落 .part
+        let dest = net::ensure_within(&root, &dir.join(&safe))?;
+        let _ = net::ensure_within(&game, &dest)?;
+
+        if dest.exists() && overwrite != Some(true) {
+            return Err(format!(
+                "FILE_EXISTS|{} 已存在；如需覆盖请显式传 overwrite=true",
+                safe
+            ));
+        }
 
         let name = safe.clone();
         let app2 = app.clone();
-        net::download_atomic(
+        net::download_verified(
             &url,
             &dest,
-            None,
+            sha1.as_deref(),
+            sha512.as_deref(),
             move |c: u32, tc: u32, s: u32, ts: u32| {
                 let _ = app2.emit("astral://file", (&name, c, tc, s, ts));
             },
@@ -1537,6 +1577,7 @@ async fn download_to(
     .await
     .map_err(|e| e.to_string())?
 }
+
 
 // ── 启动 ────────────────────────────────────────────────────────
 
@@ -2949,6 +2990,16 @@ pub fn selftest() -> i32 {
             }
         }
     }
+    // 旧下载接口的目录规则
+    check!(
+        "legacy dir rules",
+        legacy_sub_dir("mod") == "mods"
+            && legacy_sub_dir("shaderpack") == "shaderpacks"
+            && legacy_requires_instance("mod")
+            && legacy_requires_instance("datapack")
+            && !legacy_requires_instance("resourcepack")
+            && !legacy_requires_instance("shaderpack")
+    );
     let cfg = core::Config::default();
     check!(
         "config defaults",
