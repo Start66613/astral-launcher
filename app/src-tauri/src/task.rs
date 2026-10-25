@@ -414,6 +414,14 @@ pub fn stage_label_of(stage: &str) -> &'static str {
     }
 }
 
+/// 任务创建出实例后，把实例 id 绑到任务上（删除/改名保护依赖它）
+pub fn bind_instance(task_id: &str, instance_id: &str) {
+    let mut s = store().lock().unwrap();
+    if let Some(t) = s.tasks.get_mut(task_id) {
+        t.instance_id = Some(instance_id.to_string());
+        persist(&s);
+    }
+}
 /// 记录发起参数，供 retry_task 复用
 pub fn set_retry_spec(task_id: &str, spec: serde_json::Value) {
     let mut s = store().lock().unwrap();

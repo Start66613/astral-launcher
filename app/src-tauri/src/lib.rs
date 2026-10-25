@@ -992,6 +992,8 @@ async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, S
                 };
                 let inst = instance::create(&game, &meta)?;
                 created = Some(inst.id.clone());
+                // 整合包安装期间也要保护这个实例
+                task::bind_instance(&tid, &inst.id);
 
                 if !core::version_installed(&game, &index.mc_version) {
                     let t2 = tid.clone();
@@ -1223,6 +1225,8 @@ fn run_game_install(
             };
             let inst = instance::create(&game, &meta)?;
             created = Some(inst.id.clone());
+            // 实例已存在，立刻把任务绑上去，避免安装期间被删除/改名
+            task::bind_instance(tid, &inst.id);
             task::check_cancel(&tid)?;
 
             if let Some(l) = &p.request.loader {
