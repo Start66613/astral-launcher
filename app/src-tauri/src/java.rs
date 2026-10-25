@@ -169,17 +169,31 @@ pub fn scan(game_dir: &Path) -> Vec<JavaRuntime> {
 }
 
 /// 从实例的版本 JSON 里读需要的 Java 主版本（`javaVersion.majorVersion`）
+///
+/// 会沿 `inheritsFrom` 链向上找：加载器版本（如 1.20.1-forge-47.2.0）
+/// 通常自己不带 `javaVersion`，真正的值在父版本里。
 pub fn required_major(game_dir: &Path, mc_version: &str) -> Option<u32> {
-    let p = game_dir
-        .join("versions")
-        .join(mc_version)
-        .join(format!("{mc_version}.json"));
-    let text = std::fs::read_to_string(p).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("javaVersion")
-        .and_then(|j| j.get("majorVersion"))
-        .and_then(|m| m.as_u64())
-        .map(|m| m as u32)
+    let mut cur = mc_version.to_string();
+    for _ in 0..5 {
+        let p = game_dir
+            .join("versions")
+            .join(&cur)
+            .join(format!("{cur}.json"));
+        let text = std::fs::read_to_string(p).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+        if let Some(major) = v
+            .get("javaVersion")
+            .and_then(|j| j.get("majorVersion"))
+            .and_then(|m| m.as_u64())
+        {
+            return Some(major as u32);
+        }
+        match v.get("inheritsFrom").and_then(|x| x.as_str()) {
+            Some(parent) if parent != cur => cur = parent.to_string(),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// 为某个版本挑一个可用的 Java：优先主版本相等，其次更高

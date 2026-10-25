@@ -441,6 +441,16 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
                 .as_ref()
                 .map(|l| (l.kind.clone(), l.version.clone()))
         };
+        // 没指定 Java 时按版本要求自动挑一个（加载器版本会沿继承链找 javaVersion）
+        let auto_java: Option<std::path::PathBuf> = match inst.java_path.as_deref() {
+            Some(p) => Some(std::path::PathBuf::from(p)),
+            None => {
+                let runtimes = java::scan(&main_dir);
+                java::required_major(&main_dir, &version)
+                    .and_then(|req| java::pick_for(&runtimes, req))
+                    .map(|r| std::path::PathBuf::from(r.path))
+            }
+        };
         let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             task::progress(&tid, "validate", "检查实例与版本文件", 0, 0);
             core::spawn_with(
@@ -451,7 +461,7 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
                 &cfg.username,
                 inst.memory_mb,
                 &inst.jvm_args,
-                inst.java_path.as_deref().map(std::path::Path::new),
+                auto_java.as_deref(),
                 move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
             )
         }))
@@ -1346,6 +1356,16 @@ async fn start_install_loader(
     let inst = managed_instance(&instance_id)?;
     if task::has_running_kind("loader", Some(&instance_id), Some(&inst.game_version)) {
         return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
+    // 先确认这个加载器版本确实存在且适配该游戏版本（避免跑到一半 404）
+    let builds = loader::builds(&inst.game_version, &kind)?;
+    if !builds.iter().any(|b| b.version == version) {
+        let sample: Vec<String> = builds.iter().take(3).map(|b| b.version.clone()).collect();
+        return Err(format!(
+            "INCOMPATIBLE|{kind} {version} 没有适用于 Minecraft {} 的构建|可用示例：{}",
+            inst.game_version,
+            if sample.is_empty() { "无".to_string() } else { sample.join(", ") }
+        ));
     }
     let t = task::create(
         "loader",
@@ -3008,6 +3028,25 @@ pub fn selftest() -> i32 {
             && !legacy_requires_instance("resourcepack")
             && !legacy_requires_instance("shaderpack")
     );
+    // Java 要求的主版本会沿 inheritsFrom 找（加载器版本自己通常不带 javaVersion）
+    let jgame = std::env::temp_dir().join(format!("astral-java-chain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&jgame);
+    let _ = std::fs::create_dir_all(jgame.join("versions/1.20.1"));
+    let _ = std::fs::create_dir_all(jgame.join("versions/1.20.1-forge-47.2.0"));
+    let _ = std::fs::write(
+        jgame.join("versions/1.20.1/1.20.1.json"),
+        r#"{"javaVersion":{"majorVersion":17}}"#,
+    );
+    let _ = std::fs::write(
+        jgame.join("versions/1.20.1-forge-47.2.0/1.20.1-forge-47.2.0.json"),
+        r#"{"inheritsFrom":"1.20.1"}"#,
+    );
+    check!(
+        "java required via inheritsFrom",
+        java::required_major(&jgame, "1.20.1-forge-47.2.0") == Some(17)
+            && java::required_major(&jgame, "1.20.1") == Some(17)
+    );
+    let _ = std::fs::remove_dir_all(&jgame);
     let cfg = core::Config::default();
     check!(
         "config defaults",
