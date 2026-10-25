@@ -449,13 +449,21 @@ pub fn take(plan_id: &str, revision: u32) -> Result<StoredResourcePlan, String> 
 /// 真正下载并落盘（调用方已在任务线程里）
 pub fn execute(
     stored: &StoredResourcePlan,
+    should_cancel: impl Fn() -> bool,
     mut on: impl FnMut(u32, u32),
 ) -> Result<PathBuf, String> {
     let dir = PathBuf::from(&stored.plan.target_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
 
+    if should_cancel() {
+        return Err("CANCELLED|已取消".into());
+    }
+
     // 先装必需依赖，再装本体；两者都在 .part 阶段完成 SHA1/SHA512 校验
     for (i, dep) in stored.plan.dependencies.iter().enumerate() {
+        if should_cancel() {
+            return Err("CANCELLED|已取消".into());
+        }
         let (url, _name) = &stored.dep_urls[i];
         let dep_dest = dir.join(&dep.file_name);
         crate::net::download_verified(
@@ -469,6 +477,9 @@ pub fn execute(
         )?;
     }
 
+    if should_cancel() {
+        return Err("CANCELLED|已取消".into());
+    }
     let dest = dir.join(&stored.plan.file_name);
     crate::net::download_verified(
         &stored.url,
@@ -524,7 +535,7 @@ pub fn live_probe(
         return Err(format!("{}|{}", b.code, b.message));
     }
     let stored = take(&plan.plan_id, 1)?;
-    let p = execute(&stored, |_, _| {})?;
+    let p = execute(&stored, || false, |_, _| {})?;
     Ok(p.to_string_lossy().to_string())
 }
 

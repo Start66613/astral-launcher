@@ -584,13 +584,28 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         task::start(&tid);
         let t2 = tid.clone();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            resources::execute(&stored, move |c, total| {
-                task::progress(&t2, "download", format!("下载 {c}/{total}"), c, total);
-            })
+            let tid_c = tid.clone();
+            resources::execute(
+                &stored,
+                move || task::is_cancelled(&tid_c),
+                move |c, total| {
+                    task::progress(&t2, "download", format!("下载 {c}/{total}"), c, total);
+                },
+            )
         }))
         .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|资源安装线程崩溃".to_string()));
 
         match res {
+            // 已经装完才收到取消：如实报告完成，不假装已取消
+            Ok(path) if task::is_cancelled(&tid) => task::finish(
+                &tid,
+                serde_json::json!({
+                    "kind": "resource-install",
+                    "path": path.to_string_lossy(),
+                    "file": stored.plan.file_name,
+                    "cancelledLate": true,
+                }),
+            ),
             Ok(path) => task::finish(
                 &tid,
                 serde_json::json!({
@@ -599,7 +614,9 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
                     "file": stored.plan.file_name,
                 }),
             ),
-            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Err(e) if task::is_cancelled(&tid) || e.starts_with("CANCELLED") => {
+                task::cancelled(&tid)
+            }
             Err(e) => task::fail(&tid, e),
         }
     });
@@ -792,9 +809,15 @@ async fn install_java(major: u32) -> Result<Task, String> {
         let game = game_root();
         let t2 = tid.clone();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            jdk::install(major, &game, move |stage, done, total| {
-                task::progress(&t2, stage, format!("Java {major} {done}/{total}"), done, total);
-            })
+            let tc = tid.clone();
+            jdk::install(
+                major,
+                &game,
+                move || task::is_cancelled(&tc),
+                move |stage, done, total| {
+                    task::progress(&t2, stage, format!("Java {major} {done}/{total}"), done, total);
+                },
+            )
         }))
         .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|Java 下载线程崩溃".to_string()));
 
@@ -1007,15 +1030,27 @@ async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, S
 
                 let inst_dir = instance::instance_dir(&game, &inst.id);
                 let t2 = tid.clone();
-                modpack::download_files(&index, &inst_dir, move |d, total| {
-                    task::progress(&t2, "download", format!("整合包文件 {d}/{total}"), d, total);
-                })?;
+                let tc = tid.clone();
+                modpack::download_files(
+                    &index,
+                    &inst_dir,
+                    &move || task::is_cancelled(&tc),
+                    move |d, total| {
+                        task::progress(&t2, "download", format!("整合包文件 {d}/{total}"), d, total);
+                    },
+                )?;
                 task::check_cancel(&tid)?;
 
                 let t3 = tid.clone();
-                modpack::extract_overrides(&stored.pack_path, &inst_dir, move |d, _| {
-                    task::progress(&t3, "extract", format!("解压覆盖文件 {d}"), d, 0);
-                })?;
+                let tc2 = tid.clone();
+                modpack::extract_overrides(
+                    &stored.pack_path,
+                    &inst_dir,
+                    &move || task::is_cancelled(&tc2),
+                    move |d, _| {
+                        task::progress(&t3, "extract", format!("解压覆盖文件 {d}"), d, 0);
+                    },
+                )?;
 
                 let fresh = instance::find(&game, &inst.id, &play_stats)
                     .ok_or_else(|| "INTERNAL|安装后读不到实例".to_string())?;
@@ -2020,7 +2055,7 @@ pub fn selftest() -> i32 {
                 return Err(format!("{}|{}", b.code, b.message));
             }
             let stored = resources::take(&rp.plan_id, 1)?;
-            let p = resources::execute(&stored, |_, _| {})?;
+            let p = resources::execute(&stored, || false, |_, _| {})?;
             Ok(p.to_string_lossy().to_string())
         };
         match run() {
@@ -2110,7 +2145,7 @@ pub fn selftest() -> i32 {
                     return Err(format!("{}|{}", b.code, b.message));
                 }
                 let stored = modpack::take(&plan.plan_id, 1)?;
-                modpack::install(&stored, &game, "Steve", |_s, _l, _d, _t| {})
+                modpack::install(&stored, &game, "Steve", || false, |_s, _l, _d, _t| {})
             })();
             match r {
                 Ok(id) => log.push_str(&format!("LIVE modpack ok: {id}\n")),
@@ -2426,7 +2461,7 @@ pub fn selftest() -> i32 {
             let major: u32 = parts[0].parse().unwrap_or(21);
             let game = std::path::PathBuf::from(parts[1]);
             log.push_str(&format!("LIVE jdk start: java {major}\n"));
-            match jdk::install(major, &game, |_s, _d, _t| {}) {
+            match jdk::install(major, &game, || false, |_s, _d, _t| {}) {
                 Ok(r) => {
                     log.push_str(&format!(
                         "LIVE jdk ok: version={} path={} bytes={}\n",
@@ -2591,6 +2626,68 @@ pub fn selftest() -> i32 {
     );
     let _ = std::fs::remove_dir_all(&compat_game);
 
+    // #5 installer 生成的 version id 推导（多实例共享 / 重复安装复用）
+    check!(
+        "forge version id",
+        core::forge_version_id("forge", "1.20.1", "47.2.0") == "1.20.1-forge-47.2.0"
+            && core::forge_version_id("neoforge", "1.21.1", "21.1.72") == "neoforge-21.1.72"
+            && core::forge_version_id("neoforge", "1.20.1", "47.1.106") == "1.20.1-forge-47.1.106"
+    );
+    // 已装过时直接复用，不发网络请求
+    let forge_game = std::env::temp_dir().join(format!("astral-forge-reuse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&forge_game);
+    let vid = "1.20.1-forge-47.2.0";
+    let _ = std::fs::create_dir_all(forge_game.join("versions").join(vid));
+    let _ = std::fs::write(
+        forge_game.join("versions").join(vid).join(format!("{vid}.json")),
+        r#"{"id":"1.20.1-forge-47.2.0","inheritsFrom":"1.20.1"}"#,
+    );
+    let reused = core::install_forge_like("forge", "1.20.1", "47.2.0", &forge_game, |_| {});
+    check!(
+        "forge reuse installed",
+        reused.as_ref().map(|s| s == vid).unwrap_or(false)
+    );
+    let _ = std::fs::remove_dir_all(&forge_game);
+
+    // #3 取消：开始前就取消，不应发起下载
+    let cancel_dir = std::env::temp_dir().join(format!("astral-cancel-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&cancel_dir);
+    let stored = resources::StoredResourcePlan {
+        plan: resources::ResourcePlan {
+            plan_id: "rplan_test".into(),
+            instance_id: "inst_test".into(),
+            revision: 1,
+            expires_at: String::new(),
+            kind: "mod".into(),
+            project_id: "P".into(),
+            version_id: "V".into(),
+            file_name: "test.jar".into(),
+            target_dir: cancel_dir.to_string_lossy().to_string(),
+            download_bytes: 0,
+            replaces: None,
+            issues: Vec::new(),
+            dependencies: Vec::new(),
+        },
+        url: "https://cdn.modrinth.com/data/P/versions/V/test.jar".into(),
+        sha1: None,
+        sha512: None,
+        dep_urls: Vec::new(),
+        created_ms: 0,
+    };
+    let cancelled = resources::execute(&stored, || true, |_, _| {});
+    check!(
+        "resource cancel short-circuits",
+        cancelled
+            .as_ref()
+            .err()
+            .map(|e| e.starts_with("CANCELLED"))
+            .unwrap_or(false)
+    );
+    check!(
+        "resource cancel wrote nothing",
+        !cancel_dir.join("test.jar").exists()
+    );
+    let _ = std::fs::remove_dir_all(&cancel_dir);
     let cfg = core::Config::default();
     check!(
         "config defaults",

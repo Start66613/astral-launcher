@@ -343,6 +343,7 @@ pub fn take(plan_id: &str, revision: u32) -> Result<StoredModpackPlan, String> {
 pub fn extract_overrides(
     pack: &Path,
     instance_dir: &Path,
+    should_cancel: &dyn Fn() -> bool,
     mut on: impl FnMut(u32, u32),
 ) -> Result<u32, String> {
     const MAX_TOTAL: u64 = 512 * 1024 * 1024;
@@ -404,11 +405,15 @@ pub fn extract_overrides(
 pub fn download_files(
     index: &ModpackIndex,
     instance_dir: &Path,
+    should_cancel: &dyn Fn() -> bool,
     mut on: impl FnMut(u32, u32),
 ) -> Result<u32, String> {
     let total = index.files.len() as u32;
     let mut done = 0u32;
     for f in &index.files {
+        if should_cancel() {
+            return Err("CANCELLED|已取消".into());
+        }
         if crate::net::check_url(&f.url).is_err() {
             return Err(format!("BLOCKED_URL|不允许的来源：{}", f.url));
         }
@@ -433,6 +438,7 @@ pub fn install(
     stored: &StoredModpackPlan,
     game: &Path,
     username: &str,
+    should_cancel: impl Fn() -> bool,
     mut on: impl FnMut(&str, &str, u32, u32),
 ) -> Result<String, String> {
     let index = read_index(&stored.pack_path)?;
@@ -451,6 +457,11 @@ pub fn install(
     };
     let inst = crate::instance::create(game, &meta)?;
     let inst_id = inst.id.clone();
+
+    if should_cancel() {
+        let _ = crate::instance::delete(game, &inst_id, false);
+        return Err("CANCELLED|已取消".into());
+    }
 
     let mut run = || -> Result<(), String> {
         if !crate::core::version_installed(game, &index.mc_version) {
@@ -474,8 +485,15 @@ pub fn install(
             }
         }
         let dir = crate::instance::instance_dir(game, &inst_id);
-        download_files(&index, &dir, |d, total| on("download", "整合包文件", d, total))?;
-        extract_overrides(&stored.pack_path, &dir, |d, _| on("extract", "解压覆盖文件", d, 0))?;
+        if should_cancel() {
+            return Err("CANCELLED|已取消".into());
+        }
+        download_files(&index, &dir, &should_cancel, |d, total| {
+            on("download", "整合包文件", d, total)
+        })?;
+        extract_overrides(&stored.pack_path, &dir, &should_cancel, |d, _| {
+        on("extract", "解压覆盖文件", d, 0)
+    })?;
         Ok(())
     };
 

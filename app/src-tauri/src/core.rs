@@ -463,6 +463,14 @@ fn proxy_from_env() -> Option<(String, String)> {
     None
 }
 
+/// installer 会生成的 version id（用于"已装过就复用"与多实例共享判定）
+pub fn forge_version_id(kind: &str, mc: &str, ver: &str) -> String {
+    match kind {
+        "neoforge" if mc != "1.20.1" => format!("neoforge-{ver}"),
+        _ => format!("{mc}-forge-{ver}"),
+    }
+}
+
 /// 用官方 installer 安装 Forge / NeoForge，返回生成的 version id
 pub fn install_forge_like(
     kind: &str,
@@ -471,6 +479,17 @@ pub fn install_forge_like(
     main_dir: &Path,
     mut on: impl FnMut(Progress),
 ) -> Result<String, String> {
+    // 已装过就复用：多个实例共享同一份加载器文件，重复安装不该报错
+    let expected = forge_version_id(kind, mc, ver);
+    let expected_json = main_dir
+        .join("versions")
+        .join(&expected)
+        .join(format!("{expected}.json"));
+    if expected_json.is_file() {
+        on(blank("install", &format!("{kind} {ver} 已安装，复用")));
+        return Ok(expected);
+    }
+
     let url = installer_url(kind, mc, ver)?;
 
     let cache = main_dir.join(".astral").join("installers");
@@ -554,6 +573,10 @@ pub fn install_forge_like(
         return Err(format!("INTERNAL|{kind} 安装器执行失败|{last_tail}"));
     }
 
+    // 安装器成功：优先认它应该生成的 id（可能已被别的实例装过），再看差集
+    if expected_json.is_file() {
+        return Ok(expected);
+    }
     let created: Vec<String> = scan_installed(main_dir)
         .into_iter()
         .filter(|v| !before.contains(v))

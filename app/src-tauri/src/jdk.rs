@@ -25,6 +25,7 @@ fn str_of(v: &serde_json::Value, key: &str) -> Option<String> {
 pub fn install(
     major: u32,
     game_dir: &Path,
+    should_cancel: impl Fn() -> bool,
     mut on: impl FnMut(&str, u32, u32),
 ) -> Result<JdkResult, String> {
     if !(8..=30).contains(&major) {
@@ -60,6 +61,10 @@ pub fn install(
         .unwrap_or_else(|| format!("jdk-{major}.zip"));
     let zip_path = cache.join(&safe_name);
 
+    if should_cancel() {
+        return Err("CANCELLED|已取消".into());
+    }
+
     if !zip_path.is_file() {
         on("download", 0, 1);
         crate::net::download_atomic(&link, &zip_path, None, |c, t, _s, _ts| {
@@ -73,6 +78,10 @@ pub fn install(
             let _ = std::fs::remove_file(&zip_path);
             return Err(format!("HASH_MISMATCH|JDK 校验失败|期望 {want}，实际 {got}"));
         }
+    }
+
+    if should_cancel() {
+        return Err("CANCELLED|已取消".into());
     }
 
     let dest = game_dir.join("jvm").join(format!("adoptium-{major}"));
