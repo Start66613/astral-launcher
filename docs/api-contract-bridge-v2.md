@@ -455,6 +455,32 @@ export async function downloadTo(
     overwrite: options?.overwrite,
   });
 }
+/* ---------- 结构化日志诊断 ---------- */
+
+export interface Finding {
+  id: string;
+  label: string;
+  severity: "error" | "warn" | "info";
+  evidence: string[];
+  hint: string;
+}
+
+export interface DiagnosisReport {
+  logId: string;
+  logName: string;
+  lines: number;
+  findings: Finding[];
+  text: string;
+}
+
+/** 本地规则诊断：不联网、不上传；AI 分析仍未实现 */
+export async function diagnoseInstance(
+  instanceId: string,
+  logId?: string,
+  maxLines?: number
+): Promise<DiagnosisReport> {
+  return call<DiagnosisReport>("diagnose_instance", { instanceId, logId, maxLines });
+}
 /* ---------- 实例修复 ---------- */
 
 /** 只补缺失文件，不动已有内容；实例运行中会被拒绝 */

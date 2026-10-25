@@ -1418,6 +1418,20 @@ async fn repair_instance(instance_id: String) -> Result<Task, String> {
     });
     Ok(t)
 }
+/// 结构化日志诊断：返回命中的问题分类与脱敏原文（不上传任何内容）
+#[tauri::command]
+fn diagnose_instance(
+    instance_id: String,
+    log_id: Option<String>,
+    max_lines: Option<u32>,
+) -> Result<logs::DiagnosisReport, String> {
+    let inst = managed_instance(&instance_id)?;
+    logs::diagnose(
+        std::path::Path::new(&inst.dir),
+        log_id.as_deref(),
+        max_lines.unwrap_or(5000).min(20000),
+    )
+}
 // ── 加载器 ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1764,6 +1778,7 @@ pub fn run() {
             list_logs,
             read_log,
             prepare_diagnosis,
+            diagnose_instance,
             install_version,
             launch_version,
             download_to
@@ -3176,6 +3191,30 @@ pub fn selftest() -> i32 {
     let fixed = core::repair_steps(&rgame, &rmeta);
     check!("repair nothing left", fixed.is_empty());
     let _ = std::fs::remove_dir_all(&rgame);
+    // 日志诊断：能认出常见崩溃原因
+    let dgame = std::env::temp_dir().join(format!("astral-diag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dgame);
+    let _ = std::fs::create_dir_all(dgame.join("logs"));
+    let _ = std::fs::write(
+        dgame.join("logs/latest.log"),
+        "java.lang.UnsupportedClassVersionError: 65.0\n\
+         java.lang.NoClassDefFoundError: net/minecraft/client/Minecraft\n\
+         java.lang.OutOfMemoryError: Java heap space\n",
+    );
+    match logs::diagnose(&dgame, None, 100) {
+        Ok(r) => {
+            let ids: Vec<&str> = r.findings.iter().map(|f| f.id).collect();
+            check!(
+                "diagnose finds root causes",
+                ids.contains(&"java-version")
+                    && ids.contains(&"missing-class")
+                    && ids.contains(&"out-of-memory")
+                    && !r.text.is_empty()
+            );
+        }
+        Err(_) => check!("diagnose finds root causes", false),
+    }
+    let _ = std::fs::remove_dir_all(&dgame);
     let cfg = core::Config::default();
     check!(
         "config defaults",

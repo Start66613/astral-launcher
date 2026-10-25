@@ -255,6 +255,185 @@ pub fn redact(input: &str) -> (String, u32) {
 }
 
 /// 诊断预览：读日志尾部 + 脱敏，不上传
+/// 结构化诊断结果
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosisReport {
+    pub log_id: String,
+    pub log_name: String,
+    pub lines: u32,
+    pub findings: Vec<Finding>,
+    /// 全部脱敏文本（供"查看原文"用，已裁剪）
+    pub text: String,
+}
+
+/// 对实例日志做结构化诊断（读 → 脱敏 → 规则匹配）
+pub fn diagnose(
+    instance_dir: &Path,
+    log_id: Option<&str>,
+    max_lines: u32,
+) -> Result<DiagnosisReport, String> {
+    let files = list(instance_dir);
+    let picked = match log_id {
+        Some(id) => files
+            .iter()
+            .find(|f| f.id == id)
+            .ok_or_else(|| "INVALID_VALUE|日志不存在".to_string())?,
+        None => files
+            .iter()
+            .find(|f| f.kind == "game")
+            .or_else(|| files.first())
+            .ok_or_else(|| "INVALID_VALUE|该实例还没有日志".to_string())?,
+    };
+    let text = read(instance_dir, &picked.id, Some(max_lines))?;
+    let (clean, _redactions) = redact(&text.text);
+    let findings = classify_text(&clean);
+    Ok(DiagnosisReport {
+        log_id: picked.id.clone(),
+        log_name: picked.name.clone(),
+        lines: text.lines,
+        findings,
+        text: clean,
+    })
+}
+/// 结构化诊断的一条结论
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Finding {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// info | warn | error
+    pub severity: &'static str,
+    /// 命中的日志行（已脱敏，最多 3 条）
+    pub evidence: Vec<String>,
+    /// 给玩家的下一步建议
+    pub hint: &'static str,
+}
+
+struct Rule {
+    id: &'static str,
+    label: &'static str,
+    severity: &'static str,
+    hint: &'static str,
+    patterns: &'static [&'static str],
+}
+
+const RULES: &[Rule] = &[
+    Rule {
+        id: "java-version",
+        label: "Java 版本不匹配",
+        severity: "error",
+        hint: "换用该版本要求的 Java（实例设置里可指定 javaPath）",
+        patterns: &["UnsupportedClassVersionError", "requires Java", "class file version"],
+    },
+    Rule {
+        id: "missing-class",
+        label: "缺少类或依赖库",
+        severity: "error",
+        hint: "用「修复实例」补全依赖库；仍失败请检查加载器是否装对",
+        patterns: &[
+            "NoClassDefFoundError",
+            "ClassNotFoundException",
+            "Could not find or load main class",
+            "java.lang.NoSuchMethodError",
+        ],
+    },
+    Rule {
+        id: "mod-conflict",
+        label: "模组冲突或重复",
+        severity: "error",
+        hint: "移除重复/不兼容的模组；看日志里被点名的 mod id",
+        patterns: &[
+            "Duplicate mods",
+            "Incompatible mod set",
+            "ModResolutionException",
+            "Duplicate entry",
+            "already registered",
+        ],
+    },
+    Rule {
+        id: "out-of-memory",
+        label: "内存不足",
+        severity: "error",
+        hint: "调大实例内存（建议 2–4 GB），或减少大型整合包",
+        patterns: &["OutOfMemoryError", "Java heap space", "GC overhead limit"],
+    },
+    Rule {
+        id: "graphics",
+        label: "显卡/窗口初始化失败",
+        severity: "error",
+        hint: "更新显卡驱动；笔记本请确认用独显运行；必要时关闭光影",
+        patterns: &[
+            "GLFW error",
+            "Failed to create window",
+            "Pixel format not accelerated",
+            "OpenGL",
+            "A fatal error has been detected",
+        ],
+    },
+    Rule {
+        id: "download",
+        label: "下载或校验失败",
+        severity: "warn",
+        hint: "检查网络/镜像设置后重试；同目录可能留有 .part 临时文件",
+        patterns: &[
+            "Failed to download",
+            "Couldn't download",
+            "Checksum",
+            "HASH_MISMATCH",
+            "Connection reset",
+        ],
+    },
+    Rule {
+        id: "auth",
+        label: "登录凭据问题",
+        severity: "warn",
+        hint: "重新输入用户名；正版登录需先配置微软应用",
+        patterns: &["Invalid credentials", "Authentication", "Failed to login"],
+    },
+];
+
+/// 对纯文本日志做规则匹配（可单测，不读文件）
+pub fn classify_text(text: &str) -> Vec<Finding> {
+    let mut out: Vec<Finding> = Vec::new();
+    for rule in RULES {
+        let mut evidence: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if evidence.len() >= 3 {
+                break;
+            }
+            let lower = line.to_ascii_lowercase();
+            if rule
+                .patterns
+                .iter()
+                .any(|p| lower.contains(&p.to_ascii_lowercase()))
+            {
+                let trimmed = line.trim();
+                if trimmed.len() > 240 {
+                    evidence.push(trimmed.chars().take(240).collect());
+                } else {
+                    evidence.push(trimmed.to_string());
+                }
+            }
+        }
+        if !evidence.is_empty() {
+            out.push(Finding {
+                id: rule.id,
+                label: rule.label,
+                severity: rule.severity,
+                evidence,
+                hint: rule.hint,
+            });
+        }
+    }
+    // 错误优先展示
+    out.sort_by_key(|f| match f.severity {
+        "error" => 0,
+        "warn" => 1,
+        _ => 2,
+    });
+    out
+}
 pub fn prepare(instance_dir: &Path, log_ids: &[String], max_lines: u32) -> Result<DiagnosisPreview, String> {
     if log_ids.is_empty() {
         return Err("INVALID_VALUE|至少选择一个日志".into());
@@ -286,6 +465,30 @@ pub fn prepare(instance_dir: &Path, log_ids: &[String], max_lines: u32) -> Resul
 mod tests {
     use super::*;
 
+    #[test]
+    fn classifies_common_failures() {
+        let text = "\
+java.lang.UnsupportedClassVersionError: 65.0
+Caused by: java.lang.NoClassDefFoundError: net/minecraft/client/Minecraft
+java.lang.OutOfMemoryError: Java heap space
+GLFW error 65542: WGL: The driver does not appear to support OpenGL
+Duplicate mods found: sodium
+";
+        let found = classify_text(text);
+        let ids: Vec<&str> = found.iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"java-version"));
+        assert!(ids.contains(&"missing-class"));
+        assert!(ids.contains(&"out-of-memory"));
+        assert!(ids.contains(&"graphics"));
+        assert!(ids.contains(&"mod-conflict"));
+        assert!(found.iter().all(|f| f.evidence.len() <= 3));
+    }
+
+    #[test]
+    fn no_findings_on_clean_log() {
+        let clean = "[12:00:00] [main/INFO]: Loading Minecraft 1.20.1\n";
+        assert!(classify_text(clean).is_empty());
+    }
     #[test]
     fn redacts_email_and_ip() {
         let (out, n) = redact("contact me at steve@example.com from 192.168.1.20");
