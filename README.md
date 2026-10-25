@@ -71,8 +71,11 @@ pnpm tauri build    # 出 exe
 ### 测试
 
 ```powershell
-# 无界面自检（当前 76 项，输出 log + json）
+# 无界面自检（当前 93 项，输出 log + json）
 .\astral.exe --selftest
+
+# 单元测试（46 项，release 构建后复制到仓库外运行）
+# pwsh -NoProfile -File scripts/run-tests.ps1
 
 # 命令注册表校验（防止写了命令忘记注册）
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-commands.ps1
