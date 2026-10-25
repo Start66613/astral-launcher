@@ -129,6 +129,19 @@ pub fn download_atomic(
     url: &str,
     dest: &Path,
     expected_sha1: Option<&str>,
+    on_progress: impl FnMut(u32, u32, u32, u32),
+) -> Result<u64, String> {
+    download_verified(url, dest, expected_sha1, None, on_progress)
+}
+
+/// 下载并校验（SHA1 + 可选 SHA512），**全部校验通过后才提交正式文件**。
+///
+/// 旧文件在提交前不会被改动；任何失败都只删除 `.part`，旧文件原样保留。
+pub fn download_verified(
+    url: &str,
+    dest: &Path,
+    expected_sha1: Option<&str>,
+    expected_sha512: Option<&str>,
     mut on_progress: impl FnMut(u32, u32, u32, u32),
 ) -> Result<u64, String> {
     check_url(url)?;
@@ -147,7 +160,16 @@ pub fn download_atomic(
         let got = sha1_file(&part)?;
         if !got.eq_ignore_ascii_case(want) {
             let _ = std::fs::remove_file(&part);
-            return Err(format!("HASH_MISMATCH|校验失败|期望 {want}，实际 {got}"));
+            return Err(format!("HASH_MISMATCH|SHA1 校验失败|期望 {want}，实际 {got}"));
+        }
+    }
+
+    // SHA512 必须在 rename 之前校验，否则旧文件已经被覆盖，回滚不回去
+    if let Some(want) = expected_sha512 {
+        let got = sha512_file(&part)?;
+        if !got.eq_ignore_ascii_case(want) {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("HASH_MISMATCH|SHA512 校验失败|期望 {want}"));
         }
     }
 

@@ -145,9 +145,13 @@ pub fn emit_exit(app: &AppHandle, s: &GameSession) {
     let _ = app.emit(EVENT, payload);
 }
 
-/// 当前会话；期间做一次 pid 对账
+/// 当前**存活**会话；期间做一次 pid 对账
+///
+/// 进程已退出的会话会被就地收尾并跳过——不能把它当成"还在运行"返回，
+/// 否则 start_launch / delete_instance 会误报 INSTANCE_BUSY。
 pub fn active(instance_id: Option<&str>) -> Option<GameSession> {
     let mut list = store().lock().unwrap();
+    let mut changed = false;
     for s in list.iter_mut().rev() {
         if s.state == "exited" {
             continue;
@@ -158,14 +162,18 @@ pub fn active(instance_id: Option<&str>) -> Option<GameSession> {
             }
         }
         if !pid_alive(s.pid) {
+            // 进程已退出：收尾这条会话，但**不能**把它当作"还在运行"返回，
+            // 否则 start_launch / delete_instance 会误报 INSTANCE_BUSY
             s.state = "exited".into();
             s.ended_at = Some(crate::task::now_iso());
             s.duration_ms = Some(duration_ms(&s.started_at));
-            let snap = s.clone();
-            persist(&list);
-            return Some(snap);
+            changed = true;
+            continue;
         }
         return Some(s.clone());
+    }
+    if changed {
+        persist(&list);
     }
     None
 }

@@ -199,6 +199,13 @@ struct InstancePatch {
 #[tauri::command]
 fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String> {
     let game = game_root();
+    // 运行中或有任务时不允许修改（改名会让启动/安装期间的路径漂移）
+    if session::active(Some(&id)).is_some() {
+        return error::fail(error::INSTANCE_BUSY, "实例正在运行，先退出游戏");
+    }
+    if task::has_running(&id) {
+        return error::fail(error::INSTANCE_BUSY, "实例有进行中的任务");
+    }
     let mut meta = instance::read_meta(&game, &id)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在或不是托管实例".to_string())?;
     if let Some(name) = patch.name {
@@ -566,7 +573,12 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         return Err(format!("{}|{}", first.code, first.message));
     }
     let title = format!("安装 {}", stored.plan.file_name);
-    let t = task::create("resource-install", None, None, title);
+    let t = task::create(
+        "resource-install",
+        Some(stored.plan.instance_id.clone()),
+        None,
+        title,
+    );
     let tid = t.task_id.clone();
     std::thread::spawn(move || {
         task::start(&tid);
@@ -2544,6 +2556,40 @@ pub fn selftest() -> i32 {
             .map(|x| x.stage_label == "下载文件" && x.phase == "downloading")
             .unwrap_or(false)
     );
+
+    // #8 已失效 PID 的会话不能被当成"还在运行"
+    let dead = session::begin("inst_dead", "task_dead", 0);
+    check!("session dead not active", session::active(Some("inst_dead")).is_none());
+    check!(
+        "session dead reconciled",
+        session::list(Some("inst_dead"), 1)
+            .first()
+            .map(|s| s.state == "exited")
+            .unwrap_or(false)
+    );
+    let _ = dead;
+
+    // #2 兼容实例（managed=false）不允许安装资源（不发网络请求就会被拒绝）
+    let compat_game = std::env::temp_dir().join(format!("astral-compat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&compat_game);
+    let _ = std::fs::create_dir_all(compat_game.join("versions/1.20.1"));
+    let _ = std::fs::write(compat_game.join("versions/1.20.1/1.20.1.json"), "{}");
+    let compat = instance::discover(&compat_game, &play_stats);
+    let compat_id = compat.first().map(|i| i.id.clone()).unwrap_or_default();
+    let req = resources::ResourceInstallRequest {
+        instance_id: compat_id.clone(),
+        kind: "mod".into(),
+        project_id: "AANobbMI".into(),
+        version_id: "nonexistent".into(),
+        world_id: None,
+        overwrite: false,
+    };
+    let r = resources::prepare(&compat_game, req, &play_stats);
+    check!(
+        "resource rejects compat instance",
+        r.as_ref().err().map(|e| e.starts_with("UNSUPPORTED")).unwrap_or(false)
+    );
+    let _ = std::fs::remove_dir_all(&compat_game);
 
     let cfg = core::Config::default();
     check!(

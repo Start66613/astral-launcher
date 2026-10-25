@@ -67,6 +67,8 @@ pub struct ResourceInstallRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ResourcePlan {
     pub plan_id: String,
+    /// 目标实例，任务与保护逻辑都依赖它
+    pub instance_id: String,
     pub revision: u32,
     pub expires_at: String,
     pub kind: String,
@@ -213,8 +215,18 @@ pub fn files(
 }
 
 fn file_of_version(version_id: &str) -> Result<ResourceFile, String> {
+    version_detail(version_id).map(|(f, _)| f)
+}
+
+/// 版本详情 + 它所属的项目 id（用于校验请求里的 projectId）
+fn version_detail(version_id: &str) -> Result<(ResourceFile, Option<String>), String> {
     let v = crate::net::fetch_json(&format!("{API}/version/{version_id}"))?;
-    parse_file(&v).ok_or_else(|| "VERSION_NOT_FOUND|拿不到该文件信息".to_string())
+    let file = parse_file(&v).ok_or_else(|| "VERSION_NOT_FOUND|拿不到该文件信息".to_string())?;
+    let project_id = v
+        .get("project_id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    Ok((file, project_id))
 }
 
 fn target_dir(instance: &crate::instance::Instance, kind: &str, world_id: Option<&str>) -> Result<PathBuf, String> {
@@ -248,7 +260,25 @@ pub fn prepare(
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
 
     let mut issues = Vec::new();
-    let file = file_of_version(&request.version_id)?;
+    // 只允许托管实例：兼容实例的 mods/config/saves 指向共享目录
+    if !inst.managed {
+        return Err("UNSUPPORTED|兼容实例共享游戏目录，不能安装资源".into());
+    }
+
+    let (file, file_project) = version_detail(&request.version_id)?;
+
+    // 版本必须属于请求的项目
+    if let Some(vp) = &file_project {
+        if vp != &request.project_id {
+            return Err("INVALID_VALUE|版本与项目不匹配".into());
+        }
+    }
+
+    // 文件名必须是单层相对名
+    let safe_name = crate::modpack::safe_rel_path(&file.file_name)?;
+    if safe_name.components().count() != 1 {
+        return Err("INVALID_PATH|资源文件名不能包含目录".into());
+    }
 
     // 兼容性
     let needs_mc = matches!(request.kind.as_str(), "mod" | "datapack");
@@ -366,6 +396,7 @@ pub fn prepare(
 
     let plan = ResourcePlan {
         plan_id: format!("rplan_{:x}", crate::time::now_unix_ms()),
+        instance_id: request.instance_id.clone(),
         revision: 1,
         expires_at: crate::time::unix_ms_to_iso(crate::time::now_unix_ms() + TTL_MS),
         kind: request.kind.clone(),
@@ -423,36 +454,34 @@ pub fn execute(
     let dir = PathBuf::from(&stored.plan.target_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
 
-    // 先装必需依赖，再装本体
+    // 先装必需依赖，再装本体；两者都在 .part 阶段完成 SHA1/SHA512 校验
     for (i, dep) in stored.plan.dependencies.iter().enumerate() {
         let (url, _name) = &stored.dep_urls[i];
         let dep_dest = dir.join(&dep.file_name);
-        crate::net::download_atomic(url, &dep_dest, dep.sha1.as_deref(), |c, t, _s, _ts| {
-            on(c, t);
-        })?;
-        if let Some(want) = &dep.sha512 {
-            let got = crate::net::sha512_file(&dep_dest)?;
-            if !got.eq_ignore_ascii_case(want) {
-                let _ = std::fs::remove_file(&dep_dest);
-                return Err(format!("HASH_MISMATCH|依赖校验失败|{}", dep.file_name));
-            }
-        }
+        crate::net::download_verified(
+            url,
+            &dep_dest,
+            dep.sha1.as_deref(),
+            dep.sha512.as_deref(),
+            |c, t, _s, _ts| {
+                on(c, t);
+            },
+        )?;
     }
 
     let dest = dir.join(&stored.plan.file_name);
-    crate::net::download_atomic(&stored.url, &dest, stored.sha1.as_deref(), |c, t, _s, _ts| {
-        on(c, t);
-    })?;
+    crate::net::download_verified(
+        &stored.url,
+        &dest,
+        stored.sha1.as_deref(),
+        stored.sha512.as_deref(),
+        |c, t, _s, _ts| {
+            on(c, t);
+        },
+    )?;
 
-    // 有 sha512 时再核一遍（更强）
-    if let Some(want) = &stored.sha512 {
-        let got = crate::net::sha512_file(&dest)?;
-        if !got.eq_ignore_ascii_case(want) {
-            let _ = std::fs::remove_file(&dest);
-            return Err(format!("HASH_MISMATCH|SHA512 校验失败|期望 {want}"));
-        }
-    }
     Ok(dest)
+
 }
 
 /// 测试辅助：把某个项目的一个兼容版本装进实例，返回落地路径。
