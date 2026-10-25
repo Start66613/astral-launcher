@@ -1070,6 +1070,14 @@ async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, S
         ));
 
         match result {
+            // 已经装完才收到取消：如实报告完成，不假装已取消
+            Ok(Ok(inst)) if task::is_cancelled(&tid) => {
+                emit_instance_changed(&inst.id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({ "kind": "modpack", "instance": inst, "cancelledLate": true }),
+                );
+            }
             Ok(Ok(inst)) => {
                 emit_instance_changed(&inst.id, "created");
                 task::finish(
@@ -1077,7 +1085,7 @@ async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, S
                     serde_json::json!({ "kind": "modpack", "instance": inst }),
                 );
             }
-            Ok(Err(_)) if task::is_cancelled(&tid) => {
+            Ok(Err(e)) if task::is_cancelled(&tid) || e.starts_with("CANCELLED") => {
                 if let Some(id) = &created {
                     let _ = instance::delete(&game, id, false);
                 }
