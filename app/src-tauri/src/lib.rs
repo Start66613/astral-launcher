@@ -444,12 +444,7 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
         // 没指定 Java 时按版本要求自动挑一个（加载器版本会沿继承链找 javaVersion）
         let auto_java: Option<std::path::PathBuf> = match inst.java_path.as_deref() {
             Some(p) => Some(std::path::PathBuf::from(p)),
-            None => {
-                let runtimes = java::scan(&main_dir);
-                java::required_major(&main_dir, &version)
-                    .and_then(|req| java::pick_for(&runtimes, req))
-                    .map(|r| std::path::PathBuf::from(r.path))
-            }
+            None => core::auto_java_for(&main_dir, &version),
         };
         let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             task::progress(&tid, "validate", "检查实例与版本文件", 0, 0);
@@ -2106,6 +2101,12 @@ pub fn selftest() -> i32 {
                 None
             };
             log.push_str(&format!("LIVE launch start: {spec}\n"));
+            // 与启动命令走同一个自动挑 Java 的函数
+            let picked_java = core::auto_java_for(&dir, parts[1]);
+            match &picked_java {
+                Some(p) => log.push_str(&format!("LIVE launch java={}\n", p.display())),
+                None => log.push_str("LIVE launch java=default\n"),
+            }
             let r = core::spawn_with(
                 parts[1],
                 loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
@@ -2114,7 +2115,7 @@ pub fn selftest() -> i32 {
                 "Steve",
                 Some(2048),
                 &[],
-                None,
+                picked_java.as_deref(),
                 |_p| {},
             );
             match r {

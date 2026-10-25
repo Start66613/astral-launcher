@@ -520,6 +520,15 @@ fn proxy_from_env() -> Option<(String, String)> {
     None
 }
 
+/// 启动前自动挑一个 Java：按版本要求的主版本扫描本机运行时
+///
+/// 显式配置的 javaPath 优先；这里只在没有配置时使用。
+pub fn auto_java_for(game_dir: &Path, version: &str) -> Option<std::path::PathBuf> {
+    let runtimes = crate::java::scan(game_dir);
+    crate::java::required_major(game_dir, version)
+        .and_then(|req| crate::java::pick_for(&runtimes, req))
+        .map(|r| std::path::PathBuf::from(r.path))
+}
 /// installer 会生成的 version id（用于"已装过就复用"与多实例共享判定）
 pub fn forge_version_id(kind: &str, mc: &str, ver: &str) -> String {
     match kind {
