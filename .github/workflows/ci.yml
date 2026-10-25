@@ -78,6 +78,11 @@ jobs:
         run: cargo build --release
 
       # 自检退出码 = 失败项数，非 0 即失败
+      # 单元测试：release 配置（debug 在本机 MSVC 上会因 /Z7 报 D8050）
+      - name: 单元测试
+        working-directory: app/src-tauri
+        run: cargo test --release --lib
+
       - name: 运行 --selftest
         working-directory: app/src-tauri
         shell: pwsh

@@ -66,3 +66,61 @@ Rust 的 test harness 会链入 `std` 的测试运行时，而这里唯一与"�
 3. 换一台机器或换 Rust 工具链版本复现，确认是否与本机 UCRT 有关。
 
 > 在此之前，不把 `cargo test` 写成"已通过"，也不把自检说成"完整测试覆盖"。
+
+---
+
+## 结论（已解决）
+
+继续排查后，真正的原因有**两个**，都不是当初猜的 WebView2 或 UCRT：
+
+### 原因一：debug 配置编译失败（MSVC D8050）
+
+``
+cl: error D8050: 无法执行 c1.dll: 未能将命令行放入调试记录中
+``
+
+本机 MSVC 14.51（VS 18 BuildTools）在 -MD -Z7 下编译 ring 的 C 源码时失败。
+这把之前的观察解释了一半：debug 测试二进制要么没生成，要么是旧的。
+
+绕开方式（二选一）：
+
+- `cargo test --release`（release profile 不会再带 /Z7）
+- `=0` 后再 `cargo test`
+
+### 原因二：测试二进制在仓库目录内跑会"拒绝访问"
+
+``
+called Result::unwrap() on an Err value: Os { code: 5, kind: PermissionDenied }
+``
+
+同一份二进制复制到 `D:\Astral\` 再跑，**全部通过**；
+留在 `D:\软件开发\astral-core\app\src-tauri\target\debug\deps\` 里跑就失败。
+这是本机工作区路径的 ACL 限制（此前 app 主程序也有同样的 `os error 5` 问题，
+当时就是靠复制到 `D:\Astral` 解决的）。
+
+### 现在的状态
+
+``powershell
+pwsh -NoProfile -File scripts/run-tests.ps1
+# == 运行 astral_lib-xxxx.exe ==
+# test result: ok. 46 passed; 0 failed; 6 ignored
+# exit=0
+``
+
+- **46 个单元测试全部通过**（6 个标了 `#[ignore]`，是需要真实网络的用例）
+- 脚本会自动用 release 构建、并把二进制复制到仓库外运行
+- CI 的 rust job 增加了 `cargo test --release --lib` 步骤
+
+### 顺带抓到的真 bug
+
+首次跑起来时 `loader::tests::neoforge_prefix_map` 失败：
+`neoforge_prefix("1.8.9")` 返回了 `Some("8.9.")`。
+实现只是简单切分 `1.20.2` 取后两段，对 `1.8.9`（NeoForge 根本不支持）和
+`1.21`（没有第三段）都判断错误。已改为按主/次版本解析，并对
+`< 1.20.2` 返回 `None`。
+
+### 此前 0xC0000139 的说明
+
+那条观察是真实的，但在当前工具链与构建参数下**不再复现**：
+关闭 debuginfo 后 debug 测试二进制可以正常加载并运行。
+不排除当时那份二进制是失败的编译产物或受 ACL 影响，无法进一步确证。
