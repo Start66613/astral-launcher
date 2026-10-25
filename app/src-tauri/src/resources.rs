@@ -225,6 +225,22 @@ pub fn version_detail(version_id: &str) -> Result<(ResourceFile, Option<String>)
     Ok((file, project_id))
 }
 
+/// 无加载器实例只能选"通用"文件（不声明加载器，或声明 vanilla/minecraft）
+pub fn vanilla_compatible(file: &ResourceFile) -> bool {
+    file.loaders.is_empty()
+        || file
+            .loaders
+            .iter()
+            .any(|l| l.eq_ignore_ascii_case("vanilla") || l.eq_ignore_ascii_case("minecraft"))
+}
+
+/// 依赖文件名必须是单层相对名
+pub fn dep_file_name_ok(name: &str) -> bool {
+    match crate::modpack::safe_rel_path(name) {
+        Ok(p) => p.components().count() == 1,
+        Err(_) => false,
+    }
+}
 /// 判断"资源文件的加载器"与"实例的加载器"是否冲突。
 ///
 /// 规则按资源类型分开：
@@ -428,6 +444,10 @@ pub fn prepare(
                 None => files(pid, Some(&inst.game_version), loader_kind.as_deref())
                     .ok()
                     .and_then(|mut v| {
+                        // 原版实例不能拿需要加载器的依赖
+                        if loader_kind.is_none() {
+                            v.retain(vanilla_compatible);
+                        }
                         v.sort_by_key(|f| match f.channel.as_str() {
                             "release" => 0,
                             "beta" => 1,
@@ -444,6 +464,44 @@ pub fn prepare(
                 ));
                 continue;
             };
+            // 文件名必须是单层相对名，否则拒绝（防止写到目录外）
+            if !dep_file_name_ok(&df.file_name) {
+                issues.push(issue(
+                    "INVALID_PATH",
+                    format!("依赖 {pid} 的文件名不安全：{}", df.file_name),
+                    true,
+                ));
+                continue;
+            }
+            // 同名但来自不同项目 → 会互相覆盖，交给人决定
+            if deps
+                .iter()
+                .any(|x| x.file_name == df.file_name && x.project_id != *pid)
+            {
+                issues.push(issue(
+                    "DEPENDENCY_CONFLICT",
+                    format!("依赖文件名 {} 与另一个依赖重名，需要手动选择", df.file_name),
+                    true,
+                ));
+                continue;
+            }
+            // 依赖自己还有必需依赖：不递归解析，明确要求人工处理
+            let nested: Vec<String> = df
+                .dependencies
+                .iter()
+                .filter(|x| x.kind == "required")
+                .filter_map(|x| x.project_id.clone())
+                .collect();
+            if !nested.is_empty() {
+                issues.push(issue(
+                    "DEPENDENCY_CONFLICT",
+                    format!(
+                        "依赖 {pid} 自身还需要 {}，请先手动安装或改用整合包",
+                        nested.join(" / ")
+                    ),
+                    true,
+                ));
+            }
             if dir.join(&df.file_name).exists() {
                 continue;
             }
@@ -627,6 +685,34 @@ pub fn live_probe(
 mod tests {
     use super::*;
 
+    #[test]
+    fn vanilla_deps_and_names() {
+        let mut generic = ResourceFile {
+            version_id: "V".into(),
+            name: "n".into(),
+            version_number: "1".into(),
+            channel: "release".into(),
+            published_at: String::new(),
+            game_versions: vec!["1.20.1".into()],
+            loaders: vec![],
+            file_name: "a.jar".into(),
+            url: "u".into(),
+            size: 1,
+            sha1: None,
+            sha512: None,
+            dependencies: vec![],
+        };
+        assert!(vanilla_compatible(&generic));
+        generic.loaders = vec!["vanilla".into()];
+        assert!(vanilla_compatible(&generic));
+        generic.loaders = vec!["fabric".into()];
+        assert!(!vanilla_compatible(&generic));
+
+        assert!(dep_file_name_ok("mod.jar"));
+        assert!(!dep_file_name_ok("../evil.jar"));
+        assert!(!dep_file_name_ok("a/b.jar"));
+        assert!(!dep_file_name_ok(r"c:\evil.jar"));
+    }
     #[test]
     fn loader_rules_for_vanilla() {
         let fabric = vec!["fabric".to_string()];
