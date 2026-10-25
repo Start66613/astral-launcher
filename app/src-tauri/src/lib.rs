@@ -1155,16 +1155,53 @@ async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, Stri
     );
     let tid = t.task_id.clone();
 
+    // 后台执行，body 抽成 run_game_install 便于自检复用
     std::thread::spawn(move || {
         task::start(&tid);
-        let game = game_root();
-        let cfg = core::load_config();
-        let v = p.request.game_version.clone();
-        let mut created: Option<String> = None;
+        let (result, created) = run_game_install(&tid, &p);
+        match result {
+            Ok(inst) => {
+                emit_instance_changed(&inst.id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({ "kind": "game-install", "instance": inst }),
+                );
+            }
+            Err(_) if task::is_cancelled(&tid) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game_root(), id, false);
+                }
+                task::cancelled(&tid);
+            }
+            Err(e) => {
+                // 失败回滚：只删本次新建的实例目录
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game_root(), id, false);
+                }
+                task::fail(&tid, e);
+            }
+        }
+    });
+
+    Ok(t)
+}
+
+/// 安装计划的执行体（命令与自检共用）
+///
+/// 返回 (结果, 本次新建的实例 id)，调用方据此决定回滚。
+fn run_game_install(
+    tid: &str,
+    p: &plan::GameInstallPlan,
+) -> (Result<Instance, String>, Option<String>) {
+    let game = game_root();
+    let cfg = core::load_config();
+    let v = p.request.game_version.clone();
+    let mut created: Option<String> = None;
+
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Instance, String> {
             if !core::version_installed(&game, &v) {
-                let t2 = tid.clone();
+                let t2 = tid.to_string();
                 core::install(&v, &game, &cfg.username, move |pr| {
                     task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
                 })?;
@@ -1189,7 +1226,7 @@ async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, Stri
             task::check_cancel(&tid)?;
 
             if let Some(l) = &p.request.loader {
-                let t2 = tid.clone();
+                let t2 = tid.to_string();
                 if l.kind == "forge" || l.kind == "neoforge" {
                     // installer 会生成 {mc}-forge-{ver} 之类的版本，记下来供启动使用
                     let generated = core::install_forge_like(&l.kind, &v, &l.version, &game, move |pr| {
@@ -1207,6 +1244,44 @@ async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, Stri
             }
             task::check_cancel(&tid)?;
 
+            // 计划里挑选的光影支持组件：加载器装好之后再按实例真实 id 安装
+            for comp in &p.components {
+                task::check_cancel(&tid)?;
+                let req = resources::ResourceInstallRequest {
+                    instance_id: inst.id.clone(),
+                    kind: "mod".into(),
+                    project_id: comp.project_id.clone(),
+                    version_id: comp.version_id.clone(),
+                    world_id: None,
+                    overwrite: false,
+                };
+                let rp = resources::prepare(&game, req, &play_stats)?;
+                if let Some(bad) = rp.issues.iter().find(|i| i.blocking) {
+                    return Err(format!(
+                        "INCOMPATIBLE|{} 无法安装|{}",
+                        comp.label, bad.message
+                    ));
+                }
+                let stored = resources::take(&rp.plan_id, rp.revision)?;
+                let label = comp.label.clone();
+                let t2 = tid.to_string();
+                let t3 = tid.to_string();
+                resources::execute(
+                    &stored,
+                    move || task::is_cancelled(&t3),
+                    move |done, total| {
+                        task::progress(
+                            &t2,
+                            "component",
+                            format!("安装 {label} {done}/{total}"),
+                            done,
+                            total,
+                        );
+                    },
+                )?;
+            }
+            task::check_cancel(&tid)?;
+
             let fresh = instance::find(&game, &inst.id, &play_stats)
                 .ok_or_else(|| "INTERNAL|安装后读不到实例".to_string())?;
             if !fresh.health.ok {
@@ -1218,37 +1293,11 @@ async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, Stri
             Ok(fresh)
         }));
 
-        match result {
-            Ok(Ok(inst)) => {
-                emit_instance_changed(&inst.id, "created");
-                task::finish(
-                    &tid,
-                    serde_json::json!({ "kind": "game-install", "instance": inst }),
-                );
-            }
-            Ok(Err(_)) if task::is_cancelled(&tid) => {
-                if let Some(id) = &created {
-                    let _ = instance::delete(&game, id, false);
-                }
-                task::cancelled(&tid);
-            }
-            Ok(Err(e)) => {
-                // 失败回滚：只删本次新建的实例目录
-                if let Some(id) = &created {
-                    let _ = instance::delete(&game, id, false);
-                }
-                task::fail(&tid, e);
-            }
-            Err(_) => {
-                if let Some(id) = &created {
-                    let _ = instance::delete(&game, id, false);
-                }
-                task::fail(&tid, "INTERNAL|后台任务异常|安装线程崩溃".into());
-            }
-        }
-    });
 
-    Ok(t)
+    match result {
+        Ok(r) => (r, created),
+        Err(_) => (Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()), created),
+    }
 }
 
 // ── 加载器 ──────────────────────────────────────────────────────
@@ -1879,6 +1928,7 @@ pub fn selftest() -> i32 {
         game_version: "1.20.1".into(),
         loader: None,
         memory_mb: Some(2048),
+        shader_support: None,
     };
     let p = plan::prepare(&plan_game, req.clone()).expect("prepare");
     check!(
@@ -2688,6 +2738,138 @@ pub fn selftest() -> i32 {
         !cancel_dir.join("test.jar").exists()
     );
     let _ = std::fs::remove_dir_all(&cancel_dir);
+    // #7 安装计划里的光影组件：不可自动安装的组件必须给出阻塞原因
+    let comp_game = std::env::temp_dir().join(format!("astral-plan-comp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&comp_game);
+    let _ = std::fs::create_dir_all(comp_game.join("versions/1.20.1"));
+    let _ = std::fs::write(comp_game.join("versions/1.20.1/1.20.1.json"), "{}");
+    let _ = std::fs::write(comp_game.join("versions/1.20.1/1.20.1.jar"), "x");
+    let optifine_req = plan::GameInstallRequest {
+        name: "光影计划".into(),
+        game_version: "1.20.1".into(),
+        loader: Some(plan::LoaderSelection {
+            kind: "fabric".into(),
+            version: "0.16.9".into(),
+        }),
+        memory_mb: None,
+        shader_support: Some("optifine".into()),
+    };
+    let opti = plan::prepare(&comp_game, optifine_req);
+    let opti_blocking = opti
+        .as_ref()
+        .map(|p| p.issues.iter().any(|i| i.blocking))
+        .unwrap_or(false);
+    let opti_has_comp = opti
+        .as_ref()
+        .map(|p| !p.components.is_empty())
+        .unwrap_or(false);
+    check!(
+        "plan rejects optifine",
+        opti_blocking && !opti_has_comp
+    );
+    let _ = std::fs::remove_dir_all(&comp_game);
+    // 可选：真机验证安装计划的光影组件挑选
+    // ASTRAL_LIVE_PLAN="gameDir|mc|loaderKind|loaderVer|shader"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_PLAN") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 5 {
+            let game = std::path::PathBuf::from(parts[0]);
+            let req = plan::GameInstallRequest {
+                name: "组件计划".into(),
+                game_version: parts[1].to_string(),
+                loader: Some(plan::LoaderSelection {
+                    kind: parts[2].to_string(),
+                    version: parts[3].to_string(),
+                }),
+                memory_mb: None,
+                shader_support: Some(parts[4].to_string()),
+            };
+            match plan::prepare(&game, req) {
+                Ok(p) => {
+                    log.push_str(&format!(
+                        "LIVE plan components={} blocking={}\n",
+                        p.components.len(),
+                        p.issues.iter().filter(|i| i.blocking).count()
+                    ));
+                    for c in &p.components {
+                        log.push_str(&format!("  component {} {} {}\n", c.id, c.label, c.version_id));
+                    }
+                    for i in p.issues.iter().filter(|i| i.blocking) {
+                        log.push_str(&format!("  blocking {}: {}\n", i.code, i.message));
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE plan failed: {e}\n"));
+                }
+            }
+        }
+    }
+    // 可选：真机跑完整安装计划（含光影组件），ASTRAL_LIVE_PLAN_INSTALL="gameDir|mc|loader|ver|shader"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_PLAN_INSTALL") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 5 {
+            let game = std::path::PathBuf::from(parts[0]);
+            // 让 game_root() 指向测试目录
+            let mut cfg = core::load_config();
+            cfg.game_dir = game.to_string_lossy().to_string();
+            if let Err(e) = core::save_config(&cfg) {
+                fails += 1;
+                log.push_str(&format!("LIVE plan-install config failed: {e}\n"));
+            } else {
+                let req = plan::GameInstallRequest {
+                    name: format!("计划安装 {}", parts[1]),
+                    game_version: parts[1].to_string(),
+                    loader: Some(plan::LoaderSelection {
+                        kind: parts[2].to_string(),
+                        version: parts[3].to_string(),
+                    }),
+                    memory_mb: Some(2048),
+                    shader_support: Some(parts[4].to_string()),
+                };
+                match plan::prepare(&game, req) {
+                    Ok(p) => {
+                        log.push_str(&format!(
+                            "LIVE plan-install prepared components={} blocking={}\n",
+                            p.components.len(),
+                            p.issues.iter().filter(|i| i.blocking).count()
+                        ));
+                        let t = task::create(
+                            "game-install",
+                            None,
+                            Some(parts[1].to_string()),
+                            "计划安装（自检）",
+                        );
+                        let (res, _created) = run_game_install(&t.task_id, &p);
+                        match res {
+                            Ok(inst) => {
+                                let mods = std::path::Path::new(&inst.dir).join("mods");
+                                let jars: Vec<String> = std::fs::read_dir(&mods)
+                                    .map(|rd| {
+                                        rd.flatten()
+                                            .map(|e| e.file_name().to_string_lossy().to_string())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                log.push_str(&format!(
+                                    "LIVE plan-install ok: instance={} mods={:?}\n",
+                                    inst.id, jars
+                                ));
+                            }
+                            Err(e) => {
+                                fails += 1;
+                                log.push_str(&format!("LIVE plan-install failed: {e}\n"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        fails += 1;
+                        log.push_str(&format!("LIVE plan-install prepare failed: {e}\n"));
+                    }
+                }
+            }
+        }
+    }
     let cfg = core::Config::default();
     check!(
         "config defaults",

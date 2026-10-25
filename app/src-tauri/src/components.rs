@@ -16,6 +16,10 @@ pub struct ComponentBuild {
     pub project_id: String,
     /// 该组件要求的加载器，null 表示不限
     pub required_loader: Option<String>,
+    /// Modrinth 的 version id（安装时用它，不是版本号）
+    #[serde(default)]
+    pub version_id: Option<String>,
+    /// 展示用版本号，例如 1.7.6+1.20.1
     pub version: Option<String>,
     pub file_name: Option<String>,
     pub published_at: Option<String>,
@@ -90,6 +94,7 @@ pub fn catalog(game_version: &str, loader: Option<&str>) -> ComponentCatalog {
             label: spec.label.into(),
             project_id: spec.project_id.into(),
             required_loader: spec.loader.map(|s| s.to_string()),
+            version_id: None,
             version: None,
             file_name: None,
             published_at: None,
@@ -121,6 +126,7 @@ pub fn catalog(game_version: &str, loader: Option<&str>) -> ComponentCatalog {
                     .iter()
                     .find(|f| f.channel == "release")
                     .unwrap_or(&files[0]);
+                build.version_id = Some(pick.version_id.clone());
                 build.version = Some(pick.version_number.clone());
                 build.file_name = Some(pick.file_name.clone());
                 build.published_at = Some(pick.published_at.clone());

@@ -362,6 +362,9 @@ pub fn extract_overrides(
     }
 
     for name in names {
+        if should_cancel() {
+            return Err("CANCELLED|已取消".into());
+        }
         let rel = if let Some(r) = name.strip_prefix("overrides/") {
             r
         } else if let Some(r) = name.strip_prefix("client-overrides/") {

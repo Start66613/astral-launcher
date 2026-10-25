@@ -23,6 +23,9 @@ pub struct GameInstallRequest {
     pub loader: Option<LoaderSelection>,
     #[serde(default)]
     pub memory_mb: Option<u32>,
+    /// 光影支持组件：iris | oculus | optifine（null 表示不装）
+    #[serde(default)]
+    pub shader_support: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -62,8 +65,23 @@ pub struct GameInstallPlan {
     pub target: PlanTarget,
     pub files: Vec<PlannedFile>,
     pub issues: Vec<PlanIssue>,
+    /// 计划顺带安装的光影支持组件（按真实兼容性挑选）
+    #[serde(default)]
+    pub components: Vec<PlanComponent>,
     /// 未知总量返回 null，不是 0
     pub download_bytes: Option<u64>,
+}
+
+/// 计划里要顺带安装的一个附带组件
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanComponent {
+    pub id: String,
+    pub label: String,
+    pub project_id: String,
+    pub version_id: String,
+    pub file_name: String,
+    pub size_bytes: u64,
 }
 
 pub struct StoredPlan {
@@ -147,6 +165,47 @@ pub fn prepare(game: &std::path::Path, request: GameInstallRequest) -> Result<Ga
         });
     }
 
+    // 光影支持组件：按真实兼容性挑，不可用时给出阻塞原因
+    let mut components: Vec<PlanComponent> = Vec::new();
+    if let Some(want) = request.shader_support.as_deref() {
+        if want != "none" {
+            let loader_kind = request.loader.as_ref().map(|l| l.kind.as_str());
+            let catalog = crate::components::catalog(&request.game_version, loader_kind);
+            match catalog.shader_support.iter().find(|c| c.id == want) {
+                None => issues.push(issue(
+                    "UNSUPPORTED",
+                    format!("不认识的光影组件 {want}"),
+                    true,
+                )),
+                Some(c) if !c.available => issues.push(issue(
+                    "INCOMPATIBLE",
+                    c.unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| format!("{} 当前不可自动安装", c.label)),
+                    true,
+                )),
+                Some(c) => {
+                    // 已经解析出版本时才算真能装
+                    match (c.version_id.clone(), c.file_name.clone()) {
+                        (Some(ver), Some(name)) => components.push(PlanComponent {
+                            id: c.id.clone(),
+                            label: c.label.clone(),
+                            project_id: c.project_id.clone(),
+                            version_id: ver.clone(),
+                            file_name: name.clone(),
+                            size_bytes: 0,
+                        }),
+                        _ => issues.push(issue(
+                            "INCOMPATIBLE",
+                            format!("{} 没有找到适配 {} 的版本", c.label, request.game_version),
+                            true,
+                        )),
+                    }
+                }
+            }
+        }
+    }
+
     let id = crate::instance::new_id();
     let plan = GameInstallPlan {
         plan_id: format!("plan_{:x}", crate::time::now_unix_ms()),
@@ -161,6 +220,7 @@ pub fn prepare(game: &std::path::Path, request: GameInstallRequest) -> Result<Ga
         },
         request,
         files,
+        components,
         issues,
         download_bytes: None, // 明细要等版本元数据解析，先如实返回 null
     };
