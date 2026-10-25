@@ -225,6 +225,54 @@ fn version_detail(version_id: &str) -> Result<(ResourceFile, Option<String>), St
     Ok((file, project_id))
 }
 
+/// 判断"资源文件的加载器"与"实例的加载器"是否冲突。
+///
+/// 规则按资源类型分开：
+/// - `mod`：原版实例只接受声明 vanilla/minecraft 或不声明加载器的文件；
+///   有加载器的实例只接受同一加载器（或不声明）。
+/// - `datapack`：加载器字段写的是 "datapack"，不能拿实例加载器去比，只查游戏版本。
+/// - 资源包 / 光影包：跨版本通常可用，不做加载器过滤。
+pub fn loader_conflict(
+    kind: &str,
+    instance_loader: Option<&str>,
+    file_loaders: &[String],
+) -> Option<String> {
+    if kind != "mod" {
+        return None;
+    }
+    let wants: Vec<String> = file_loaders
+        .iter()
+        .map(|l| l.trim().to_ascii_lowercase())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if wants.is_empty() {
+        return None;
+    }
+    let vanilla_ok = wants.iter().any(|l| l == "vanilla" || l == "minecraft");
+    match instance_loader.map(|l| l.to_ascii_lowercase()) {
+        Some(loader) => {
+            if wants.iter().any(|l| l == &loader) {
+                None
+            } else {
+                Some(format!(
+                    "该文件只支持 {}，当前实例是 {}",
+                    wants.join(" / "),
+                    loader
+                ))
+            }
+        }
+        None => {
+            if vanilla_ok {
+                None
+            } else {
+                Some(format!(
+                    "原版实例不能安装需要 {} 的 Mod",
+                    wants.join(" / ")
+                ))
+            }
+        }
+    }
+}
 fn target_dir(instance: &crate::instance::Instance, kind: &str, world_id: Option<&str>) -> Result<PathBuf, String> {
     let base = PathBuf::from(&instance.dir);
     match kind {
@@ -290,23 +338,10 @@ pub fn prepare(
         ));
     }
     if needs_mc {
-        if let Some(loader) = &inst.loader {
-            let ok = file.loaders.is_empty()
-                || file
-                    .loaders
-                    .iter()
-                    .any(|l| l.eq_ignore_ascii_case(&loader.kind));
-            if !ok {
-                issues.push(issue(
-                    "INCOMPATIBLE",
-                    format!(
-                        "该文件不支持 {}（支持：{}）",
-                        loader.kind,
-                        file.loaders.join(", ")
-                    ),
-                    true,
-                ));
-            }
+        // 原版实例也必须校验：不能装只支持 Fabric/Forge 的 Mod
+        let instance_loader = inst.loader.as_ref().map(|l| l.kind.as_str());
+        if let Some(msg) = loader_conflict(&request.kind, instance_loader, &file.loaders) {
+            issues.push(issue("INCOMPATIBLE", msg, true));
         }
     }
 
@@ -592,6 +627,30 @@ pub fn live_probe(
 mod tests {
     use super::*;
 
+    #[test]
+    fn loader_rules_for_vanilla() {
+        let fabric = vec!["fabric".to_string()];
+        // 原版 + Fabric 专属 Mod → 冲突
+        assert!(loader_conflict("mod", None, &fabric).is_some());
+        // 原版 + 声明 vanilla 的 Mod → 允许
+        assert!(loader_conflict("mod", None, &["vanilla".to_string()]).is_none());
+        // 原版 + 没声明加载器 → 允许（保守放行）
+        assert!(loader_conflict("mod", None, &[]).is_none());
+        // 数据包不按实例加载器判断
+        assert!(loader_conflict("datapack", None, &["datapack".to_string()]).is_none());
+        // 资源包 / 光影包不受影响
+        assert!(loader_conflict("resourcepack", Some("fabric"), &fabric).is_none());
+    }
+
+    #[test]
+    fn loader_rules_match_instance() {
+        let fabric = vec!["fabric".to_string()];
+        let forge = vec!["forge".to_string()];
+        assert!(loader_conflict("mod", Some("fabric"), &fabric).is_none());
+        assert!(loader_conflict("mod", Some("fabric"), &forge).is_some());
+        let both = vec!["fabric".to_string(), "forge".to_string()];
+        assert!(loader_conflict("mod", Some("forge"), &both).is_none());
+    }
     #[test]
     fn parse_primary_file() {
         let v: serde_json::Value = serde_json::from_str(
