@@ -82,6 +82,7 @@ pub struct IndexFile {
     #[allow(dead_code)]
     pub size: u64,
     pub sha1: Option<String>,
+    pub sha512: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -148,8 +149,15 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
         (String::new(), None)
     };
 
+    if loader_kind.is_empty() == false && loader_version.is_none() {
+        return Err(format!(
+            "INVALID_VALUE|整合包声明了 {loader_kind} 加载器但没有版本号"
+        ));
+    }
+
     let mut files = Vec::new();
     let mut total = 0u64;
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(arr) = v.get("files").and_then(|f| f.as_array()) {
         for f in arr {
             let path = f
@@ -168,12 +176,24 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
             if url.is_empty() {
                 return Err(format!("INVALID_PATH|文件缺少下载地址：{path}"));
             }
+            if !seen_paths.insert(path.to_ascii_lowercase()) {
+                return Err(format!("INVALID_VALUE|整合包内路径重复：{path}"));
+            }
             let size = f.get("fileSize").and_then(|s| s.as_u64()).unwrap_or(0);
-            total += size;
+            total = total.saturating_add(size);
+            // 64 GiB：正常整合包远低于这个量级，超过基本可以确定是坏包
+            if total > 64 * 1024 * 1024 * 1024 {
+                return Err("INVALID_VALUE|整合包声明体积异常（超过 64 GiB）".into());
+            }
             files.push(IndexFile {
                 path: path.to_string(),
                 url,
                 size,
+                sha512: f
+                    .get("hashes")
+                    .and_then(|h| h.get("sha512"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
                 sha1: f
                     .get("hashes")
                     .and_then(|h| h.get("sha1"))
@@ -181,6 +201,10 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
                     .map(|s| s.to_string()),
             });
         }
+    }
+
+    if files.is_empty() {
+        return Err("INVALID_VALUE|整合包没有任何可安装文件".into());
     }
 
     Ok(ModpackIndex {
@@ -429,7 +453,7 @@ pub fn download_files(
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
         }
-        crate::net::download_atomic(&f.url, &dest, f.sha1.as_deref(), |_, _, _, _| {})?;
+        crate::net::download_verified(&f.url, &dest, f.sha1.as_deref(), f.sha512.as_deref(), |_, _, _, _| {})?;
         done += 1;
         on(done, total);
     }
@@ -522,6 +546,31 @@ mod tests {
         assert!(safe_rel_path("./mods/../x").is_err());
     }
 
+    #[test]
+    fn parse_index_rejects_bad_packs() {
+        // 没有文件
+        let empty = r#"{"dependencies":{"minecraft":"1.20.1"},"files":[]}"#;
+        assert!(parse_index(empty).is_err());
+
+        // 路径重复
+        let dup = r#"{"dependencies":{"minecraft":"1.20.1"},"files":[
+            {"path":"mods/a.jar","downloads":["https://cdn.modrinth.com/a.jar"]},
+            {"path":"mods/A.jar","downloads":["https://cdn.modrinth.com/b.jar"]}
+        ]}"#;
+        assert!(parse_index(dup).is_err());
+
+        // 声明加载器但没有版本
+        let no_ver = r#"{"dependencies":{"minecraft":"1.20.1","fabric-loader":null},"files":[
+            {"path":"mods/a.jar","downloads":["https://cdn.modrinth.com/a.jar"]}
+        ]}"#;
+        assert!(parse_index(no_ver).is_err());
+
+        // 正常的最小包
+        let ok = r#"{"dependencies":{"minecraft":"1.20.1"},"files":[
+            {"path":"mods/a.jar","downloads":["https://cdn.modrinth.com/a.jar"],"fileSize":10}
+        ]}"#;
+        assert!(parse_index(ok).is_ok());
+    }
     #[test]
     fn parse_index_basic() {
         let j = r#"{
