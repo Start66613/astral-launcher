@@ -2870,6 +2870,36 @@ pub fn selftest() -> i32 {
             }
         }
     }
+    // #6 加载器与游戏版本兼容性（装之前就挡掉明显不搭的组合）
+    check!(
+        "loader compat forge",
+        core::loader_compatible("forge", "1.20.1", "47.2.0").is_ok()
+            && core::loader_compatible("forge", "1.20.1", "1.20.1-47.2.0").is_err()
+    );
+    check!(
+        "loader compat neoforge",
+        core::loader_compatible("neoforge", "1.21.1", "21.1.72").is_ok()
+            && core::loader_compatible("neoforge", "1.20.1", "21.1.72").is_err()
+            && core::loader_compatible("neoforge", "1.20.1", "47.1.106").is_ok()
+    );
+    check!(
+        "neoforge mc hint",
+        core::neoforge_mc_hint("21.1.72") == Some("1.21.1")
+            && core::neoforge_mc_hint("20.4.237") == Some("1.20.4")
+            && core::neoforge_mc_hint("99.9.9") == None
+    );
+    // 版本不搭时在下载之前就失败，不会发出 404 请求
+    let bad_forge = std::env::temp_dir().join(format!("astral-bad-forge-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&bad_forge);
+    let r = core::install_forge_like("forge", "1.20.1", "1.20.1-47.2.0", &bad_forge, |_| {});
+    check!(
+        "forge mismatched rejected early",
+        r.as_ref()
+            .err()
+            .map(|e| e.starts_with("INVALID_VALUE") || e.starts_with("INCOMPATIBLE"))
+            .unwrap_or(false)
+    );
+    let _ = std::fs::remove_dir_all(&bad_forge);
     let cfg = core::Config::default();
     check!(
         "config defaults",

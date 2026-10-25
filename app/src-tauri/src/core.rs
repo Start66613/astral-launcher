@@ -399,7 +399,64 @@ pub fn install_loader(
 
 /// 判断某个版本是否已完整安装（有版本 json 和 client jar）
 /// Forge / NeoForge 的 installer 下载地址
+/// NeoForge 版本号前缀 → 对应的 Minecraft 版本（官方约定，不是猜的）
+pub fn neoforge_mc_hint(ver: &str) -> Option<&'static str> {
+    if ver.starts_with("20.2.") {
+        Some("1.20.2")
+    } else if ver.starts_with("20.4.") {
+        Some("1.20.4")
+    } else if ver.starts_with("20.6.") {
+        Some("1.20.6")
+    } else if ver.starts_with("21.0.") {
+        Some("1.21")
+    } else if ver.starts_with("21.1.") {
+        Some("1.21.1")
+    } else {
+        None
+    }
+}
+
+/// 加载器版本与游戏版本是否匹配（装之前就挡掉明显不搭的组合）
+pub fn loader_compatible(kind: &str, mc: &str, ver: &str) -> Result<(), String> {
+    match kind {
+        "forge" => {
+            // 这里收到的是裸版本号（如 47.2.0），maven 坐标才是 {mc}-{ver}；
+            // 若已经带了前缀会拼出 1.20.1-1.20.1-47.2.0，提前挡掉
+            if ver.starts_with(&format!("{mc}-")) {
+                return Err(format!(
+                    "INVALID_VALUE|Forge 版本号不需要带游戏版本前缀，收到 {ver}"
+                ));
+            }
+            if !ver.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                return Err(format!("INVALID_VALUE|Forge 版本号格式不对：{ver}"));
+            }
+            Ok(())
+        }
+        "neoforge" if mc == "1.20.1" => {
+            if !ver.starts_with("47.1.") {
+                return Err(format!(
+                    "INCOMPATIBLE|1.20.1 上的 NeoForge 应使用 47.1.x，收到 {ver}"
+                ));
+            }
+            Ok(())
+        }
+        "neoforge" => {
+            if let Some(hint) = neoforge_mc_hint(ver) {
+                if hint != mc {
+                    return Err(format!(
+                        "INCOMPATIBLE|NeoForge {ver} 对应 Minecraft {hint}，不是 {mc}"
+                    ));
+                }
+            }
+            // 前缀未知时不拦：宁可让下载给出明确错误，也不误伤新版本
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn installer_url(kind: &str, mc: &str, ver: &str) -> Result<String, String> {
+    loader_compatible(kind, mc, ver)?;
     let url = match kind {
         "forge" => format!(
             "https://maven.minecraftforge.net/net/minecraftforge/forge/{mc}-{ver}/forge-{mc}-{ver}-installer.jar"

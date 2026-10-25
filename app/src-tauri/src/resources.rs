@@ -214,10 +214,6 @@ pub fn files(
     Ok(out)
 }
 
-fn file_of_version(version_id: &str) -> Result<ResourceFile, String> {
-    version_detail(version_id).map(|(f, _)| f)
-}
-
 /// 版本详情 + 它所属的项目 id（用于校验请求里的 projectId）
 fn version_detail(version_id: &str) -> Result<(ResourceFile, Option<String>), String> {
     let v = crate::net::fetch_json(&format!("{API}/version/{version_id}"))?;
@@ -361,10 +357,49 @@ pub fn prepare(
             checked += 1;
             let Some(pid) = &d.project_id else { continue };
             let candidate = match &d.version_id {
-                Some(vid) => file_of_version(vid).ok(),
+                // 指定了版本：必须确实属于这个项目，且与实例兼容
+                Some(vid) => match version_detail(vid) {
+                    Ok((df, vp)) => {
+                        if vp.as_deref().map(|p| p != pid).unwrap_or(false) {
+                            issues.push(issue(
+                                "DEPENDENCY_CONFLICT",
+                                format!("依赖版本 {vid} 不属于项目 {pid}"),
+                                true,
+                            ));
+                            continue;
+                        }
+                        let compat_ok = !needs_mc
+                            || (df.game_versions.iter().any(|g| g == &inst.game_version)
+                                && loader_kind
+                                    .as_ref()
+                                    .map(|k| df.loaders.iter().any(|l| l == k))
+                                    .unwrap_or(true));
+                        if !compat_ok {
+                            issues.push(issue(
+                                "DEPENDENCY_CONFLICT",
+                                format!(
+                                    "依赖 {pid} 的指定版本与 {} 不兼容",
+                                    inst.game_version
+                                ),
+                                true,
+                            ));
+                            continue;
+                        }
+                        Some(df)
+                    }
+                    Err(_) => None,
+                },
+                // 没指定：取兼容版本里最稳的（release > beta > alpha）
                 None => files(pid, Some(&inst.game_version), loader_kind.as_deref())
                     .ok()
-                    .and_then(|v| v.into_iter().next()),
+                    .and_then(|mut v| {
+                        v.sort_by_key(|f| match f.channel.as_str() {
+                            "release" => 0,
+                            "beta" => 1,
+                            _ => 2,
+                        });
+                        v.into_iter().next()
+                    }),
             };
             let Some(df) = candidate else {
                 issues.push(issue(
@@ -379,6 +414,20 @@ pub fn prepare(
             }
             if deps.iter().any(|x| x.file_name == df.file_name) {
                 continue;
+            }
+            // 同一个项目被解析成两个不同版本 → 装上去会互相覆盖，直接判冲突
+            if let Some(prev) = deps.iter().find(|x| x.project_id == *pid) {
+                if prev.version_id != df.version_id {
+                    issues.push(issue(
+                        "DEPENDENCY_CONFLICT",
+                        format!(
+                            "依赖 {pid} 同时被要求 {} 与 {}，需要手动选一个",
+                            prev.version_id, df.version_id
+                        ),
+                        true,
+                    ));
+                    continue;
+                }
             }
             dep_urls.push((df.url.clone(), df.file_name.clone()));
             deps.push(PlannedDep {
