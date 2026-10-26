@@ -6,19 +6,16 @@
 //! cargo run --example msa -- [username]
 //! ```
 
-use std::error::Error;
 use std::env;
+use std::error::Error;
 
 use portablemc::{moj, msa};
-
 
 /// The Azure application ID of PortableMC, you should register your own application
 /// for your launcher.
 const AZURE_APP_ID: &str = "708e91b5-99f8-4a1d-80ec-e746cbb24771";
 
-
 fn main() -> Result<(), Box<dyn Error>> {
-
     let db = msa::Database::new("portablemc_msa.json");
 
     let stored_account = match env::args().nth(1) {
@@ -43,7 +40,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    println!("Authenticated as {} ({})", account.username(), account.uuid());
+    println!(
+        "Authenticated as {} ({})",
+        account.username(),
+        account.uuid()
+    );
     db.store(account.clone())?;
 
     let mut installer = moj::Installer::new_with_release();
@@ -51,5 +52,4 @@ fn main() -> Result<(), Box<dyn Error>> {
     installer.install(())?.spawn_and_wait()?;
 
     Ok(())
-
 }

@@ -131,11 +131,7 @@ fn range_start(v: &str) -> Option<u64> {
 fn range_total(v: &str) -> Option<u64> {
     let (_, b) = v.split_once('/')?;
     let b = b.trim();
-    if b == "*" {
-        None
-    } else {
-        b.parse().ok()
-    }
+    if b == "*" { None } else { b.parse().ok() }
 }
 
 /// 下载 `url` 到 `file`。
@@ -177,7 +173,15 @@ pub fn fetch_with(
         .build()
         .map_err(|e| Error::Io(e.to_string()))?;
 
-    rt.block_on(fetch_async(url, file, resume, cancel, validate, allow_http, on_progress))
+    rt.block_on(fetch_async(
+        url,
+        file,
+        resume,
+        cancel,
+        validate,
+        allow_http,
+        on_progress,
+    ))
 }
 
 async fn fetch_async(
@@ -263,7 +267,7 @@ async fn fetch_async(
         416 => {
             return Err(Error::BadRange(format!(
                 "服务器认为断点 {offset} 越界（文件可能已变短）"
-            )))
+            )));
         }
         s => return Err(Error::Status(s)),
     };
@@ -274,7 +278,7 @@ async fn fetch_async(
             _ => {
                 return Err(Error::BadRange(
                     "本地临时文件长度与断点不一致，不能续传".into(),
-                ))
+                ));
             }
         }
     }

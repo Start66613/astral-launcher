@@ -168,7 +168,13 @@ pub fn apply_update(
     let dir = PathBuf::from(&inst.dirs.mods);
 
     // 旧文件必须真的存在，避免"更新"变成凭空多一个
+    if !crate::resources::dep_file_name_ok(old_file) {
+        return Err(format!("INVALID_PATH|要更新的文件名不安全：{old_file}"));
+    }
     let old_path = dir.join(old_file);
+    if crate::net::is_reparse_point(&old_path) {
+        return Err("INVALID_PATH|要更新的文件是一个符号链接，已拒绝".into());
+    }
     if !old_path.is_file() {
         return Err("INVALID_PATH|要更新的模组文件不存在".into());
     }
@@ -192,6 +198,11 @@ pub fn apply_update(
     let sha1 = f.get("hashes").and_then(|h| str_of(h, "sha1"));
     let sha512 = f.get("hashes").and_then(|h| str_of(h, "sha512"));
 
+    // 文件名来自网络，必须先确认它只是个文件名：不能带目录、不能上跳、
+    // 不能是盘符或反斜杠，否则"更新一个 mod"就能往 mods 外面写文件。
+    if !crate::resources::dep_file_name_ok(&new_name) {
+        return Err(format!("INVALID_PATH|目标文件名不安全：{new_name}"));
+    }
     let dest = dir.join(&new_name);
     crate::net::download_with_cancel(
         &url,

@@ -2,10 +2,10 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
-mod path;
 mod http;
-mod tokio;
+mod path;
 mod serde;
+mod tokio;
 
 pub mod maven;
 
@@ -20,21 +20,19 @@ pub mod stream;
 pub mod mirror;
 
 pub mod base;
-pub mod moj;
 pub mod fabric;
 pub mod forge;
-
+pub mod moj;
 
 /// Internal module used for sealing traits and their methods with a sealed token.
 #[allow(unused)]
 mod sealed {
 
     /// Internal sealed trait that be extended from by traits to be sealed.
-    pub trait Sealed {  }
+    pub trait Sealed {}
 
     /// A token type that can be added as a parameter on a function on a non-sealed trait
-    /// to make this particular function sealed and not callable nor implementable by 
+    /// to make this particular function sealed and not callable nor implementable by
     /// external crates.
     pub struct Token;
-
 }

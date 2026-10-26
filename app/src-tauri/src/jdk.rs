@@ -118,48 +118,99 @@ fn install_inner(
 }
 
 /// 解压到 `dest`，逐条校验路径（防 zip-slip），总量上限 2 GiB
+///
+/// 三个额外的保险：
+/// 1. 拒绝符号链接条目 —— zip 里的链接可能指向解压目录外面；
+/// 2. 用 `io::copy` 实际写出的字节数累计，不信压缩包自称的大小；
+/// 3. 先解到临时目录，全部成功才改名成 `dest`，失败就把临时目录删掉，
+///    不会留下"半个 JDK"让下次启动时误判成装好了。
 fn extract_zip(zip_path: &Path, dest: &Path, on: &mut dyn FnMut(u32, u32)) -> Result<(), String> {
     const MAX_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
+    const MAX_ENTRIES: usize = 50_000;
     let file = std::fs::File::open(zip_path).map_err(|e| format!("PERMISSION|打不开压缩包|{e}"))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("INTERNAL|不是有效 zip|{e}"))?;
+
+    if zip.len() > MAX_ENTRIES {
+        return Err(format!("INTERNAL|压缩包条目太多，已中止|{} 个", zip.len()));
+    }
 
     let mut names: Vec<String> = Vec::new();
     for i in 0..zip.len() {
         if let Ok(entry) = zip.by_index(i) {
+            if let Some(mode) = entry.unix_mode() {
+                if mode & 0o170000 == 0o120000 {
+                    return Err(format!(
+                        "INVALID_PATH|压缩包里有符号链接，已拒绝|{}",
+                        entry.name().unwrap_or_default()
+                    ));
+                }
+            }
             if let Ok(n) = entry.name().map(|c| c.to_string()) {
                 names.push(n);
             }
         }
     }
     let total = names.len() as u32;
-    let mut written = 0u64;
-    let mut done = 0u32;
 
-    for name in names {
-        if name.ends_with('/') {
-            continue;
-        }
-        let rel = crate::modpack::safe_rel_path(&name)?;
-        let target = dest.join(&rel);
-        if !target.starts_with(dest) {
-            return Err(format!("INVALID_PATH|解压路径越界：{name}"));
-        }
-        let mut entry = zip
-            .by_name(&name)
-            .map_err(|e| format!("INTERNAL|读取条目失败|{e}"))?;
-        written += entry.size();
-        if written > MAX_TOTAL {
-            return Err("INTERNAL|解压体积异常，已中止".into());
-        }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
-        }
-        let mut out =
-            std::fs::File::create(&target).map_err(|e| format!("PERMISSION|写入失败|{e}"))?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| format!("PERMISSION|解压失败|{e}"))?;
-        done += 1;
-        on(done, total);
+    let staging = dest.with_extension(format!("part-{}", crate::time::now_nanos()));
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
     }
+    std::fs::create_dir_all(&staging).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        let mut written = 0u64;
+        let mut done = 0u32;
+        for name in &names {
+            if name.ends_with('/') {
+                continue;
+            }
+            let rel = crate::modpack::safe_rel_path(name)?;
+            let target = staging.join(&rel);
+            if !target.starts_with(&staging) {
+                return Err(format!("INVALID_PATH|解压路径越界：{name}"));
+            }
+            let mut entry = zip
+                .by_name(name)
+                .map_err(|e| format!("INTERNAL|读取条目失败|{e}"))?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
+            }
+            let mut out =
+                std::fs::File::create(&target).map_err(|e| format!("PERMISSION|写入失败|{e}"))?;
+            let n = std::io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("PERMISSION|解压失败|{e}"))?;
+            written += n;
+            if written > MAX_TOTAL {
+                return Err("INTERNAL|解压体积异常，已中止".into());
+            }
+            done += 1;
+            on(done, total);
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+
+    // 全部成功才落地；已有目录先挪开，挪不动就报错而不是覆盖
+    if dest.exists() {
+        let old = dest.with_extension(format!("old-{}", crate::time::now_nanos()));
+        std::fs::rename(dest, &old).map_err(|e| format!("PERMISSION|旧目录无法改名|{e}"))?;
+        if let Err(e) = std::fs::rename(&staging, dest) {
+            let _ = std::fs::rename(&old, dest);
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("PERMISSION|解压目录落地失败|{e}"));
+        }
+        let _ = std::fs::remove_dir_all(&old);
+    } else if let Err(e) = std::fs::rename(&staging, dest) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("PERMISSION|解压目录落地失败|{e}"));
+    }
+
     let _ = std::io::stdout().flush();
     Ok(())
 }
@@ -185,11 +236,89 @@ fn find_java_exe(dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn java_range_guard() {
         // 只验证边界判断，不触发网络
         assert!((8..=30).contains(&17));
         assert!(!(8..=30).contains(&7));
+    }
+
+    /// 正常 JDK 包：带一层顶层目录，解压后能找到 java.exe。
+    #[test]
+    fn extract_zip_lands_whole_tree() {
+        let root = std::env::temp_dir().join(format!("astral-jdk-{}", crate::time::now_nanos()));
+        let _ = std::fs::create_dir_all(&root);
+        let zip_path = root.join("jdk.zip");
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.add_directory("jdk-21/", opts).unwrap();
+            zw.start_file("jdk-21/bin/java.exe", opts).unwrap();
+            std::io::Write::write_all(&mut zw, b"fake-java").unwrap();
+            zw.finish().unwrap();
+        }
+        let dest = root.join("out");
+        let r = extract_zip(&zip_path, &dest, &mut |_, _| {});
+        assert!(r.is_ok(), "{r:?}");
+        assert!(dest.join("jdk-21").join("bin").join("java.exe").is_file());
+        // 临时目录不应该残留
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("part-"))
+            .collect();
+        assert!(leftovers.is_empty(), "残留：{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 带 `../` 的条目必须被拒绝，且不能留下半个目录。
+    #[test]
+    fn extract_zip_blocks_traversal() {
+        let root = std::env::temp_dir().join(format!("astral-jdk-{}", crate::time::now_nanos()));
+        let _ = std::fs::create_dir_all(&root);
+        let zip_path = root.join("bad.zip");
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.start_file("../escaped.txt", opts).unwrap();
+            std::io::Write::write_all(&mut zw, b"x").unwrap();
+            zw.finish().unwrap();
+        }
+        let dest = root.join("out");
+        let r = extract_zip(&zip_path, &dest, &mut |_, _| {});
+        assert!(r.is_err());
+        assert!(!dest.exists(), "失败后不应该留下目录");
+        assert!(!root.join("escaped.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 符号链接条目必须被拒绝。
+    #[test]
+    fn extract_zip_blocks_symlink() {
+        let root = std::env::temp_dir().join(format!("astral-jdk-{}", crate::time::now_nanos()));
+        let _ = std::fs::create_dir_all(&root);
+        let zip_path = root.join("link.zip");
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.add_symlink("jdk-21/bin/passwd", "/etc/passwd", opts)
+                .unwrap();
+            zw.finish().unwrap();
+        }
+        let dest = root.join("out");
+        let r = extract_zip(&zip_path, &dest, &mut |_, _| {});
+        assert!(r.is_err());
+        assert!(!dest.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

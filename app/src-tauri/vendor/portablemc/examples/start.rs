@@ -4,14 +4,12 @@
 //! cargo run --example start -- [version] [username]
 //! ```
 
-use std::error::Error;
 use std::env;
+use std::error::Error;
 
 use portablemc::moj;
 
-
 fn main() -> Result<(), Box<dyn Error>> {
-
     let mut args = env::args().skip(1);
 
     let mut installer = match args.next() {
@@ -29,5 +27,4 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Game exited with {status}");
 
     Ok(())
-
 }

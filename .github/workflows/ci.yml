@@ -112,6 +112,11 @@ jobs:
           }
           if ($p.ExitCode -ne 0) { Write-Error "selftest failed: $($p.ExitCode)"; exit 1 }
 
+      # 单元测试：6 个真实联网的用例标了 #[ignore]，这里不跑，避免 CI 被网络抖动拖垮
+      - name: 单元测试
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/run-tests.ps1
+
   audit:
     name: 依赖安全审计
     runs-on: ubuntu-latest

@@ -5,22 +5,19 @@
 //! cargo run --example loader -- <fabric|quilt|legacyfabric|babric|forge|neoforge> [game version]
 //! ```
 
+use std::env;
 use std::error::Error;
 use std::io::Write;
-use std::env;
 
-use portablemc::{base, moj, fabric, forge};
-
+use portablemc::{base, fabric, forge, moj};
 
 fn main() -> Result<(), Box<dyn Error>> {
-
     let mut args = env::args().skip(1);
     let loader = args.next().ok_or("missing loader argument")?;
     let game_version = args.next();
 
     let game = match loader.as_str() {
         "fabric" | "quilt" | "legacyfabric" | "babric" => {
-
             let loader = match loader.as_str() {
                 "fabric" => fabric::Loader::Fabric,
                 "quilt" => fabric::Loader::Quilt,
@@ -33,12 +30,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None => fabric::GameVersion::Stable,
             };
 
-            let mut installer = fabric::Installer::new(loader, game_version, fabric::LoaderVersion::Stable);
+            let mut installer =
+                fabric::Installer::new(loader, game_version, fabric::LoaderVersion::Stable);
             installer.install(&mut Printer)?
-
         }
         "forge" | "neoforge" => {
-
             let loader = match loader.as_str() {
                 "forge" => forge::Loader::Forge,
                 _ => forge::Loader::NeoForge,
@@ -48,19 +44,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Mojang release if none is given.
             let game_version = match game_version {
                 Some(name) => name,
-                None => moj::Manifest::request(())?.latest_release_name().to_string(),
+                None => moj::Manifest::request(())?
+                    .latest_release_name()
+                    .to_string(),
             };
 
             let mut installer = forge::Installer::new(loader, forge::Version::Stable(game_version));
             installer.install(&mut Printer)?
-
         }
         _ => return Err(format!("unknown loader: {loader}").into()),
     };
 
     game.spawn_and_wait()?;
     Ok(())
-
 }
 
 /// A handler that prints a few relevant events, it implements the handler of every
@@ -75,11 +71,23 @@ impl base::Handler for Printer {
                 println!("Loaded versions: {}", names.join(" -> "));
             }
             base::Event::LoadedJvm { file, version, .. } => {
-                println!("Loaded JVM {} at {}", version.unwrap_or("?"), file.display());
+                println!(
+                    "Loaded JVM {} at {}",
+                    version.unwrap_or("?"),
+                    file.display()
+                );
             }
-            base::Event::DownloadProgress { count, total_count, size, total_size } => {
-                print!("\rDownloading {count}/{total_count} ({:.1}/{:.1} MB)",
-                    size as f32 / 1_000_000.0, total_size as f32 / 1_000_000.0);
+            base::Event::DownloadProgress {
+                count,
+                total_count,
+                size,
+                total_size,
+            } => {
+                print!(
+                    "\rDownloading {count}/{total_count} ({:.1}/{:.1} MB)",
+                    size as f32 / 1_000_000.0,
+                    total_size as f32 / 1_000_000.0
+                );
                 if count == total_count {
                     println!();
                 }
@@ -104,7 +112,10 @@ impl fabric::Handler for Printer {
     fn on_event(&mut self, event: fabric::Event) {
         match event {
             fabric::Event::Mojang(event) => moj::Handler::on_event(self, event),
-            fabric::Event::FetchVersion { game_version, loader_version } => {
+            fabric::Event::FetchVersion {
+                game_version,
+                loader_version,
+            } => {
                 println!("Fetching loader {loader_version} for {game_version}");
             }
             _ => {}
@@ -117,7 +128,9 @@ impl forge::Handler for Printer {
         match event {
             forge::Event::Mojang(event) => moj::Handler::on_event(self, event),
             forge::Event::Installing { reason, .. } => println!("Installing loader ({reason:?})"),
-            forge::Event::RunInstallerProcessor { name, .. } => println!("Running processor {name}"),
+            forge::Event::RunInstallerProcessor { name, .. } => {
+                println!("Running processor {name}")
+            }
             forge::Event::Installed => println!("Loader installed"),
             _ => {}
         }
