@@ -24,6 +24,7 @@ mod plan;
 mod recycle;
 mod resources;
 mod save_manage;
+mod screenshots;
 mod search;
 mod server;
 mod servers;
@@ -771,6 +772,36 @@ fn purge_deleted_world(
     let game = game_root();
     let (inst_dir, _saves) = saves_and_dir(&game, &instance_id)?;
     save_manage::purge(&inst_dir, &trash_name, confirm)
+}
+
+// ── 截图浏览 ───────────────────────────────────────────────────
+
+fn shots_dir_of(instance_id: &str) -> Result<PathBuf, String> {
+    let game = game_root();
+    let inst = instance::find(&game, instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    Ok(PathBuf::from(inst.dirs.screenshots))
+}
+
+/// 列出实例的截图（只读）
+#[tauri::command]
+fn list_screenshots(instance_id: String) -> Result<Vec<screenshots::Screenshot>, String> {
+    Ok(screenshots::list(&shots_dir_of(&instance_id)?))
+}
+
+/// 读一张截图，返回 data URL 给前端显示
+#[tauri::command]
+fn read_screenshot(
+    instance_id: String,
+    file_name: String,
+) -> Result<screenshots::ScreenshotData, String> {
+    screenshots::read(&shots_dir_of(&instance_id)?, &file_name)
+}
+
+/// 删除一张截图（必须确认）
+#[tauri::command]
+fn delete_screenshot(instance_id: String, file_name: String, confirm: bool) -> Result<u64, String> {
+    screenshots::delete(&shots_dir_of(&instance_id)?, &file_name, confirm)
 }
 
 // ── 版本复制 / 导入 / 迁移 ──────────────────────────────────────
@@ -2864,6 +2895,9 @@ pub fn run() {
             list_deleted_worlds,
             restore_deleted_world,
             purge_deleted_world,
+            list_screenshots,
+            read_screenshot,
+            delete_screenshot,
             get_resource_project,
             list_resource_files,
             search_resources,
@@ -4042,6 +4076,57 @@ pub fn selftest() -> i32 {
             ["", "..", "a/b", "CON", "x."]
                 .iter()
                 .all(|n| save_manage::validate_name(n).is_err())
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // 截图浏览：只读列表 + data URL + 删除需确认。全在隔离目录里做。
+    {
+        let base = std::env::temp_dir().join(format!("astral-shots-{}", time::now_nanos()));
+        let _ = std::fs::create_dir_all(&base);
+        let png = {
+            let mut v = vec![0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            v.extend_from_slice(&13u32.to_be_bytes());
+            v.extend_from_slice(b"IHDR");
+            v.extend_from_slice(&1920u32.to_be_bytes());
+            v.extend_from_slice(&1080u32.to_be_bytes());
+            v.extend_from_slice(&[8, 2, 0, 0, 0, 0, 0, 0, 0]);
+            v
+        };
+        let _ = std::fs::write(base.join("2026-10-27_12.00.00.png"), &png);
+        let _ = std::fs::write(base.join("readme.txt"), b"not an image");
+
+        let shots = screenshots::list(&base);
+        check!(
+            "screenshots listed with size",
+            shots.len() == 1
+                && shots[0].width == Some(1920)
+                && shots[0].height == Some(1080)
+                && shots[0].note.is_none()
+        );
+
+        let data = screenshots::read(&base, "2026-10-27_12.00.00.png");
+        check!(
+            "screenshot reads as data url",
+            data.as_ref()
+                .map(|d| d.mime == "image/png" && d.data_url.starts_with("data:image/png;base64,"))
+                .unwrap_or(false)
+        );
+
+        check!(
+            "screenshot rejects bad names",
+            ["../x.png", "a/b.png", "readme.txt", "nope.png"]
+                .iter()
+                .all(|n| screenshots::read(&base, n).is_err())
+        );
+
+        check!(
+            "screenshot delete needs confirm",
+            screenshots::delete(&base, "2026-10-27_12.00.00.png", false).is_err()
+                && base.join("2026-10-27_12.00.00.png").is_file()
+                && screenshots::delete(&base, "2026-10-27_12.00.00.png", true).is_ok()
+                && !base.join("2026-10-27_12.00.00.png").exists()
         );
 
         let _ = std::fs::remove_dir_all(&base);
