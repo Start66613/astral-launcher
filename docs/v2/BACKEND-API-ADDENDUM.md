@@ -853,3 +853,74 @@ timer = window.setInterval(tick, 500);
   单行超长（几百 KB 的堆栈或 JSON）读满上限就整段返回并标 `truncated`，
   不会死等一个换行。
 - 内容和 `read_log` 一样走脱敏（邮箱、IP、token、用户目录路径），可以放心贴到界面。
+
+---
+
+## 15. 服务器状态查询（V2.5 新增）
+
+### 15.1 命令
+
+```ts
+invoke<ServerStatus>("ping_server", {
+  host: string,        // "play.example.com" 或 "play.example.com:25566" 都行
+  port?: number,       // 不传就用地址里带的，再没有就 25565
+  timeoutMs?: number,  // 默认 4000，夹在 500..30000
+})
+```
+
+### 15.2 返回
+
+```ts
+interface ServerStatus {
+  host: string;
+  port: number;
+  online: boolean;          // 没连上就是 false，不会抛异常
+  latencyMs: number;        // 握手 + 状态查询的往返耗时
+  versionName: string | null;      // "1.20.1"
+  versionProtocol: number | null;  // 763
+  playersOnline: number | null;
+  playersMax: number | null;
+  sample: string[];         // 在线玩家名，服务器只给前几个
+  motd: string;             // 剥掉 § 颜色代码的纯文本，直接显示用
+  motdRaw: string;          // 带颜色代码，想自己渲染时用
+  favicon: string | null;   // "data:image/png;base64,..."
+  legacy: boolean;          // true = 走的是 1.6 及更早的老协议
+  error: string | null;     // online=false 时一定有值，可以直接显示
+}
+```
+
+### 15.3 前端怎么用
+
+```ts
+async function refresh(addr: string) {
+  try {
+    const s = await invoke<ServerStatus>("ping_server", { host: addr });
+    if (!s.online) {
+      setStatus(`离线：${s.error}`);
+      return;
+    }
+    setStatus(
+      `${s.versionName} · ${s.playersOnline}/${s.playersMax} 人 · ${s.latencyMs}ms`,
+    );
+    setMotd(s.motd);          // 已经去过颜色代码
+    setIcon(s.favicon);       // 可能为 null
+  } catch (e) {
+    // 只有地址写错才会走到这里（空、带空格、端口 0）
+    setStatus(String(e));
+  }
+}
+```
+
+要点：
+
+- **不要把"连不上"当异常处理**。服务器没开、地址写错、防火墙拦了都是常见情况，
+  后端一律返回 `online: false` + 中文 `error`；只有参数本身不合法才抛错。
+- **地址一个框就够**。玩家粘贴 `play.example.com:25566` 或 `[::1]:25565`
+  后端会自己拆，不需要单独的端口输入框。
+- **MOTD 有两份**。`motd` 已经去掉 `§a` 这类代码，直接显示；想按服务器原意
+  渲染颜色就用 `motdRaw` 自己解析。
+- **favicon 只信任内嵌图**。后端只接受 `data:image/...` 且 ≤256 KiB，
+  其它一律丢弃，前端不用做额外校验，也不会有外链请求。
+- **超时默认 4 秒**。批量刷新服务器列表时建议前端自己限制并发（比如 4 个
+  一批），别一次发几十个。
+- 刷新频率建议 ≥30 秒一次；服务器列表协议没有订阅机制，只能轮询。
