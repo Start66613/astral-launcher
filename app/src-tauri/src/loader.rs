@@ -40,13 +40,40 @@ const NEOFORGE_META: &str = "https://maven.neoforged.net/releases/net/neoforged/
 const NEOFORGE_LEGACY_META: &str = "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml";
 
 /// 所有下载都要过白名单（这些 URL 也会走 net 校验）
+/// 拉取清单：走带缓存的下载，断网时回落到上次成功的结果。
 fn fetch(url: &str) -> Result<String, String> {
     crate::net::check_url(url)?;
-    let mut single = portablemc::download::single_cached(url);
-    single
-        .download(())
-        .map_err(|e| format!("NETWORK|拉取加载器清单失败|{e:?}"))?;
-    std::fs::read_to_string(single.file()).map_err(|e| format!("INTERNAL|读取清单失败|{e}"))
+    let dest = std::env::temp_dir().join(format!(
+        "astral-loader-{:x}.txt",
+        crate::time::now_unix_ms()
+    ));
+    let opts = crate::net::DownloadOptions {
+        max_attempts: 2,
+        resume: false,
+        reuse_verified: false,
+        ..Default::default()
+    };
+    let cancel = crate::net::never_cancel();
+    let res = crate::net::download(url, &dest, &opts, &*cancel, |_, _| {});
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&dest);
+        // 断网时读元数据缓存（文本形式）
+        if let Some((body, info)) = crate::net::meta_read(url) {
+            if let Ok(text) = String::from_utf8(body) {
+                if !text.trim().is_empty() {
+                    let age = crate::time::now_unix_ms().saturating_sub(info.fetched_ms);
+                    let _ = age;
+                    return Ok(text);
+                }
+            }
+        }
+        return Err(e);
+    }
+    let text = std::fs::read_to_string(&dest)
+        .map_err(|e| format!("INTERNAL|读取清单失败|{e}"))?;
+    let _ = std::fs::remove_file(&dest);
+    let _ = crate::net::meta_write(url, text.as_bytes(), None);
+    Ok(text)
 }
 
 // ── 解析 ────────────────────────────────────────────────────────

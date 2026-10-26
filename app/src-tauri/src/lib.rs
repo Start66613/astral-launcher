@@ -1153,6 +1153,45 @@ async fn list_java_runtimes(instance_id: Option<String>) -> Result<JavaReport, S
     .map_err(|e| e.to_string())
 }
 
+// ── 元数据缓存（D1）────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionListReport {
+    versions: Vec<core::VersionSummary>,
+    /// 数据来源：network / cache，含抓取时间与是否过期
+    cache: serde_json::Value,
+}
+
+/// 版本清单（断网时用上次成功的缓存，并说明数据时间）
+#[tauri::command]
+async fn list_versions_cached() -> Result<VersionListReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = core::load_config();
+        let (versions, cache) = core::list_versions_cached(&cfg.source)?;
+        Ok(VersionListReport { versions, cache })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 元数据缓存占用
+#[tauri::command]
+fn meta_cache_stats() -> serde_json::Value {
+    net::meta_stats()
+}
+
+/// 清理元数据缓存（超过 keep_days 天，默认 30）
+#[tauri::command]
+fn prune_meta_cache(keep_days: Option<u64>) -> (u64, u64) {
+    net::meta_prune(keep_days.unwrap_or(30))
+}
+
+/// 清空元数据缓存
+#[tauri::command]
+fn clear_meta_cache(confirm: bool) -> Result<u64, String> {
+    net::meta_clear(confirm)
+}
 // ── Java 审计（C4）──────────────────────────────────────────────
 
 /// 每个实例的 Java 情况 + 托管 JDK 占用 + 没人用的 JDK（只读）
@@ -2421,6 +2460,10 @@ pub fn run() {
             get_component_catalog,
             list_component_versions,
             list_java_runtimes,
+            list_versions_cached,
+            meta_cache_stats,
+            prune_meta_cache,
+            clear_meta_cache,
             java_audit,
             check_instance_java,
             remove_managed_java,
@@ -5096,6 +5139,74 @@ pub fn selftest() -> i32 {
                                     .unwrap_or(false))
                             .unwrap_or(false)
                 );
+            }
+
+            // D1：元数据缓存（离线可用 + 如实标注数据时间）
+            {
+                if let Ok(srv) = testsrv::TestServer::start() {
+                    let url = srv.json_url(2048);
+                    // 1) 第一次走网络
+                    let first = net::fetch_json_cached_for_test(&url, Some(60_000));
+                    let first_ok = first
+                        .as_ref()
+                        .map(|v| {
+                            v["__cache"]["source"] == serde_json::json!("network")
+                                && v["__cache"]["stale"] == serde_json::json!(false)
+                        })
+                        .unwrap_or(false);
+                    let served_after_first = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+                    // 2) 第二次应该命中缓存，不再请求服务器
+                    let second = net::fetch_json_cached_for_test(&url, Some(60_000));
+                    let second_ok = second
+                        .as_ref()
+                        .map(|v| v["__cache"]["source"] == serde_json::json!("cache"))
+                        .unwrap_or(false);
+                    let served_after_second = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+                    check!(
+                        "meta cache serves fresh without network",
+                        first_ok && second_ok && served_after_second == served_after_first
+                    );
+
+                    // 3) 关掉服务器模拟断网 + 强制过期：必须回落到缓存并标记 stale
+                    drop(srv);
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    let stale = net::fetch_json_cached_for_test(&url, Some(0));
+                    let stale_ok = stale
+                        .as_ref()
+                        .map(|v| {
+                            v["__cache"]["source"] == serde_json::json!("cache")
+                                && v["__cache"]["stale"] == serde_json::json!(true)
+                                && v["__cache"]["networkError"].is_string()
+                                && v["__cache"]["fetchedAt"].is_string()
+                        })
+                        .unwrap_or(false);
+                    check!("meta cache falls back when offline", stale_ok);
+
+                    // 4) 统计结构
+                    let st = net::meta_stats();
+                    check!(
+                        "meta cache stats shape",
+                        st["count"].as_u64().unwrap_or(0) >= 1
+                            && st["bytes"].as_u64().unwrap_or(0) >= 20
+                            && st["ttlMs"].as_i64() == Some(net::META_TTL_MS)
+                            && st["dir"].is_string()
+                    );
+
+                    // 5) 清理：保留天数极大时不该删掉刚写的缓存
+                    let (removed, _) = net::meta_prune(3650);
+                    let kept = net::meta_stats()["count"].as_u64().unwrap_or(0);
+                    check!(
+                        "meta cache prune keeps fresh entries",
+                        removed == 0 && kept >= 1
+                    );
+
+                    // 6) 清空必须确认
+                    let refused = net::meta_clear(false).is_err();
+                    let cleared = net::meta_clear(true).map(|n| n >= 1).unwrap_or(false);
+                    check!("meta cache clear requires confirm", refused && cleared);
+                } else {
+                    check!("meta cache serves fresh without network", false);
+                }
             }
 
             // 21) 调度统计字段齐全，前端能直接用

@@ -930,6 +930,344 @@ pub fn download_with_cancel(
 }
 
 /// 拉取 JSON（临时文件，不缓存），用于 Modrinth API
+// ── 元数据缓存（D1）────────────────────────────────────────────
+//
+// 目标：断网时还能浏览上次拉到的版本清单 / 加载器目录 / 项目信息，
+// 并且**如实告诉界面这是什么时候的数据**，不把过期缓存说成现在一定可下载。
+
+/// 缓存默认 6 小时过期；过期后仍然可以读，但会标记 `stale: true`。
+pub const META_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+/// 单个缓存文件上限，防止异常响应把磁盘写满
+const META_MAX_BYTES: u64 = 32 * 1024 * 1024;
+/// 缓存目录里最多保留多少个条目
+const META_MAX_FILES: usize = 400;
+
+fn meta_root() -> PathBuf {
+    let data = match std::env::var_os("ASTRAL_DATA_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Astral"),
+    };
+    data.join("meta")
+}
+
+/// URL → 缓存文件名：可读前缀 + 稳定哈希，避免长路径和非法字符
+fn meta_key(url: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(url.as_bytes());
+    let digest = h.finalize();
+    let hex: String = digest.iter().take(10).map(|b| format!("{b:02x}")).collect();
+    let tail: String = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("index")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .take(48)
+        .collect();
+    format!("{hex}-{tail}")
+}
+
+fn meta_cache_path(url: &str) -> PathBuf {
+    meta_root().join(meta_key(url))
+}
+
+/// 缓存条目的元信息（文件名旁挂 `.meta.json`）
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct MetaInfo {
+    pub url: String,
+    pub fetched_ms: i64,
+    pub bytes: u64,
+    #[serde(default)]
+    pub etag: Option<String>,
+}
+
+fn meta_info_path(url: &str) -> PathBuf {
+    let mut p = meta_cache_path(url);
+    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    p.set_file_name(format!("{name}.meta.json"));
+    p
+}
+
+/// 读缓存。返回 (内容, 元信息)，文件不存在返回 None。
+pub fn meta_read(url: &str) -> Option<(Vec<u8>, MetaInfo)> {
+    let info_path = meta_info_path(url);
+    let body_path = meta_cache_path(url);
+    let info_text = std::fs::read_to_string(&info_path).ok()?;
+    let info: MetaInfo = serde_json::from_str(&info_text).ok()?;
+    let meta = std::fs::metadata(&body_path).ok()?;
+    if !meta.is_file() || meta.len() > META_MAX_BYTES {
+        return None;
+    }
+    let body = std::fs::read(&body_path).ok()?;
+    Some((body, info))
+}
+
+pub fn meta_write(url: &str, body: &[u8], etag: Option<String>) -> bool {
+    if body.len() as u64 > META_MAX_BYTES {
+        return false;
+    }
+    let root = meta_root();
+    if std::fs::create_dir_all(&root).is_err() {
+        return false;
+    }
+    let body_path = meta_cache_path(url);
+    let info = MetaInfo {
+        url: url.to_string(),
+        fetched_ms: crate::time::now_unix_ms(),
+        bytes: body.len() as u64,
+        etag,
+    };
+    let Ok(info_text) = serde_json::to_string(&info) else {
+        return false;
+    };
+    // 先写临时文件再改名，避免半截缓存
+    let tmp = root.join(format!("{}.tmp", meta_key(url)));
+    if std::fs::write(&tmp, body).is_err() {
+        return false;
+    }
+    if std::fs::rename(&tmp, &body_path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    let info_tmp = root.join(format!("{}.meta.tmp", meta_key(url)));
+    if std::fs::write(&info_tmp, info_text).is_err() {
+        return false;
+    }
+    let _ = std::fs::rename(&info_tmp, meta_info_path(url));
+    true
+}
+
+#[allow(dead_code)]
+/// 缓存是否过期（拿不到元信息时算过期）
+pub fn meta_is_stale(info: &serde_json::Value) -> bool {
+    info.get("ageMs")
+        .and_then(|x| x.as_i64())
+        .map(|age| age > META_TTL_MS)
+        .unwrap_or(true)
+}
+
+/// 清理：超过 `keep_days` 的缓存与超过条目上限的最旧条目
+pub fn meta_prune(keep_days: u64) -> (u64, u64) {
+    let root = meta_root();
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return (0, 0);
+    };
+    let cutoff = crate::time::now_unix_ms() - (keep_days.min(3650) as i64) * 24 * 3600 * 1000;
+    let mut entries: Vec<(PathBuf, i64, u64)> = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        let Ok(meta) = e.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.ends_with(".meta.json") {
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        entries.push((p, mtime, meta.len()));
+    }
+    let mut removed = 0u64;
+    let mut bytes = 0u64;
+    entries.sort_by_key(|(_, mtime, _)| *mtime);
+    let over = entries.len().saturating_sub(META_MAX_FILES);
+    for (i, (p, mtime, len)) in entries.iter().enumerate() {
+        if i < over || *mtime < cutoff {
+            if std::fs::remove_file(p).is_ok() {
+                removed += 1;
+                bytes += len;
+            }
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let _ = std::fs::remove_file(root.join(format!("{name}.meta.json")));
+        }
+    }
+    (removed, bytes)
+}
+
+/// 缓存整体统计
+pub fn meta_stats() -> serde_json::Value {
+    let root = meta_root();
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    let mut newest = 0i64;
+    let mut oldest = i64::MAX;
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let meta = match e.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.ends_with(".meta.json") || name.ends_with(".tmp") {
+                continue;
+            }
+            count += 1;
+            bytes += meta.len();
+            if let Ok(t) = meta.modified() {
+                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                    let ms = d.as_millis() as i64;
+                    newest = newest.max(ms);
+                    oldest = oldest.min(ms);
+                }
+            }
+        }
+    }
+    if oldest == i64::MAX {
+        oldest = 0;
+    }
+    serde_json::json!({
+        "dir": root.to_string_lossy(),
+        "count": count,
+        "bytes": bytes,
+        "newest": if newest > 0 { crate::time::unix_ms_to_iso(newest) } else { String::new() },
+        "oldest": if oldest > 0 { crate::time::unix_ms_to_iso(oldest) } else { String::new() },
+        "ttlMs": META_TTL_MS,
+        "maxFiles": META_MAX_FILES,
+    })
+}
+
+/// 强制清空元数据缓存
+pub fn meta_clear(confirm: bool) -> Result<u64, String> {
+    if !confirm {
+        return Err("UNSUPPORTED|清空元数据缓存需要明确确认".into());
+    }
+    let root = meta_root();
+    let mut removed = 0u64;
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() && std::fs::remove_file(&p).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// 带缓存的 JSON 拉取。
+///
+/// - 网络成功：写缓存，返回 `source: "network"`；
+/// - 网络失败但有缓存：返回缓存内容并标记 `stale` 与 `ageMs`；
+/// - 网络失败且没缓存：返回原始错误。
+pub fn fetch_json_cached(url: &str, max_age_ms: Option<i64>) -> Result<serde_json::Value, String> {
+    fetch_json_cached_inner(url, max_age_ms, false)
+}
+
+/// 只给自检用：允许 `http://127.0.0.1` 的本地测试服务器
+#[doc(hidden)]
+pub fn fetch_json_cached_for_test(
+    url: &str,
+    max_age_ms: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    fetch_json_cached_inner(url, max_age_ms, true)
+}
+
+fn fetch_json_cached_inner(
+    url: &str,
+    max_age_ms: Option<i64>,
+    allow_local: bool,
+) -> Result<serde_json::Value, String> {
+    let ttl = max_age_ms.unwrap_or(META_TTL_MS).max(0);
+    let cached = meta_read(url);
+    // 缓存还很新：直接用，省一次请求
+    if let Some((body, info)) = &cached {
+        let age = crate::time::now_unix_ms().saturating_sub(info.fetched_ms);
+        if age >= 0 && age <= ttl {
+            if let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("__cache".into(), serde_json::json!({
+                        "source": "cache",
+                        "ageMs": age,
+                        "stale": false,
+                        "fetchedAt": crate::time::unix_ms_to_iso(info.fetched_ms),
+                    }));
+                }
+                return Ok(v);
+            }
+        }
+    }
+
+    let fetched = if allow_local {
+        fetch_json_local(url)
+    } else {
+        fetch_json(url)
+    };
+    match fetched {
+        Ok(mut v) => {
+            if let Ok(text) = serde_json::to_vec(&v) {
+                meta_write(url, &text, None);
+            }
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("__cache".into(), serde_json::json!({
+                    "source": "network",
+                    "ageMs": 0,
+                    "stale": false,
+                    "fetchedAt": crate::time::unix_ms_to_iso(crate::time::now_unix_ms()),
+                }));
+            }
+            Ok(v)
+        }
+        Err(e) => match cached {
+            Some((body, info)) => {
+                let age = crate::time::now_unix_ms().saturating_sub(info.fetched_ms);
+                match serde_json::from_slice::<serde_json::Value>(&body) {
+                    Ok(mut v) => {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("__cache".into(), serde_json::json!({
+                                "source": "cache",
+                                "ageMs": age,
+                                "stale": age > ttl,
+                                "fetchedAt": crate::time::unix_ms_to_iso(info.fetched_ms),
+                                "networkError": e,
+                            }));
+                        }
+                        Ok(v)
+                    }
+                    Err(_) => Err(e),
+                }
+            }
+            None => Err(e),
+        },
+    }
+}
+/// 自检专用：允许本地 http 的 JSON 拉取（生产代码不会走到这里）
+fn fetch_json_local(url: &str) -> Result<serde_json::Value, String> {
+    let tmp = std::env::temp_dir().join(format!(
+        "astral-api-local-{:x}-{:x}.json",
+        crate::time::now_unix_ms(),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let opts = DownloadOptions {
+        max_attempts: 2,
+        resume: false,
+        reuse_verified: false,
+        allow_local_http: true,
+        ..Default::default()
+    };
+    let cancel = never_cancel();
+    let res = download(url, &tmp, &opts, &*cancel, |_, _| {});
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let text = std::fs::read_to_string(&tmp).map_err(|e| format!("INTERNAL|读取响应失败|{e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+    serde_json::from_str(&text).map_err(|e| format!("INTERNAL|响应不是合法 JSON|{e}"))
+}
+
 pub fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
     validate_url(url)?;
     let tmp = std::env::temp_dir().join(format!(

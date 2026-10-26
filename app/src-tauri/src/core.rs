@@ -95,28 +95,36 @@ pub struct Progress {
 }
 
 pub fn list_versions(source: &str) -> Result<Vec<VersionSummary>, String> {
+    list_versions_cached(source).map(|(v, _)| v)
+}
+
+/// 版本清单 + 数据来源说明（`__cache` 里是 network / cache / stale）。
+///
+/// 断网时用上次成功的清单，并在返回值里明确写清数据是什么时候抓的。
+pub fn list_versions_cached(
+    source: &str,
+) -> Result<(Vec<VersionSummary>, serde_json::Value), String> {
     let url = if source == "bmclapi" {
         BMCLAPI_MANIFEST
     } else {
         VERSION_MANIFEST
     };
-    let mut single = portablemc::download::single_cached(url);
-    single
-        .download(())
-        .map_err(|e| format!("拉取版本清单失败: {e:?}"))?;
-
-    let text = std::fs::read_to_string(single.file()).map_err(|e| e.to_string())?;
-    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let json = crate::net::fetch_json_cached(url, None)
+        .map_err(|e| format!("拉取版本清单失败: {e}"))?;
     let arr = json["versions"].as_array().ok_or("版本清单格式不对")?;
-
-    Ok(arr
+    let cache = json
+        .get("__cache")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let list = arr
         .iter()
         .map(|v| VersionSummary {
             id: v["id"].as_str().unwrap_or_default().to_string(),
             kind: v["type"].as_str().unwrap_or_default().to_string(),
             released: v["releaseTime"].as_str().unwrap_or_default().to_string(),
         })
-        .collect())
+        .collect();
+    Ok((list, cache))
 }
 
 fn blank(stage: &str, label: &str) -> Progress {

@@ -120,6 +120,11 @@ impl TestServer {
         )
     }
 
+    /// 返回合法 JSON 的地址（元数据缓存测试用）
+    pub fn json_url(&self, size: u32) -> String {
+        format!("{}/json?size={size}", self.base())
+    }
+
     pub fn flaky_url(&self, fails: u32, size: u64) -> String {
         format!("{}/flaky?fails={fails}&size={size}", self.base())
     }
@@ -206,6 +211,19 @@ fn handle(
         }
         let size = query_int(query, "size", 1024);
         return send_body(&mut stream, &headers, size, size.max(1), 0, port, served);
+    }
+
+    if path == "/json" {
+        let size = query_int(query, "size", 64) as u32;
+        let body = format!("{{\"ok\":true,\"size\":{size}}}");
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        served.fetch_add(body.len() as u64, Ordering::SeqCst);
+        stream.write_all(resp.as_bytes())?;
+        return Ok(());
     }
 
     if path == "/data" {
