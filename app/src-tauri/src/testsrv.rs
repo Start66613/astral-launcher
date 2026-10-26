@@ -76,6 +76,111 @@ pub fn expected_sha1(size: u64) -> String {
     s
 }
 
+/// 假 Minecraft 服务器：按服务器列表协议回一段状态 JSON。
+///
+/// 只监听 `127.0.0.1:0`，用来在 `--selftest` 里真实验证 `server::ping` 的
+/// 握手、VarInt 读写和 JSON 解析，不需要外网。
+pub struct FakeMcServer {
+    pub port: u16,
+    shutdown: Arc<AtomicU32>,
+}
+
+impl Drop for FakeMcServer {
+    fn drop(&mut self) {
+        self.shutdown.store(1, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
+impl FakeMcServer {
+    /// `motd` 会原样放进 `description.text`。
+    pub fn start(motd: &str) -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let shutdown = Arc::new(AtomicU32::new(0));
+        let sd = shutdown.clone();
+        let motd = motd.to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if sd.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                let Ok(mut stream) = stream else { continue };
+                let motd = motd.clone();
+                std::thread::spawn(move || {
+                    let _ = serve_status(&mut stream, &motd);
+                });
+            }
+        });
+        Ok(Self { port, shutdown })
+    }
+}
+
+fn read_varint(r: &mut impl std::io::Read) -> std::io::Result<i32> {
+    let mut value = 0i32;
+    let mut shift = 0u32;
+    loop {
+        let mut b = [0u8; 1];
+        r.read_exact(&mut b)?;
+        value |= ((b[0] & 0x7F) as i32) << shift;
+        if b[0] & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+        if shift >= 35 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "varint too long",
+            ));
+        }
+    }
+}
+
+fn write_varint(out: &mut Vec<u8>, mut v: u32) {
+    loop {
+        let mut byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if v == 0 {
+            break;
+        }
+    }
+}
+
+fn serve_status(stream: &mut TcpStream, motd: &str) -> std::io::Result<()> {
+    // 握手包
+    let len = read_varint(stream)?;
+    if len <= 0 {
+        return Ok(());
+    }
+    let mut hs = vec![0u8; len as usize];
+    std::io::Read::read_exact(stream, &mut hs)?;
+    // 状态请求包（内容不关心，读掉就行）
+    let len2 = read_varint(stream)?;
+    if len2 > 0 {
+        let mut req = vec![0u8; len2 as usize];
+        std::io::Read::read_exact(stream, &mut req)?;
+    }
+
+    let body = format!(
+        r#"{{"version":{{"name":"1.20.1","protocol":763}},"players":{{"max":100,"online":7,"sample":[{{"name":"Alice"}},{{"name":"Bob"}}]}},"description":{{"text":"{motd}"}},"favicon":"data:image/png;base64,iVBORw0KGgo="}}"#
+    );
+    // 状态响应：packet id 0x00 + 字符串（VarInt 长度 + UTF-8）
+    let mut payload = Vec::new();
+    write_varint(&mut payload, 0);
+    write_varint(&mut payload, body.len() as u32);
+    payload.extend_from_slice(body.as_bytes());
+    let mut out = Vec::new();
+    write_varint(&mut out, payload.len() as u32);
+    out.extend_from_slice(&payload);
+    stream.write_all(&out)?;
+    stream.flush()?;
+    Ok(())
+}
+
 impl TestServer {
     pub fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;

@@ -23,6 +23,7 @@ mod plan;
 mod recycle;
 mod resources;
 mod search;
+mod server;
 mod session;
 mod stats;
 mod task;
@@ -1559,6 +1560,22 @@ fn tail_log(
     live::tail(&dir, &id, offset.unwrap_or(0), max_bytes)
 }
 
+/// 查询 Minecraft 服务器的在线状态（服务器列表协议）。
+///
+/// 地址可以写成 `example.com` 或 `example.com:25566`。
+/// **联网失败不报错**：返回 `online=false` + `error`，前端直接显示离线即可；
+/// 只有地址本身不合法才返回 `Err`。
+#[tauri::command]
+async fn ping_server(
+    host: String,
+    port: Option<u16>,
+    timeout_ms: Option<u64>,
+) -> Result<server::ServerStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || server::ping(&host, port, timeout_ms))
+        .await
+        .map_err(|e| format!("INTERNAL|查询任务异常|{e}"))?
+}
+
 /// 只生成脱敏预览；上传由用户在界面上确认后另行处理
 #[tauri::command]
 fn prepare_diagnosis(
@@ -2698,6 +2715,7 @@ pub fn run() {
             read_log,
             prepare_diagnosis,
             tail_log,
+            ping_server,
             diagnose_instance,
             install_version,
             launch_version,
@@ -5919,6 +5937,76 @@ pub fn selftest() -> i32 {
                     check!("search returns parsed hits", false);
                 }
             }
+
+            // 服务器列表查询：握手、VarInt、JSON 解析整条链走通
+            match testsrv::FakeMcServer::start("§6Astral §fTest") {
+                Ok(mc) => {
+                    let st = server::ping("127.0.0.1", Some(mc.port), Some(3000));
+                    match st {
+                        Ok(s) => {
+                            check!(
+                                "server ping reads status",
+                                s.online
+                                    && s.version_name.as_deref() == Some("1.20.1")
+                                    && s.version_protocol == Some(763)
+                                    && s.players_online == Some(7)
+                                    && s.players_max == Some(100)
+                                    && s.sample.len() == 2
+                                    && s.sample[0] == "Alice"
+                            );
+                            // 颜色代码要剥掉，原始串要留着
+                            check!(
+                                "server ping strips color codes",
+                                s.motd == "Astral Test" && s.motd_raw == "§6Astral §fTest"
+                            );
+                            check!(
+                                "server ping keeps favicon",
+                                s.favicon
+                                    .as_deref()
+                                    .map(|f| f.starts_with("data:image/png;base64,"))
+                                    .unwrap_or(false)
+                                    && !s.legacy
+                                    && s.latency_ms < 3000
+                            );
+                            // host:port 写法要能自己拆开
+                            let addr = format!("127.0.0.1:{}", mc.port);
+                            let st2 = server::ping(&addr, None, Some(3000));
+                            check!(
+                                "server ping accepts host:port",
+                                st2.map(|s| s.online && s.port == mc.port).unwrap_or(false)
+                            );
+                        }
+                        Err(e) => {
+                            check!("server ping reads status", false);
+                            check!("server ping strips color codes", false);
+                            check!("server ping keeps favicon", false);
+                            check!("server ping accepts host:port", false);
+                            let _ = e;
+                        }
+                    }
+                }
+                Err(_) => {
+                    check!("server ping reads status", false);
+                    check!("server ping strips color codes", false);
+                    check!("server ping keeps favicon", false);
+                    check!("server ping accepts host:port", false);
+                }
+            }
+            // 关着的端口：不报错，返回 online=false + 原因
+            let closed = server::ping("127.0.0.1", Some(1), Some(800));
+            check!(
+                "server ping reports offline without error",
+                closed
+                    .map(|s| !s.online && s.error.is_some() && s.latency_ms < 5000)
+                    .unwrap_or(false)
+            );
+            // 地址本身不合法才算错误
+            check!(
+                "server ping rejects bad address",
+                server::ping("bad host", None, None).is_err()
+                    && server::ping("", None, None).is_err()
+                    && server::ping("x", Some(0), None).is_err()
+            );
 
             // 21) 调度统计字段齐全，前端能直接用
             let s = net::scheduler_stats();
