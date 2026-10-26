@@ -16,6 +16,7 @@ mod net;
 mod recycle;
 mod world_backup;
 mod migrate;
+mod java_audit;
 mod testsrv;
 mod plan;
 mod resources;
@@ -1150,6 +1151,53 @@ async fn list_java_runtimes(instance_id: Option<String>) -> Result<JavaReport, S
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+// ── Java 审计（C4）──────────────────────────────────────────────
+
+/// 每个实例的 Java 情况 + 托管 JDK 占用 + 没人用的 JDK（只读）
+#[tauri::command]
+async fn java_audit() -> Result<java_audit::JavaAudit, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game = game_root();
+        Ok(java_audit::audit(&game, &play_stats))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 单独检查一个实例的 Java
+#[tauri::command]
+async fn check_instance_java(instance_id: String) -> Result<java_audit::JavaCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game = game_root();
+        java_audit::check_instance(&game, &instance_id, &play_stats)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 删除启动器自己下载的 JDK（必须显式确认，系统 Java 一律拒绝）
+#[tauri::command]
+async fn remove_managed_java(major: u32, confirm: bool) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game = game_root();
+        java_audit::remove_managed(&game, major, confirm)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// JDK 下载缓存占用
+#[tauri::command]
+fn java_cache_stats() -> serde_json::Value {
+    java_audit::cache_stats(&game_root())
+}
+
+/// 清空 JDK 下载缓存（只删 zip，不动已安装的 JDK）
+#[tauri::command]
+fn clear_java_cache(confirm: bool) -> Result<serde_json::Value, String> {
+    java_audit::clear_cache(&game_root(), confirm)
 }
 
 // ── 整合包 ──────────────────────────────────────────────────────
@@ -2373,6 +2421,11 @@ pub fn run() {
             get_component_catalog,
             list_component_versions,
             list_java_runtimes,
+            java_audit,
+            check_instance_java,
+            remove_managed_java,
+            java_cache_stats,
+            clear_java_cache,
             install_java,
             list_managed_jdks,
             prepare_modpack_install,
@@ -3535,6 +3588,95 @@ pub fn selftest() -> i32 {
             && java::pick_for(&rts, 18).map(|r| r.major) == Some(21)
             && java::pick_for(&rts, 30).is_none()
     );
+
+    // C4：Java 需求推算与兼容判断（不联网、不依赖本机 Java）
+    check!(
+        "java expected major table",
+        java_audit::expected_major("1.12.2") == Some(8)
+            && java_audit::expected_major("1.16.5") == Some(8)
+            && java_audit::expected_major("1.17.1") == Some(17)
+            && java_audit::expected_major("1.20.4") == Some(17)
+            && java_audit::expected_major("1.20.5") == Some(21)
+            && java_audit::expected_major("1.21.4") == Some(21)
+            && java_audit::expected_major("1.20.1-forge-47.2.0") == Some(17)
+            && java_audit::expected_major("garbage").is_none()
+    );
+    check!(
+        "java satisfies rules",
+        java_audit::satisfies(8, 8)
+            && !java_audit::satisfies(17, 8)
+            && java_audit::satisfies(21, 17)
+            && !java_audit::satisfies(17, 21)
+    );
+    {
+        // 造一个实例：记录的 Java 路径不存在 → 必须报 problem，且建议自动选择
+        let g = game.join("java-audit-game");
+        let _ = std::fs::create_dir_all(&g);
+        let meta = instance::InstanceMeta {
+            id: instance::new_id(),
+            name: "Java 审计实例".into(),
+            game_version: "1.20.1".into(),
+            loader_kind: None,
+            loader_version: None,
+            launch_version: None,
+            memory_mb: Some(2048),
+            jvm_args: Vec::new(),
+            java_path: Some("D:\\nonexistent\\java.exe".into()),
+            cover: None,
+            created_at: time::now_iso(),
+        };
+        let made = instance::create(&g, &meta).map(|i| i.id).unwrap_or_default();
+        let stats_fn = |_: &str| instance::PlayStats::default();
+        let one = java_audit::check_instance(&g, &made, &stats_fn);
+        check!(
+            "java audit flags missing path",
+            one.as_ref()
+                .map(|c| !c.exists && c.problem.is_some() && c.suggestion.is_some())
+                .unwrap_or(false)
+                && one.as_ref().map(|c| c.source == "instance").unwrap_or(false)
+        );
+        let full = java_audit::audit(&g, &stats_fn);
+        check!(
+            "java audit report shape",
+            full.instances.len() == 1
+                && full.broken.len() == 1
+                && full.broken[0] == made
+                && full.checked_at.len() > 10
+        );
+        // 删除托管 JDK：没确认必须拒绝；不存在的版本必须拒绝
+        check!(
+            "java remove requires confirm",
+            java_audit::remove_managed(&g, 17, false).is_err()
+                && java_audit::remove_managed(&g, 17, true).is_err()
+        );
+        // 缓存：空目录也要能报出结构
+        let cs = java_audit::cache_stats(&g);
+        check!(
+            "java cache stats shape",
+            cs.get("count").and_then(|x| x.as_u64()) == Some(0)
+                && cs.get("bytes").and_then(|x| x.as_u64()) == Some(0)
+                && cs.get("dir").and_then(|x| x.as_str()).is_some()
+        );
+        check!(
+            "java cache clear requires confirm",
+            java_audit::clear_cache(&g, false).is_err()
+                && java_audit::clear_cache(&g, true).is_ok()
+        );
+        // 托管 JDK 目录：造一个假的 adoptium-21，删它必须成功且只删它
+        {
+            let jvm = g.join("jvm").join("adoptium-21");
+            let _ = std::fs::create_dir_all(jvm.join("bin"));
+            let _ = std::fs::write(jvm.join("bin").join("java.exe"), b"FAKE");
+            let keep = g.join("jvm").join("adoptium-17");
+            let _ = std::fs::create_dir_all(keep.join("bin"));
+            let _ = std::fs::write(keep.join("bin").join("java.exe"), b"FAKE");
+            let removed = java_audit::remove_managed(&g, 21, true);
+            check!(
+                "java remove managed deletes only target",
+                removed.is_ok() && !jvm.exists() && keep.is_dir()
+            );
+        }
+    }
 
     // 可选的真实 Java 探测：ASTRAL_LIVE_JAVA="gameDir"
     if let Ok(dir) = std::env::var("ASTRAL_LIVE_JAVA") {

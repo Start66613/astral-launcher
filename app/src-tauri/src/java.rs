@@ -70,6 +70,17 @@ fn run_version(exe: &Path) -> Option<(String, String, Option<u32>)> {
     Some((version, vendor, bits))
 }
 
+/// 对单个可执行文件做一次版本探测（不扫描、不改任何东西）。
+///
+/// 供「实例里记录的 Java 路径还能不能用」这类按需检查使用。
+pub fn probe_path(path: &Path) -> Option<JavaRuntime> {
+    if !path.is_file() {
+        return None;
+    }
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    probe(&canon, "manual")
+}
+
 fn probe(path: &Path, source: &str) -> Option<JavaRuntime> {
     if !path.is_file() {
         return None;
