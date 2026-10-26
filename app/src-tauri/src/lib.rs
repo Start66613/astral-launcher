@@ -18,6 +18,7 @@ mod net;
 mod plan;
 mod recycle;
 mod resources;
+mod search;
 mod session;
 mod stats;
 mod task;
@@ -738,6 +739,31 @@ async fn list_resource_files(
 ) -> Result<Vec<resources::ResourceFile>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         resources::files(&project_id, game_version.as_deref(), loader.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn search_resources(
+    query: String,
+    kind: Option<String>,
+    game_version: Option<String>,
+    loader: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    sort: Option<String>,
+) -> Result<search::SearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        search::search(
+            &query,
+            kind.as_deref(),
+            game_version.as_deref(),
+            loader.as_deref(),
+            limit,
+            offset,
+            sort.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2560,6 +2586,7 @@ pub fn run() {
             delete_world_backup,
             get_resource_project,
             list_resource_files,
+            search_resources,
             prepare_resource_install,
             start_resource_install,
             export_modpack,
@@ -5482,6 +5509,88 @@ pub fn selftest() -> i32 {
                     check!("meta cache clear requires confirm", refused && cleared);
                 } else {
                     check!("meta cache serves fresh without network", false);
+                }
+            }
+
+            // 20.5) Modrinth 资源搜索：参数拼装 + 响应解析 + 缓存来源标注
+            {
+                if let Ok(srv) = testsrv::TestServer::start() {
+                    let base = srv.search_base();
+                    // 1) 正常搜索：filters 必须真的进到 facets 里
+                    let one = search::search_for_test(
+                        &base,
+                        "sodium",
+                        Some("mod"),
+                        Some("1.20.1"),
+                        Some("fabric"),
+                        Some(20),
+                        Some(0),
+                        Some("relevance"),
+                    );
+                    let one_ok = one
+                        .as_ref()
+                        .map(|r| {
+                            r.hits.len() == 1
+                                && r.hits[0].project_id == "testproject"
+                                && r.hits[0].title == "Test sodium"
+                                && r.hits[0].project_type == "mod"
+                                && r.hits[0].description.contains("versions:1.20.1")
+                                && r.hits[0].description.contains("categories:fabric")
+                                && r.total_hits == 1
+                                && r.source == "network"
+                                && !r.stale
+                        })
+                        .unwrap_or(false);
+                    check!("search returns parsed hits", one_ok);
+
+                    // 2) 同一 URL 第二次必须命中缓存，且不再打服务器
+                    let served_before = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+                    let two = search::search_for_test(
+                        &base,
+                        "sodium",
+                        Some("mod"),
+                        Some("1.20.1"),
+                        Some("fabric"),
+                        Some(20),
+                        Some(0),
+                        Some("relevance"),
+                    );
+                    let served_after = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+                    let two_ok = two
+                        .as_ref()
+                        .map(|r| r.source == "cache" && !r.stale && r.age_ms >= 0)
+                        .unwrap_or(false);
+                    check!(
+                        "search reuses cached result",
+                        two_ok && served_after == served_before
+                    );
+
+                    // 3) 非法类型 / 排序必须明确报错，不能静默降级
+                    let bad_kind = search::search_for_test(
+                        &base,
+                        "x",
+                        Some("taco"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .is_err();
+                    let bad_sort = search::search_for_test(
+                        &base,
+                        "x",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some("taco"),
+                    )
+                    .is_err();
+                    check!("search rejects bad filters", bad_kind && bad_sort);
+                } else {
+                    check!("search returns parsed hits", false);
                 }
             }
 

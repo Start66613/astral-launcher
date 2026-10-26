@@ -125,6 +125,11 @@ impl TestServer {
         format!("{}/json?size={size}", self.base())
     }
 
+    /// 模拟 Modrinth `/search` 的地址（资源搜索测试用）
+    pub fn search_base(&self) -> String {
+        self.base()
+    }
+
     pub fn flaky_url(&self, fails: u32, size: u64) -> String {
         format!("{}/flaky?fails={fails}&size={size}", self.base())
     }
@@ -216,6 +221,45 @@ fn handle(
     if path == "/json" {
         let size = query_int(query, "size", 64) as u32;
         let body = format!("{{\"ok\":true,\"size\":{size}}}");
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        served.fetch_add(body.len() as u64, Ordering::SeqCst);
+        stream.write_all(resp.as_bytes())?;
+        return Ok(());
+    }
+
+    // 模拟 Modrinth /search：回显 facets 里的过滤条件，便于断言参数确实传到了
+    if path == "/search" {
+        let q = query
+            .split('&')
+            .find_map(|p| p.strip_prefix("query="))
+            .map(url_decode)
+            .unwrap_or_default();
+        let facets = query
+            .split('&')
+            .find_map(|p| p.strip_prefix("facets="))
+            .map(url_decode)
+            .unwrap_or_default();
+        let kind = facets
+            .split("project_type:")
+            .nth(1)
+            .map(|s| s.split('"').next().unwrap_or(""))
+            .unwrap_or("");
+        // facets 里本身带双引号，直接塞进 JSON 字符串会破坏格式，换成单引号
+        let facets_json_safe = facets.replace('"', "'");
+        let body = format!(
+            "{{\"hits\":[{{\"project_id\":\"testproject\",\"slug\":\"test-mod\",\
+             \"title\":\"Test {q}\",\"description\":\"facet {facets_json_safe}\",\"author\":\"tester\",\
+             \"project_type\":\"{kind}\",\"categories\":[\"optimization\"],\
+             \"display_categories\":[\"Optimization\"],\"downloads\":123,\"follows\":4,\
+             \"icon_url\":\"https://cdn.modrinth.com/icon.png\",\"license\":\"mit\",\
+             \"versions\":[\"1.0.0\"],\"game_versions\":[\"1.20.1\"],\"loaders\":[\"fabric\"],\
+             \"latest_version\":\"1.0.0\",\"date_modified\":\"2025-01-01T00:00:00Z\"}}],\
+             \"total_hits\":1,\"offset\":0,\"limit\":20,\"index\":\"relevance\"}}"
+        );
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
              Connection: close\r\n\r\n{body}",
