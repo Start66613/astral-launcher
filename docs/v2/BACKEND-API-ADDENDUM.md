@@ -924,3 +924,72 @@ async function refresh(addr: string) {
 - **超时默认 4 秒**。批量刷新服务器列表时建议前端自己限制并发（比如 4 个
   一批），别一次发几十个。
 - 刷新频率建议 ≥30 秒一次；服务器列表协议没有订阅机制，只能轮询。
+
+---
+
+## 16. 收藏的服务器列表（V2.5 新增）
+
+### 16.1 六个命令
+
+```ts
+// 全部收藏，按玩家排好的顺序
+invoke<ServerEntry[]>("list_servers")
+
+// 加一个；host 可以直接粘贴 "example.com:25566"
+invoke<ServerEntry>("add_server", { name, host, port?, note? })
+
+// 改；只传要改的字段，其余保持不变
+invoke<ServerEntry>("update_server", { id, name?, host?, port?, note? })
+
+// 删（只删记录，不碰任何文件）
+invoke<void>("remove_server", { id })
+
+// 按给定顺序重排；没提到的保持原相对顺序排在后面
+invoke<ServerEntry[]>("reorder_servers", { ids })
+
+// 批量查状态；不传 ids 就查全部
+invoke<[string, ServerStatus][]>("refresh_servers", { ids? })
+```
+
+### 16.2 数据结构
+
+```ts
+interface ServerEntry {
+  id: string;        // "s_<8位十六进制>"
+  name: string;      // 没填就用 "host:port" 兜底
+  host: string;      // 已经和端口分开
+  port: number;
+  note: string;      // 备注，最长 200 字符
+  addedAt: string;   // ISO
+  lastSeen: string | null;  // 只有真查到过才有值
+}
+```
+
+### 16.3 前端怎么用
+
+```ts
+// 进页面先读本地清单（不联网，立刻能显示）
+const list = await invoke<ServerEntry[]>("list_servers");
+
+// 然后并行刷一轮状态
+const results = await invoke<[string, ServerStatus][]>("refresh_servers", {});
+const byId = new Map(results);
+for (const s of list) {
+  const st = byId.get(s.id);
+  render(s, st);   // st 一定存在，只是可能 online:false
+}
+```
+
+要点：
+
+- **不碰 `servers.dat`**。清单存在 `<game>/.astral-servers.json`，和游戏内部
+  的 NBT 格式完全分开，不会打架。也就是说：**在启动器里加的服务器不会自动出现在
+  游戏内的多人列表里**，这是有意的取舍（改 NBT 风险大），需要的话玩家自己在游戏里加。
+- **`refresh_servers` 一定返回全部条目**，不会因为某个地址连不上就少一条。
+  每条都有自己的 `online` / `error`，前端直接按 id 对应即可。
+- **`lastSeen` 只在成功时更新**。连不上不会写，所以"最近见过"是可信的。
+- 加重复地址会返回 `INVALID_VALUE`（同一个 host+port 只允许一条）；改回自己
+  原来的地址不算冲突。
+- 名字超 48 字符会被截断（不报错），备注超 200 字符同理；最多存 200 个。
+- 批量刷新内部是 8 线程并行，前端不要再自己并发一轮，直接等这一个调用即可。
+- 建议刷新频率 ≥30 秒；服务器列表协议没有推送机制。
