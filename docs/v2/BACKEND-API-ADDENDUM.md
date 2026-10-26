@@ -2593,3 +2593,102 @@ interface StopResult {
 - 按钮进 loading 态时显示「正在等待游戏退出…」，因为优雅关闭最多要等 15 秒。
 - `astral://game-exit` 事件里现在多了 `stoppedByUser` 字段：为 `true` 时走「已结束」的
   轻提示，别走崩溃诊断流程。
+
+---
+
+## 35. 游戏目录识别（V2.5 新增）
+
+改游戏目录是启动器里最容易"看起来像数据丢了"的操作：手抖打错一个字母，启动器指到空目录，
+所有实例、存档、Mod 全都不见了。所以在真正落盘之前，先让玩家看一眼目标目录到底有什么。
+
+### 35.1 命令
+
+| 命令 | 参数 | 返回 |
+|---|---|---|
+| `inspect_game_dir` | `{ path: string }` | `GameDirReport` |
+
+`set_config` 的行为变化：**`gameDir` 落盘前会先过一遍校验**，不合法直接报错，不会写进配置。
+校验规则：
+
+- 空字符串 → `INVALID_VALUE|游戏目录不能为空`
+- 相对路径（如 `.minecraft`）→ `INVALID_VALUE|游戏目录要写完整路径，比如 D:\Games\.minecraft`
+- 指向一个文件 → `INVALID_VALUE|这个路径是一个文件，不是目录`
+- 盘符根（`D:\`）→ `INVALID_VALUE|不能把整个磁盘根目录当游戏目录`
+
+### 35.2 类型
+
+```ts
+export interface GameDirReport {
+  path: string;
+  exists: boolean;
+  isDir: boolean;
+  /** 真的建得起来、写得进去（会写一个探针文件再删掉） */
+  writable: boolean;
+  /** 有没有 versions / libraries / assets 这些标志文件夹 */
+  looksLikeMinecraft: boolean;
+  /** 目录里已有的版本名，最多列 50 个 */
+  versions: string[];
+  versionCount: number;
+  instanceCount: number;
+  saveCount: number;
+  modCount: number;
+  hasLibraries: boolean;
+  hasAssets: boolean;
+  /** 只在"存在 + 是目录 + 像 MC 目录"时才扫，避免对着一整个盘扫 */
+  sizeBytes: number | null;
+  freeBytes: number | null;
+  /** 和当前配置里的目录是不是同一个（按真实路径比，不按字符串） */
+  sameAsCurrent: boolean;
+  current: string;
+  /** 提示，给玩家看的，可以全部展示 */
+  notes: string[];
+  /** 非空就说明这个目录不该切过去 */
+  blocking: string[];
+}
+```
+
+### 35.3 调用示例
+
+```ts
+import { invoke } from "@tauri-apps/api/core";
+
+const report = await invoke<GameDirReport>("inspect_game_dir", {
+  path: "D:\\Games\\.minecraft",
+});
+
+// 1. 有 blocking 就别让玩家点"确定"
+if (report.blocking.length > 0) {
+  showErrors(report.blocking);
+  return;
+}
+
+// 2. notes 逐条提示（"这个目录还不存在，切换后会新建一个空目录"）
+for (const note of report.notes) toast.info(note);
+
+// 3. 让玩家确认一眼
+const ok = await confirm(
+  `这个目录里有 ${report.versionCount} 个版本、${report.instanceCount} 个实例、` +
+    `${report.saveCount} 个存档。切过去吗？`,
+);
+if (!ok) return;
+
+// 4. 真的切
+await invoke("set_config", { config: { ...currentConfig, gameDir: report.path } });
+```
+
+### 35.4 行为约定
+
+- **只读**。`inspect_game_dir` 除了写一个探针文件（马上删）之外不改任何东西；不建目录、不移动文件。
+- **校验在 `set_config` 里也生效**。前端就算跳过预览直接调 `set_config`，坏路径一样进不去。
+- **`writable` 会真的写一下**。只查权限位在 Windows 上不可靠（ACL、只读盘、OneDrive 占位文件都会骗人）。
+- **大小只在像 MC 目录时才扫**。玩家可能不小心指到 `D:\`，对着整个盘算大小会卡死界面。
+- **`sameAsCurrent` 按真实路径比**。`D:\a\..\a\.minecraft` 和 `D:\a\.minecraft` 算同一个。
+- **目录不存在不是错误**。返回 `exists: false` + 一条 note，`blocking` 为空——新建目录是合法用法。
+
+### 35.5 前端接入建议
+
+- 「浏览…」按钮选完目录后立刻调 `inspect_game_dir`，把 `notes` 显示在输入框下面。
+- `blocking` 非空时把「确定」按钮置灰，并把 `blocking[0]` 作为红字提示。
+- `looksLikeMinecraft === false && exists === true` 时给一个更明显的警告：
+  「这个目录里没有 Minecraft 的文件，切过去之后启动器里会是空的」。
+- 切换成功后要重新拉 `list_instances` / `list_saves`，因为 `gameDir` 变了。

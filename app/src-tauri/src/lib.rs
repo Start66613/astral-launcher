@@ -9,6 +9,7 @@ mod deps;
 mod disk_usage;
 mod error;
 mod export;
+mod game_dir;
 mod game_options;
 mod game_stop;
 mod instance;
@@ -142,8 +143,20 @@ fn set_config(config: serde_json::Value) -> Result<Config, String> {
             account::validate_client_id(id)?;
         }
     }
+    // 游戏目录：打错一个字母就会让所有实例/存档看起来"消失"，
+    // 这里至少拦住空值、相对路径、文件、磁盘根目录这些一定会出事的情况。
+    cur.game_dir = game_dir::validate(&cur.game_dir)?
+        .to_string_lossy()
+        .to_string();
     core::save_config(&cur)?;
     Ok(cur)
+}
+
+/// 切换前先看看这个目录里有什么，别让玩家把游戏目录指到空文件夹还以为数据丢了。
+#[tauri::command]
+fn inspect_game_dir(path: String) -> Result<game_dir::GameDirReport, String> {
+    let cur = PathBuf::from(core::load_config().game_dir);
+    game_dir::inspect(&path, &cur)
 }
 
 #[tauri::command]
@@ -3341,6 +3354,7 @@ pub fn run() {
             get_system_info,
             get_config,
             set_config,
+            inspect_game_dir,
             scan_versions,
             open_path,
             list_versions,
@@ -3550,6 +3564,53 @@ pub fn selftest() -> i32 {
     let _ = std::fs::write(game.join("versions/1.20.1/1.20.1.json"), "{}");
     let _ = std::fs::write(game.join("versions/1.20.1/1.20.1.jar"), "x");
     let _ = std::fs::create_dir_all(game.join("assets"));
+
+    // 游戏目录识别：打错一个字母不能让所有实例"消失"
+    {
+        check!(
+            "game dir rejects junk paths",
+            game_dir::validate("").is_err()
+                && game_dir::validate(".minecraft").is_err()
+                && game_dir::validate("D:\\").is_err()
+        );
+        let report = game_dir::inspect(&game.to_string_lossy(), &game).expect("inspect game");
+        check!(
+            "game dir report reads the real dir",
+            report.exists
+                && report.is_dir
+                && report.writable
+                && report.looks_like_minecraft
+                && report.version_count == 1
+                && report.versions == vec!["1.20.1".to_string()]
+                && report.has_assets
+                && report.same_as_current
+                && report.blocking.is_empty()
+        );
+        // 换一个空目录：不该说成 Minecraft 目录，但也不该阻塞
+        let empty = game.join("empty-target");
+        let r2 = game_dir::inspect(&empty.to_string_lossy(), &game).expect("inspect empty");
+        check!(
+            "game dir flags an empty dir",
+            !r2.exists
+                && r2.writable
+                && !r2.looks_like_minecraft
+                && !r2.same_as_current
+                && r2.notes.iter().any(|n| n.contains("新建"))
+                && r2.blocking.is_empty()
+        );
+        // 指向一个文件必须挡住（validate 直接报错，或报告里给出阻塞项）
+        let file_target = game.join("assets").join("not-a-dir.txt");
+        let _ = std::fs::write(&file_target, b"x");
+        let r3 = game_dir::inspect(&file_target.to_string_lossy(), &game);
+        check!(
+            "game dir blocks a file",
+            match r3 {
+                Err(e) => e.starts_with("INVALID_VALUE|"),
+                Ok(r) => !r.blocking.is_empty(),
+            }
+        );
+        let _ = std::fs::remove_dir_all(&empty);
+    }
 
     let meta = instance::InstanceMeta {
         id: instance::new_id(),
