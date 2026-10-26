@@ -578,6 +578,8 @@ pub struct DownloadOptions {
     pub reuse_verified: bool,
     /// 自检专用：允许访问本机 http 测试服务器（生产路径永远为 false）
     pub allow_local_http: bool,
+    /// 是否使用跨实例的共享下载缓存（需要给出哈希）
+    pub use_cache: bool,
 }
 
 impl Default for DownloadOptions {
@@ -589,6 +591,7 @@ impl Default for DownloadOptions {
             resume: true,
             reuse_verified: true,
             allow_local_http: false,
+            use_cache: true,
         }
     }
 }
@@ -674,12 +677,32 @@ pub fn download(
         });
     }
 
+    // 跨实例共享缓存：同一个文件别的实例下过，直接复制过来
+    if opts.use_cache {
+        if let Some(bytes) = crate::cache::restore(
+            opts.expected_sha1.as_deref(),
+            opts.expected_sha512.as_deref(),
+            dest,
+        ) {
+            // 复制完再验一次：缓存被外力改坏时不会把坏文件交出去
+            if verified_existing(dest, opts) {
+                on_progress(bytes, Some(bytes));
+                return Ok(DownloadReport {
+                    bytes,
+                    resumed: false,
+                    attempts: 0,
+                    reused: true,
+                });
+            }
+            let _ = std::fs::remove_file(dest);
+        }
+    }
+
     let part = part_path(dest);
     ensure_safe_write_target(&part)?;
     ensure_safe_write_target(&meta_path(dest))?;
 
-    let max_attempts = opts.max_attempts.max(1);
-    let mut attempt = 0u32;
+    let max_attempts = opts.max_attempts.max(1);    let mut attempt = 0u32;
     let mut last_err = String::new();
 
     while attempt < max_attempts {
@@ -797,6 +820,13 @@ pub fn download(
                 })?;
                 let _ = std::fs::remove_file(meta_path(dest));
 
+                if opts.use_cache {
+                    crate::cache::store(
+                        opts.expected_sha1.as_deref(),
+                        opts.expected_sha512.as_deref(),
+                        dest,
+                    );
+                }
                 count_download(size, was_resuming);
                 return Ok(DownloadReport {
                     bytes: size,
@@ -846,6 +876,11 @@ pub fn download(
     } else {
         last_err
     })
+}
+
+/// 下完一批之后调用：缓存超预算就按最久未使用淘汰。
+pub fn enforce_cache_budget() -> u64 {
+    crate::cache::enforce_budget(crate::cache::DEFAULT_BUDGET_BYTES)
 }
 
 /// 原子下载：先写 `<dest>.part`，校验后替换。

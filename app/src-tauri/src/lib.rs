@@ -1,3 +1,4 @@
+mod cache;
 mod components;
 mod core;
 mod error;
@@ -1561,6 +1562,55 @@ fn managed_instance(id: &str) -> Result<Instance, String> {
     Ok(inst)
 }
 
+/// 共享下载缓存的占用情况（条数 / 字节 / 上限）。
+#[tauri::command]
+fn cache_stats() -> cache::CacheStats {
+    cache::stats(cache::DEFAULT_BUDGET_BYTES)
+}
+
+/// 按最久未使用淘汰，把缓存压回上限之内。返回释放的字节数。
+#[tauri::command]
+fn cache_enforce_budget() -> u64 {
+    cache::enforce_budget(cache::DEFAULT_BUDGET_BYTES)
+}
+
+/// 清空共享下载缓存。
+///
+/// 危险操作：必须由用户在前端点"确认清空"后调用，且 `confirm` 必须为 true。
+/// 只删缓存目录，不会碰任何实例、存档、mods。
+#[tauri::command]
+fn cache_clear(confirm: bool) -> Result<u64, String> {
+    if !confirm {
+        return Err("UNSUPPORTED|清空缓存需要明确确认".into());
+    }
+    Ok(cache::clear())
+}
+
+/// 清理下载残留的 `.part` 文件（崩溃或取消留下的半截文件）。
+///
+/// 默认只清 7 天以前的；`days = 0` 表示全部清理，同样需要 `confirm`。
+#[tauri::command]
+fn clean_partials(days: Option<u64>, confirm: Option<bool>) -> Result<serde_json::Value, String> {
+    let days = days.unwrap_or(7);
+    if days == 0 && !confirm.unwrap_or(false) {
+        return Err("UNSUPPORTED|清理全部下载残留需要明确确认".into());
+    }
+    let cfg = core::load_config();
+    let game = PathBuf::from(&cfg.game_dir);
+    if !game.exists() {
+        return Ok(serde_json::json!({ "removed": 0, "freed": 0 }));
+    }
+    let (removed, freed) = cache::clean_stale_partials(&game, days);
+    Ok(serde_json::json!({ "removed": removed, "freed": freed, "days": days }))
+}
+
+/// 各目录占用快照，给"存储管理"页面用。
+#[tauri::command]
+fn disk_usage() -> serde_json::Value {
+    let cfg = core::load_config();
+    cache::disk_usage(std::path::Path::new(&cfg.game_dir))
+}
+
 /// 下载调度器的实时状态：并发数、每个域名的占用、累计下载量。
 ///
 /// 前端可以轮询它显示"正在同时下载 N 个文件"，不需要自己维护计数。
@@ -1769,6 +1819,11 @@ pub fn run() {
             list_saves,
             get_stats,
             net_scheduler_stats,
+            cache_stats,
+            cache_enforce_budget,
+            cache_clear,
+            clean_partials,
+            disk_usage,
             list_mods,
             set_mod_enabled,
             delete_mod,
@@ -3530,7 +3585,75 @@ pub fn selftest() -> i32 {
                     && !queued_dest.exists()
             );
 
-            // 14) 调度统计字段齐全，前端能直接用
+            // 14) 共享缓存：第二次下同一个文件不再联网，缓存里能查到
+            let c1 = dl.join("cache1.bin");
+            let c2 = dl.join("cache2.bin");
+            let csha = testsrv::expected_sha1(200 * 1024);
+            let before_hits = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+            let _ = net::download(
+                &srv.data_url(200 * 1024, 32 * 1024, 0),
+                &c1,
+                &local_opts(Some(&csha)),
+                &*net::never_cancel(),
+                |_, _| {},
+            );
+            let after_first = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+            let second = net::download(
+                &srv.data_url(200 * 1024, 32 * 1024, 0),
+                &c2,
+                &local_opts(Some(&csha)),
+                &*net::never_cancel(),
+                |_, _| {},
+            );
+            let after_second = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+            check!(
+                "cache serves second copy offline",
+                after_first > before_hits
+                    && after_second == after_first
+                    && second.map(|r| r.reused && r.bytes == 200 * 1024).unwrap_or(false)
+                    && net::sha1_file(&c2).ok().as_deref() == Some(csha.as_str())
+            );
+
+            // 15) 缓存统计与预算淘汰
+            let st = cache::stats(cache::DEFAULT_BUDGET_BYTES);
+            let freed = cache::enforce_budget(1024 * 1024);
+            let st_after = cache::stats(cache::DEFAULT_BUDGET_BYTES);
+            check!(
+                "cache stats and budget eviction",
+                st.available
+                    && st.entries >= 1
+                    && st.bytes > 0
+                    && st.budget_bytes == cache::DEFAULT_BUDGET_BYTES
+                    && (freed > 0 || st_after.bytes <= 1024 * 1024)
+                    && st_after.bytes <= st.bytes
+            );
+
+            // 16) 清空缓存：真的清空，且只动缓存目录
+            let before_clear = cache::stats(cache::DEFAULT_BUDGET_BYTES).entries;
+            let cleared = cache::clear();
+            let after_clear = cache::stats(cache::DEFAULT_BUDGET_BYTES);
+            check!(
+                "cache clear empties only cache",
+                before_clear >= 1
+                    && after_clear.entries == 0
+                    && c1.exists()
+                    && c2.exists()
+            );
+
+            // 17) 残留 .part 清理只删半截文件
+            let stale_dir = dl.join("stale");
+            let _ = std::fs::create_dir_all(&stale_dir);
+            let keep = stale_dir.join("keep.jar");
+            let stale = stale_dir.join("old.jar.part");
+            let _ = std::fs::write(&keep, b"keep");
+            let _ = std::fs::write(&stale, b"partial");
+            let (rm, _) = cache::clean_stale_partials(&stale_dir, 0);
+            check!(
+                "clean stale partials",
+                rm >= 1 && keep.exists() && !stale.exists()
+            );
+
+            // 18) 调度统计字段齐全，前端能直接用
             let s = net::scheduler_stats();
             check!(
                 "scheduler stats shape",
