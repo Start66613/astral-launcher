@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 227 项全过，单元测试 147 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 230 项全过，单元测试 151 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（227 项）
+## 2. 自检覆盖（230 项）
 
 按前缀分组：
 
@@ -72,7 +72,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（153 个）
+## 3. 单元测试（157 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -86,11 +86,12 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `server` | 10 | VarInt 往返、字符串长度按字节、聊天组件拍平、颜色代码剥离、状态解析、坏 favicon、地址拆分、老协议解析、非法地址 |
 | `nbt` | 9 | 标量与数组往返、LevelInfo 解析、缺字段保持 null、截断数据被拒、荒谬长度被拒、非 compound 根被拒、未压缩文件可读 |
 | `worlds` | +4 | 详情读全、坏 level.dat 只丢信息、未知 id 报错、列表带版本 |
+| `export` | +4 | 递归收集顺序稳定、缺目录为空、条数与字节上限、slug 化 |
 | `servers` | 9 | 增删改查、重复与非法地址、选择性更新、改回自己地址不算冲突、重排、lastSeen、坏文件读成空、名字截断 |
 | `net` | 5 | 白名单、非法 URL、公网 IP 判定、`.part` 路径、磁盘满判定 |
 | `recycle` | 3 | 名字拆分、怪名字容忍、拒绝穿越 |
 | `world_backup` | 3 | sanitize 安全字符、Zip Slip、备份 id 前缀 |
-| `modpack` | 4 | index 解析、路径守卫、坏包拒绝、穿越 |
+| `modpack` | 5 | index 解析、路径守卫、坏包拒绝、穿越、纯 overrides 包不算空包 |
 | `migrate` | 3 | 类别白名单、settings only、计划 id |
 | `search` | 6 | 百分号编码、facets 分组、limit/offset 夹取、非法类型与排序、响应解析、坏响应 |
 | `modscan`（Maven 区间） | +1 | `[1.20,1.21)`、开闭区间、单边、精确 `[1.20.1]`、多段区间 |
@@ -175,6 +176,9 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
   全量装 3 个，四个计数全部对上。
 - `modpack local import parses`：真实 zip + `modrinth.index.json` + overrides。
 - `export roundtrip verify`：缺哈希被报为 issue，exports 外的文件被拒。
+- `export plan counts nested config`：递归 config 3 个、资源包 1 个，预估字节与总数都对。
+- `export plan is read only`：预览不产生任何文件。
+- `export writes nested overrides`：导出后 overrides 条目数与 index 回读一致，重名时预览标为阻塞。
 
 ### 4.10 数据安全（C1–C4）
 

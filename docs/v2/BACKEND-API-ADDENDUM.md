@@ -1070,3 +1070,92 @@ interface WorldDetail {
 - 难度/模式是中文（"生存"/"普通"），直接显示即可；要枚举的话按上面的字符串匹配。
 - `looksLikeServer` 只是个提示，不是判定——真实服务器存档可能没有这两个文件，
   单人存档也可能因为开过局域网而有 `session.lock`。
+---
+
+## 18. 整合包导出预览与递归打包（V2.5 新增）
+
+导出整合包原来只有 `export_modpack` 一步到位：给个名字就直接写盘，玩家事先
+不知道会打进去多少、多大、磁盘放不放得下。现在补一个**只读预览**，先看清楚
+再决定要不要导。
+
+### 18.1 `plan_modpack_export`
+
+```ts
+invoke<ExportPlan>("plan_modpack_export", {
+  request: {
+    instanceId,
+    name: "My Pack",
+    version: "1.0.0",       // 可选，默认 1.0.0
+    includeConfig: true,    // 打 config/（递归）
+    includeResources: false // 打 resourcepacks/ 与 shaderpacks/
+  }
+});
+```
+
+```ts
+interface ExportPlan {
+  instanceId: string;
+  name: string;
+  version: string;
+  fileName: string;        // 例如 my-pack-1-0-0.mrpack
+  targetPath: string;      // <gameDir>/exports/<fileName>
+  exists: boolean;         // 目标已存在 → 导出会失败，要换版本号
+  indexedMods: number;     // 能对上 Modrinth，写进 index（包里不含它们的字节）
+  overrideMods: number;    // 对不上，整包带上
+  configFiles: number;     // 递归统计的 config 文件数
+  resourceFiles: number;   // 资源包 + 光影包文件数
+  packFiles: number;       // 会真正写进 zip 的文件总数
+  estimatedBytes: number;  // .mrpack 大致大小（不含 index 里另下的 mod）
+  freeBytes: number | null;// 目标盘可用空间；拿不到是 null
+  issues: string[];        // 阻塞原因与非阻塞提示混在一起
+  blocking: boolean;       // true = 现在导会失败，先处理 issues
+}
+```
+
+预览**不写任何文件**，可以随便点。
+
+### 18.2 `export_modpack`（行为有变化）
+
+`ExportRequest` 新增 `includeResources`（默认 `false`，老调用方不受影响）。
+
+```ts
+interface ExportResult {
+  path: string;
+  indexedFiles: number;
+  overrideFiles: number;
+  configFiles: number;    // 新增
+  resourceFiles: number;  // 新增
+  bytes: number;
+}
+```
+
+变化点：
+
+- **`includeConfig` 现在是递归的**。以前只拷 `config/` 第一层，`config/jei/…`
+  这类子目录全丢，导出的包装回去配置就不对了。
+- `includeResources` 把 `resourcepacks/`、`shaderpacks/` 一起放进 `overrides/`。
+- 收集时**跳过符号链接与 Windows junction**（否则一个指到 `C:\` 的链接能把
+  整块盘打进包里），条数上限 20000、总量上限 2 GiB、层级上限 12。
+- 写盘前做一次空间检查，不够报 `DISK_FULL`。
+- 先写 `.mrpack.part`，全部写完再原子改名 —— 中途失败不会留下半个包骗人。
+- 目标同名已存在仍然报 `FILE_EXISTS`，预览里对应 `exists: true` + `blocking: true`。
+
+### 18.3 纯配置包不再被当成坏包
+
+修了一个真 bug：`modpack::parse_index` 原来只要 `files` 为空就报"没有任何可安装
+文件"。但 Modrinth 上有一类**纯配置包**（只带 `overrides/` 里的配置或资源包，
+没有需要下载的文件），这是合法形态，之前会被直接拒掉。
+
+现在改成：`read_index` 里 **`files` 为空且 overrides 也为空**才算空包。只解析
+JSON 的 `parse_index` 不再对空 `files` 报错（它看不到 overrides）。
+
+前端要注意的：`ModpackInfo.fileCount` 可能是 0，同时 `overrideEntries` 大于 0，
+这是正常的配置包，不是坏包。
+
+### 18.4 前端接入建议
+
+1. 点"导出"先弹预览（`plan_modpack_export`），把 `indexedMods` / `overrideMods`
+   / `configFiles` / `estimatedBytes` 列出来。
+2. `blocking` 为 true 时禁用"开始导出"，把 `issues` 逐条显示。
+3. `exists` 为 true 时让玩家改版本号，不要自动覆盖。
+4. 导出完成后再调 `verify_exported_modpack` 回读校验，把 `issues` 展示出来。
