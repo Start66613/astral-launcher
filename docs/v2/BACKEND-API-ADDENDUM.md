@@ -2045,3 +2045,116 @@ const outcomes = await invoke<ImportOutcome[]>("import_local_files", {
 - `sha1` 可以顺手拿去调 Modrinth 的 `/version_file/{sha1}` 反查是哪个项目，
   查到了就能显示图标、名字，还能进账本（见 §13）
 - 导入完成后刷新 `list_mods` / `list_packs`
+
+## 30. 存档导出 / 导入（发给别人、收别人的）
+
+前面的 §19 是「自己给自己留后路」的备份（存在实例的 `.astral-worlds/` 里，玩家看不到）。
+这一节是**给文件**：导出一个 `.zip` 发到群里，或者把别人给的 `.zip` 收进 `saves/`。
+
+### 30.1 命令一览
+
+| 命令 | 作用 | 写文件 |
+|---|---|---|
+| `inspect_world_zip` | 看一眼这个 zip 是不是存档、解压多大、建议叫什么 | 否 |
+| `export_world_zip` | 把一个存档导出成 zip | 是 |
+| `import_world_zip` | 把 zip 收进实例的 `saves/` | 是 |
+
+```ts
+export interface WorldZipInfo {
+  path: string;
+  fileName: string;
+  bytes: number;                 // zip 本身多大
+  rootDir: string | null;        // 包里最外层只有一个目录时，那个目录名
+  suggestedName: string;         // 建议的存档名（rootDir，没有就用 zip 文件名）
+  hasLevelDat: boolean;          // 包根有没有 level.dat
+  fileCount: number;
+  totalBytes: number;            // 解压后大概多大
+  problem: string | null;        // 非空表示不能导入，直接显示这句
+}
+
+export interface WorldExport {
+  path: string;
+  worldId: string;
+  worldName: string;
+  bytes: number;                 // 导出后的 zip 大小
+  fileCount: number;
+}
+
+export interface WorldImport {
+  worldId: string;
+  worldName: string;
+  replaced: string | null;       // 覆盖前留底的目录名（没覆盖时为 null）
+  files: number;
+  bytes: number;
+}
+```
+
+### 30.2 导出
+
+```ts
+// 1) 玩家点「导出存档」→ 先让他选存到哪（Tauri dialog 的 save 面板）
+const destPath = await save({ defaultPath: `${worldName}.zip`, filters: [{ name: "Zip", extensions: ["zip"] }] });
+if (!destPath) return;
+
+// 2) 导出
+const r = await invoke<WorldExport>("export_world_zip", {
+  instanceId,
+  worldId,
+  destPath,
+  overwrite: false,   // 目标已存在时传 false 会报 FILE_EXISTS，问过玩家再传 true
+});
+toast.success(`已导出到 ${r.path}（${(r.bytes / 1048576).toFixed(1)} MB）`);
+```
+
+导出包里是存档目录的**内容**（`level.dat`、`region/`、`playerdata/`……），
+不再套一层目录 —— 这样别的启动器、甚至玩家自己解压后手动放进 `saves/` 都能用。
+
+### 30.3 导入
+
+```ts
+// 1) 玩家选了一个 zip，先预览
+const info = await invoke<WorldZipInfo>("inspect_world_zip", { path: zipPath });
+if (info.problem) {
+  // 例如「包里没有 level.dat，看起来不是一个存档」
+  return showError(info.problem);
+}
+// info.suggestedName 填进输入框，玩家可以改
+
+// 2) 确认后导入
+const r = await invoke<WorldImport>("import_world_zip", {
+  instanceId,
+  sourcePath: zipPath,
+  name: nameInput || null,   // 空就用 suggestedName
+  overwrite: false,
+});
+// r.replaced 非空说明覆盖了旧存档，旧的那个改名留在了 saves/ 里
+```
+
+### 30.4 两种包写法都认
+
+玩家从网上下到的存档包有两种常见写法：
+
+- `MyWorld/level.dat` —— 整个文件夹打包（最常见）
+- `level.dat` 直接在最外层 —— 只打了文件夹里的内容
+
+`inspect_world_zip` 会自动判断：`rootDir` 非空说明是第一种，导入时会把那一层剥掉。
+`hasLevelDat` 是**剥掉公共目录之后**在包根找到 `level.dat` 的结果。
+
+### 30.5 安全与不丢数据
+
+- **游戏运行中一律拒绝**导出和导入：存档正在被写，导出来是不一致的；导入则会在
+  游戏退出时被覆盖
+- 导出先写 `<目标>.part`，全部写完才改名 —— 中途失败不会留下半个包
+- 导入逐条校验路径（防 Zip Slip）、拒绝符号链接条目、按实际写出的字节算总量
+- 解压到 `saves/.import-<纳秒>` 暂存，成功才 rename 到目标位置
+- 目标存档已存在时**默认拒绝**；`overwrite: true` 时先把旧的改名成
+  `<名字>-replaced-<纳秒>` 留底，导入失败会改回去
+- 全程不删除玩家的东西
+
+### 30.6 前端接入建议
+
+- 「存档」页面每个存档卡片加一个「导出」按钮；顶部加一个「导入存档」按钮
+- 导入走「选文件 → 预览（显示包里有几个文件、解压多大、建议叫什么）→ 确认」
+- `problem` 非空时不要让玩家点确认，直接把那句话显示出来
+- 覆盖时用二次确认弹窗，并说明「旧存档会保留一份，不会删除」
+- 导入成功后刷新存档列表（`list_saves` / `get_world_info`）

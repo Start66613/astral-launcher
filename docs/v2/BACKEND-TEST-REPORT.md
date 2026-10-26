@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 282 项全过，单元测试 236 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 286 项全过，单元测试 243 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（282 项）
+## 2. 自检覆盖（286 项）
 
 按前缀分组：
 
@@ -74,6 +74,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `crash` | 4 | 按报告格式解析、系统详情与原因链、可疑模组只认报告写的、没有报告时报错 |
 | `support` | 8 | 预览列出全部小节、预览不落盘、导出 zip、条目齐全、报告能看懂、日志脱敏、机器可读那份带事实、不带日志时如实标注 |
 | `preflight` | 4 | 7 项一次列全、缺版本文件时阻塞、内存建议不阻塞、预检不写文件 |
+| `worldio` | 4 | 导出能读回来、导入落地到指定名字、重名默认拒绝且覆盖留底、不是存档的包被拒 |
 | `source` | 4 | 本地开端口能连上、关端口报不通、建议逻辑（接近时优先官方、差太多用最快、全不通为 null）、全部源都有标签 |
 | `import` | 6 | 按内容认出资源包/光影包/Mod、坏路径被拒、复制到正确目录、重名不覆盖、一批里坏文件不影响其他、指定类型优先 |
 | `installer` | 3 | Forge/NeoForge 下载地址 |
@@ -81,7 +82,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（242 个）
+## 3. 单元测试（249 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -97,6 +98,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `worlds` | +4 | 详情读全、坏 level.dat 只丢信息、未知 id 报错、列表带版本 |
 | `save_manage` | 9 | 改名、重名拒绝、非法名、复制、删除进回收站、恢复、恢复冲突、覆盖留底、永久删除需确认、运行中拒绝 |
 | `screenshots` | 6 | base64 补齐、PNG 尺寸、只列图片、data URL、路径穿越与非图片被拒、删除需确认 |
+| `world_io` | 7 | 导出回读、运行中与已存在拒绝、带目录包导入、平铺包按给定名导入、非存档包被拒、覆盖留底、运行中拒绝 |
 | `game_options` | 10 | 键值解析、往返不丢尾换行、范围与枚举校验、读文件保留未知键、坏值标记、只改白名单、整批拒绝、运行中拒绝、缺文件时新建、备份裁剪 |
 | `cover` | 7 | 只认管理文件名、魔数识别、PNG/JPEG 宽高、设读往返、换格式删旧、拒非图片、清除 |
 | `crash` | 8 | 头部字段、异常与栈帧、原因链与小节、系统详情、推断包名、显式可疑模组、None 不误报、普通日志不当崩溃报告 |

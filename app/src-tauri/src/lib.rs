@@ -44,6 +44,7 @@ mod update_plan;
 mod updates;
 mod verify;
 mod world_backup;
+mod world_io;
 mod worlds;
 
 use core::Config;
@@ -824,6 +825,58 @@ fn purge_deleted_world(
     let game = game_root();
     let (inst_dir, _saves) = saves_and_dir(&game, &instance_id)?;
     save_manage::purge(&inst_dir, &trash_name, confirm)
+}
+
+// ── 存档导出 / 导入（发给别人、收别人的）────────────────────────
+
+/// 只看一眼这个 zip 是不是存档（只读）
+#[tauri::command]
+fn inspect_world_zip(path: String) -> Result<world_io::WorldZipInfo, String> {
+    world_io::inspect_zip(std::path::Path::new(&path))
+}
+
+/// 把一个存档导出成 zip（游戏运行中拒绝）
+#[tauri::command]
+fn export_world_zip(
+    instance_id: String,
+    world_id: String,
+    dest_path: String,
+    overwrite: Option<bool>,
+) -> Result<world_io::WorldExport, String> {
+    let game = game_root();
+    let (_inst_dir, saves) = saves_and_dir(&game, &instance_id)?;
+    let cancel = net::never_cancel();
+    world_io::export(
+        &saves,
+        &world_id,
+        std::path::Path::new(&dest_path),
+        overwrite.unwrap_or(false),
+        world_running(&instance_id),
+        &*cancel,
+        |_, _| {},
+    )
+}
+
+/// 把一个存档 zip 收进实例（游戏运行中拒绝）
+#[tauri::command]
+fn import_world_zip(
+    instance_id: String,
+    source_path: String,
+    name: Option<String>,
+    overwrite: Option<bool>,
+) -> Result<world_io::WorldImport, String> {
+    let game = game_root();
+    let (_inst_dir, saves) = saves_and_dir(&game, &instance_id)?;
+    let cancel = net::never_cancel();
+    world_io::import(
+        &saves,
+        std::path::Path::new(&source_path),
+        name.as_deref(),
+        overwrite.unwrap_or(false),
+        world_running(&instance_id),
+        &*cancel,
+        |_, _| {},
+    )
 }
 
 // ── 截图浏览 ───────────────────────────────────────────────────
@@ -3205,6 +3258,9 @@ pub fn run() {
             list_deleted_worlds,
             restore_deleted_world,
             purge_deleted_world,
+            inspect_world_zip,
+            export_world_zip,
+            import_world_zip,
             list_screenshots,
             read_screenshot,
             delete_screenshot,
@@ -4588,6 +4644,98 @@ pub fn selftest() -> i32 {
                 && base.join("2026-10-27_12.00.00.png").is_file()
                 && screenshots::delete(&base, "2026-10-27_12.00.00.png", true).is_ok()
                 && !base.join("2026-10-27_12.00.00.png").exists()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // 存档导出 / 导入：导出能读回来、导入能落地、覆盖要留底、不是存档的包要拒绝。
+    {
+        let base = std::env::temp_dir().join(format!("astral-worldio-{}", time::now_nanos()));
+        let saves = base.join("saves");
+        let _ = std::fs::create_dir_all(saves.join("发给朋友的档").join("region"));
+        let lvl = nbt::sample_level_dat("1.20.1", 0, false);
+        let _ = std::fs::write(saves.join("发给朋友的档").join("level.dat"), &lvl);
+        let _ = std::fs::write(
+            saves.join("发给朋友的档").join("region").join("r.0.0.mca"),
+            vec![7u8; 64],
+        );
+        let wid = worlds::world_id("发给朋友的档");
+        let zip_path = base.join("share.zip");
+        let cancel = net::never_cancel();
+
+        let made = world_io::export(&saves, &wid, &zip_path, false, false, &*cancel, |_, _| {});
+        check!(
+            "world zip exports and reads back",
+            made.as_ref()
+                .map(|e| e.file_count == 2 && e.world_name == "发给朋友的档" && zip_path.is_file())
+                .unwrap_or(false)
+                && world_io::inspect_zip(&zip_path)
+                    .map(|i| i.problem.is_none() && i.has_level_dat && i.file_count == 2)
+                    .unwrap_or(false)
+        );
+
+        let into = base.join("saves2");
+        let _ = std::fs::create_dir_all(&into);
+        let back = world_io::import(
+            &into,
+            &zip_path,
+            Some("收回来的档"),
+            false,
+            false,
+            &*cancel,
+            |_, _| {},
+        );
+        check!(
+            "world zip import restores files",
+            back.as_ref()
+                .map(|r| r.files == 2
+                    && r.world_name == "收回来的档"
+                    && into.join("收回来的档").join("level.dat").is_file()
+                    && into
+                        .join("收回来的档")
+                        .join("region")
+                        .join("r.0.0.mca")
+                        .is_file())
+                .unwrap_or(false)
+        );
+
+        let again = world_io::import(
+            &into,
+            &zip_path,
+            Some("收回来的档"),
+            false,
+            false,
+            &*cancel,
+            |_, _| {},
+        );
+        let overwritten = world_io::import(
+            &into,
+            &zip_path,
+            Some("收回来的档"),
+            true,
+            false,
+            &*cancel,
+            |_, _| {},
+        );
+        check!(
+            "world zip import refuses overwrite",
+            again.is_err()
+                && overwritten
+                    .as_ref()
+                    .map(|r| r.replaced.is_some())
+                    .unwrap_or(false)
+        );
+
+        // 没有 level.dat 的包、以及根本不是 zip 的文件，都要被拒
+        let junk = base.join("junk.zip");
+        let _ = std::fs::write(&junk, b"not a zip");
+        check!(
+            "world zip rejects non-worlds",
+            world_io::inspect_zip(&junk)
+                .map(|i| i.problem.is_some())
+                .unwrap_or(false)
+                && world_io::import(&into, &junk, None, false, false, &*cancel, |_, _| {}).is_err()
         );
 
         let _ = std::fs::remove_dir_all(&base);
