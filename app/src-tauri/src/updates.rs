@@ -160,7 +160,7 @@ pub fn apply_update(
     project_id: &str,
     version_id: &str,
     cancel: crate::net::CancelRef<'_>,
-    mut on: impl FnMut(u32, u32, u32, u32),
+    mut on: impl FnMut(u32, u32, u64, u64),
 ) -> Result<(String, String), String> {
     let stats = |_: &str| crate::instance::PlayStats::default();
     let inst = crate::instance::find(game, instance_id, &stats)
@@ -211,12 +211,7 @@ pub fn apply_update(
         sha512.as_deref(),
         cancel,
         |done, total| {
-            on(
-                1,
-                1,
-                done.min(u32::MAX as u64) as u32,
-                total.unwrap_or(0).min(u32::MAX as u64) as u32,
-            );
+            on(1, 1, done, total.unwrap_or(0));
         },
     )?;
 

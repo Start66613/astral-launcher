@@ -17,6 +17,8 @@ use tauri::{AppHandle, Emitter};
 
 pub const EVENT: &str = "astral://task";
 const MAX_TASKS: usize = 50;
+/// 速度采样的最小间隔：太密的采样会被网络抖动带偏
+const MIN_SAMPLE_MS: i64 = 200;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +56,15 @@ pub struct Task {
     /// 阶段的中文可读名（界面不必自己维护映射表）
     #[serde(default)]
     pub stage_label: String,
+    /// 最近一次测得的下载速度（字节/秒）。没在下载时是 0。
+    #[serde(default)]
+    pub speed_bps: u64,
+    /// 按当前速度估算的剩余毫秒数；速度未知或总量未知时是 null。
+    #[serde(default)]
+    pub eta_ms: Option<u64>,
+    /// 上一次测速的采样点，不序列化（重启后重新采样）
+    #[serde(skip)]
+    pub last_sample: Option<(u64, i64)>,
 }
 
 pub fn now_iso() -> String {
@@ -195,6 +206,9 @@ pub fn create(
         retry_spec: None,
         phase: "queued".into(),
         stage_label: "排队中".into(),
+        speed_bps: 0,
+        eta_ms: None,
+        last_sample: None,
     };
     s.tasks.insert(task.task_id.clone(), task.clone());
     s.tokens
@@ -280,6 +294,70 @@ pub fn progress(task_id: &str, stage: &str, label: impl Into<String>, done: u32,
         t.phase = phase_of(&t.stage).to_string();
         t.stage_label = stage_label_of(&t.stage).to_string();
     });
+}
+
+/// 便捷：改进度并带上字节数，顺带算下载速度与剩余时间。
+///
+/// 界面上的"3.2 MB/s，还剩 40 秒"就是从这里来的。以前 `Task.bytes` /
+/// `total_bytes` 建好之后**从来没有被写过**，一直是 0 —— 前端拿到的进度
+/// 只有文件条数，大文件下载时数字半天不动。
+pub fn progress_bytes(
+    task_id: &str,
+    stage: &str,
+    label: impl Into<String>,
+    done: u32,
+    total: u32,
+    bytes: u64,
+    total_bytes: u64,
+) {
+    update(task_id, |t| {
+        t.stage = stage.to_string();
+        t.label = label.into();
+        t.done = done;
+        t.total = total;
+        t.bytes = bytes;
+        t.total_bytes = total_bytes;
+        t.state = "running".into();
+        t.phase = phase_of(&t.stage).to_string();
+        t.stage_label = stage_label_of(&t.stage).to_string();
+        sample_speed(t);
+    });
+}
+
+/// 按两次采样之间的增量算速度，再据此估剩余时间。
+///
+/// 采样间隔不到 200 ms 就沿用上次的速度 —— 太密的采样会被网络抖动带偏，
+/// 界面上数字乱跳比不显示更糟。字节数变少（换文件了）就重新开始采样。
+fn sample_speed(t: &mut Task) {
+    let now = crate::time::now_unix_ms();
+    apply_sample(t, now);
+}
+
+/// `sample_speed` 的可测试内核：时间从外面传进来。
+fn apply_sample(t: &mut Task, now: i64) {
+    match t.last_sample {
+        Some((last_bytes, last_ms)) if t.bytes >= last_bytes => {
+            let dt = now - last_ms;
+            if dt >= MIN_SAMPLE_MS {
+                let db = t.bytes - last_bytes;
+                t.speed_bps = (db as f64 * 1000.0 / dt as f64).round() as u64;
+                t.last_sample = Some((t.bytes, now));
+            }
+        }
+        Some(_) => {
+            // 换了个文件或者进度回退，重新开始
+            t.speed_bps = 0;
+            t.last_sample = Some((t.bytes, now));
+        }
+        None => {
+            t.last_sample = Some((t.bytes, now));
+        }
+    }
+    t.eta_ms = if t.speed_bps > 0 && t.total_bytes > t.bytes {
+        Some(((t.total_bytes - t.bytes) as f64 * 1000.0 / t.speed_bps as f64).round() as u64)
+    } else {
+        None
+    };
 }
 
 pub fn start(task_id: &str) {
@@ -551,5 +629,107 @@ mod tests {
         let e = decode("BUSY|忙");
         assert_eq!(e.code, "BUSY");
         assert!(e.detail.is_none());
+    }
+
+    fn blank_task() -> Task {
+        Task {
+            task_id: "task_test".into(),
+            revision: 1,
+            kind: "install".into(),
+            instance_id: None,
+            game_version: None,
+            title: "测试".into(),
+            stage: "download".into(),
+            label: "下载中".into(),
+            done: 0,
+            total: 0,
+            bytes: 0,
+            total_bytes: 0,
+            state: "running".into(),
+            error: None,
+            result: None,
+            started_at: "2026-01-01T00:00:00Z".into(),
+            ended_at: None,
+            retry_of: None,
+            boot_id: "boot".into(),
+            cancelling: false,
+            retry_spec: None,
+            phase: "downloading".into(),
+            stage_label: "下载文件".into(),
+            speed_bps: 0,
+            eta_ms: None,
+            last_sample: None,
+        }
+    }
+
+    #[test]
+    fn first_sample_only_records_the_baseline() {
+        let mut t = blank_task();
+        t.bytes = 1000;
+        t.total_bytes = 10_000;
+        apply_sample(&mut t, 1_000);
+        assert_eq!(t.speed_bps, 0);
+        assert!(t.eta_ms.is_none());
+        assert_eq!(t.last_sample, Some((1000, 1_000)));
+    }
+
+    #[test]
+    fn computes_speed_and_eta_between_samples() {
+        let mut t = blank_task();
+        t.total_bytes = 10_000;
+        t.bytes = 1_000;
+        apply_sample(&mut t, 1_000);
+        // 1 秒内又下了 2000 字节 → 2000 B/s，剩 7000 字节 → 3.5 秒
+        t.bytes = 3_000;
+        apply_sample(&mut t, 2_000);
+        assert_eq!(t.speed_bps, 2_000);
+        assert_eq!(t.eta_ms, Some(3_500));
+    }
+
+    #[test]
+    fn keeps_last_speed_when_samples_are_too_close() {
+        let mut t = blank_task();
+        t.total_bytes = 100_000;
+        t.bytes = 1_000;
+        apply_sample(&mut t, 1_000);
+        t.bytes = 2_000;
+        apply_sample(&mut t, 1_100);
+        assert_eq!(t.speed_bps, 0, "间隔太短不该更新速度");
+        t.bytes = 5_000;
+        apply_sample(&mut t, 2_000);
+        assert_eq!(t.speed_bps, 4_000);
+        // 再给一个 50 ms 后的采样，速度保持上一次的值，不重算
+        t.bytes = 5_100;
+        apply_sample(&mut t, 2_050);
+        assert_eq!(t.speed_bps, 4_000);
+    }
+
+    #[test]
+    fn resets_when_progress_goes_backwards() {
+        let mut t = blank_task();
+        t.total_bytes = 10_000;
+        t.bytes = 5_000;
+        apply_sample(&mut t, 1_000);
+        t.bytes = 9_000;
+        apply_sample(&mut t, 2_000);
+        assert_eq!(t.speed_bps, 4_000);
+        // 换文件了：字节数比上次小
+        t.bytes = 100;
+        apply_sample(&mut t, 2_100);
+        assert_eq!(t.speed_bps, 0);
+        assert!(t.eta_ms.is_none());
+        assert_eq!(t.last_sample, Some((100, 2_100)));
+    }
+
+    #[test]
+    fn no_eta_without_a_total() {
+        let mut t = blank_task();
+        t.total_bytes = 0;
+        t.bytes = 1_000;
+        apply_sample(&mut t, 1_000);
+        t.bytes = 5_000;
+        apply_sample(&mut t, 2_000);
+        assert_eq!(t.speed_bps, 4_000);
+        assert!(t.eta_ms.is_none(), "总量未知时不能瞎报剩余时间");
     }
 }

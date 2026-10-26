@@ -448,7 +448,15 @@ fn run_install(tid: &str, game_version: String) {
     // 后台线程 panic 必须变成任务失败，不能让任务永远 running
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         core::install_with_cancel(&game_version, &dir, &cfg.username, Some(cancel), move |p| {
-            task::progress(&t2, &p.stage, p.label, p.done, p.total);
+            task::progress_bytes(
+                &t2,
+                &p.stage,
+                p.label,
+                p.done,
+                p.total,
+                p.bytes,
+                p.total_bytes,
+            );
         })
     }))
     .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()));
@@ -537,7 +545,17 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
                 inst.memory_mb,
                 &inst.jvm_args,
                 auto_java.as_deref(),
-                move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                move |p| {
+                    task::progress_bytes(
+                        &t2,
+                        &p.stage,
+                        p.label,
+                        p.done,
+                        p.total,
+                        p.bytes,
+                        p.total_bytes,
+                    )
+                },
             )
         }))
         .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|启动线程崩溃".to_string()));
@@ -1036,8 +1054,16 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
                 let tid_c = tid.clone();
                 move || task::is_cancelled(&tid_c)
             });
-            resources::execute(&stored, &*cancel, move |c, total| {
-                task::progress(&t2, "download", format!("下载 {c}/{total}"), c, total);
+            resources::execute(&stored, &*cancel, move |c, total, bytes, total_bytes| {
+                task::progress_bytes(
+                    &t2,
+                    "download",
+                    format!("下载 {c}/{total}"),
+                    c,
+                    total,
+                    bytes,
+                    total_bytes,
+                );
             })
         }))
         .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|资源安装线程崩溃".to_string()));
@@ -1189,8 +1215,16 @@ fn run_mod_update(
             project_id,
             version_id,
             &*cancel,
-            move |c, t, _s, _ts| {
-                task::progress(&t2, "download", format!("下载 {c}/{t}"), c, t);
+            move |c, t, bytes, total_bytes| {
+                task::progress_bytes(
+                    &t2,
+                    "download",
+                    format!("下载 {c}/{t}"),
+                    c,
+                    t,
+                    bytes,
+                    total_bytes,
+                );
             },
         )
     }))
@@ -1622,12 +1656,14 @@ async fn start_modpack_install(
                         &cfg.username,
                         Some(cancel),
                         move |p| {
-                            task::progress(
+                            task::progress_bytes(
                                 &t2,
                                 &p.stage,
                                 format!("游戏本体 {}", p.label),
                                 p.done,
                                 p.total,
+                                p.bytes,
+                                p.total_bytes,
                             );
                         },
                     )?;
@@ -1642,7 +1678,17 @@ async fn start_modpack_install(
                             &index.mc_version,
                             ver,
                             &game,
-                            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                            move |p| {
+                                task::progress_bytes(
+                                    &t2,
+                                    &p.stage,
+                                    p.label,
+                                    p.done,
+                                    p.total,
+                                    p.bytes,
+                                    p.total_bytes,
+                                )
+                            },
                         )?;
                         let mut m = instance::read_meta(&game, &inst.id)
                             .ok_or_else(|| "INSTANCE_NOT_FOUND|元数据丢失".to_string())?;
@@ -1658,7 +1704,17 @@ async fn start_modpack_install(
                             &game,
                             &cfg.username,
                             Some(cancel),
-                            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                            move |p| {
+                                task::progress_bytes(
+                                    &t2,
+                                    &p.stage,
+                                    p.label,
+                                    p.done,
+                                    p.total,
+                                    p.bytes,
+                                    p.total_bytes,
+                                )
+                            },
                         )?;
                     }
                 }
@@ -1686,13 +1742,15 @@ async fn start_modpack_install(
                     &inst_dir,
                     include_optional,
                     &move || task::is_cancelled(&tc),
-                    move |d, total| {
-                        task::progress(
+                    move |d, total, bytes, total_bytes| {
+                        task::progress_bytes(
                             &t2,
                             "download",
                             format!("整合包文件 {d}/{total}"),
                             d,
                             total,
+                            bytes,
+                            total_bytes,
                         );
                     },
                 )?;
@@ -1973,7 +2031,15 @@ fn run_game_install(
                 let tc = tid.to_string();
                 let cancel = net::cancel_from(move || task::is_cancelled(&tc));
                 core::install_with_cancel(&v, &game, &cfg.username, Some(cancel), move |pr| {
-                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                    task::progress_bytes(
+                        &t2,
+                        &pr.stage,
+                        pr.label,
+                        pr.done,
+                        pr.total,
+                        pr.bytes,
+                        pr.total_bytes,
+                    );
                 })?;
             }
             task::check_cancel(tid)?;
@@ -2003,7 +2069,15 @@ fn run_game_install(
                     // installer 会生成 {mc}-forge-{ver} 之类的版本，记下来供启动使用
                     let generated =
                         core::install_forge_like(&l.kind, &v, &l.version, &game, move |pr| {
-                            task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                            task::progress_bytes(
+                                &t2,
+                                &pr.stage,
+                                pr.label,
+                                pr.done,
+                                pr.total,
+                                pr.bytes,
+                                pr.total_bytes,
+                            );
                         })?;
                     let mut meta = instance::read_meta(&game, &inst.id)
                         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例元数据丢失".to_string())?;
@@ -2020,7 +2094,15 @@ fn run_game_install(
                         &cfg.username,
                         Some(cancel),
                         move |pr| {
-                            task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                            task::progress_bytes(
+                                &t2,
+                                &pr.stage,
+                                pr.label,
+                                pr.done,
+                                pr.total,
+                                pr.bytes,
+                                pr.total_bytes,
+                            );
                         },
                     )?;
                 }
@@ -2050,13 +2132,15 @@ fn run_game_install(
                 let t2 = tid.to_string();
                 let t3 = tid.to_string();
                 let cancel = net::cancel_from(move || task::is_cancelled(&t3));
-                resources::execute(&stored, &*cancel, move |done, total| {
-                    task::progress(
+                resources::execute(&stored, &*cancel, move |done, total, bytes, total_bytes| {
+                    task::progress_bytes(
                         &t2,
                         "component",
                         format!("安装 {label} {done}/{total}"),
                         done,
                         total,
+                        bytes,
+                        total_bytes,
                     );
                 })?;
             }
@@ -2127,7 +2211,15 @@ async fn repair_instance(instance_id: String) -> Result<Task, String> {
                                 &cfg.username,
                                 Some(cancel),
                                 move |pr| {
-                                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                                    task::progress_bytes(
+                                        &t2,
+                                        &pr.stage,
+                                        pr.label,
+                                        pr.done,
+                                        pr.total,
+                                        pr.bytes,
+                                        pr.total_bytes,
+                                    );
                                 },
                             )?;
                         }
@@ -2143,8 +2235,14 @@ async fn repair_instance(instance_id: String) -> Result<Task, String> {
                                         ver,
                                         &game,
                                         move |pr| {
-                                            task::progress(
-                                                &t2, &pr.stage, pr.label, pr.done, pr.total,
+                                            task::progress_bytes(
+                                                &t2,
+                                                &pr.stage,
+                                                pr.label,
+                                                pr.done,
+                                                pr.total,
+                                                pr.bytes,
+                                                pr.total_bytes,
                                             );
                                         },
                                     )?;
@@ -2162,8 +2260,14 @@ async fn repair_instance(instance_id: String) -> Result<Task, String> {
                                         &cfg.username,
                                         Some(cancel),
                                         move |pr| {
-                                            task::progress(
-                                                &t2, &pr.stage, pr.label, pr.done, pr.total,
+                                            task::progress_bytes(
+                                                &t2,
+                                                &pr.stage,
+                                                pr.label,
+                                                pr.done,
+                                                pr.total,
+                                                pr.bytes,
+                                                pr.total_bytes,
                                             );
                                         },
                                     )?;
@@ -2318,7 +2422,15 @@ async fn start_install_loader(
                         &version,
                         &main_dir,
                         move |p| {
-                            task::progress(&t2, &p.stage, p.label, p.done, p.total);
+                            task::progress_bytes(
+                                &t2,
+                                &p.stage,
+                                p.label,
+                                p.done,
+                                p.total,
+                                p.bytes,
+                                p.total_bytes,
+                            );
                         },
                     )
                     .map(Some)
@@ -2330,7 +2442,17 @@ async fn start_install_loader(
                         &main_dir,
                         &cfg.username,
                         Some(cancel),
-                        move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                        move |p| {
+                            task::progress_bytes(
+                                &t2,
+                                &p.stage,
+                                p.label,
+                                p.done,
+                                p.total,
+                                p.bytes,
+                                p.total_bytes,
+                            )
+                        },
                     )
                     .map(|_| None)
                 }
@@ -3455,6 +3577,36 @@ pub fn selftest() -> i32 {
         "task snapshot",
         !task::snapshot(None, None, None).is_empty()
     );
+
+    // 下载速度与剩余时间：以前 bytes/total_bytes 永远是 0，界面只能显示文件条数
+    {
+        let tb = task::create("install", None, Some("1.20.1".into()), "测速");
+        task::progress_bytes(&tb.task_id, "download", "下载中", 1, 3, 1_000, 10_000);
+        let first = task::get(&tb.task_id).unwrap();
+        let baseline_only = first.bytes == 1_000
+            && first.total_bytes == 10_000
+            && first.speed_bps == 0
+            && first.eta_ms.is_none();
+        // 等一小会儿再报一次，让采样间隔真的跨过 200 ms
+        std::thread::sleep(std::time::Duration::from_millis(260));
+        task::progress_bytes(&tb.task_id, "download", "下载中", 2, 3, 4_000, 10_000);
+        let second = task::get(&tb.task_id).unwrap();
+        check!(
+            "task reports bytes and speed",
+            baseline_only
+                && second.bytes == 4_000
+                && second.total_bytes == 10_000
+                && second.speed_bps > 0
+                && second.eta_ms.map(|e| e > 0).unwrap_or(false)
+        );
+        task::finish(&tb.task_id, serde_json::json!({ "kind": "install" }));
+        check!(
+            "task bytes survive serialization",
+            serde_json::to_value(task::get(&tb.task_id).unwrap())
+                .map(|v| v["bytes"].as_u64() == Some(4_000) && v["speedBps"].is_u64())
+                .unwrap_or(false)
+        );
+    }
 
     // 取消：受理 → worker 确认 → 终态粘滞
     let t3 = task::create("install", None, Some("1.20.1".into()), "取消测试");
@@ -4697,7 +4849,7 @@ pub fn selftest() -> i32 {
                 return Err(format!("{}|{}", b.code, b.message));
             }
             let stored = resources::take(&rp.plan_id, 1)?;
-            let p = resources::execute(&stored, &*net::never_cancel(), |_, _| {})?;
+            let p = resources::execute(&stored, &*net::never_cancel(), |_, _, _, _| {})?;
             Ok(p.to_string_lossy().to_string())
         };
         match run() {
@@ -5638,7 +5790,7 @@ Caused by: java.lang.IllegalStateException: bad state\n";
         dep_urls: Vec::new(),
         created_ms: 0,
     };
-    let cancelled = resources::execute(&stored, &*net::cancel_from(|| true), |_, _| {});
+    let cancelled = resources::execute(&stored, &*net::cancel_from(|| true), |_, _, _, _| {});
     check!(
         "resource cancel short-circuits",
         cancelled
@@ -6298,6 +6450,11 @@ Caused by: java.lang.IllegalStateException: bad state\n";
             }
 
             // 14) 共享缓存：第二次下同一个文件不再联网，缓存里能查到
+            //
+            // 缓存是落盘的，上一次自检跑完会把它留着。不清一下的话，
+            // 第一次下载就直接命中缓存、根本不联网，`after_first > before_hits`
+            // 会假失败（这个检查曾经一次过、一次挂，就是这么来的）。
+            let _ = cache::clear();
             let c1 = dl.join("cache1.bin");
             let c2 = dl.join("cache2.bin");
             let csha = testsrv::expected_sha1(200 * 1024);

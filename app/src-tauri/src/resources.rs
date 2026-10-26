@@ -524,10 +524,14 @@ pub fn take(plan_id: &str, revision: u32) -> Result<StoredResourcePlan, String> 
 /// 真正下载并落盘（调用方已在任务线程里）。
 ///
 /// 下载过程中随时可以被取消：取消时保留 `.part`，下次可以接着下。
+///
+/// 回调参数是 `(已完成个数, 总个数, 已下载字节, 总字节)`。字节数是
+/// 当前这个文件自己的进度（依赖与本体分别算），界面要显示"总共下了多少"
+/// 就自己累加。
 pub fn execute(
     stored: &StoredResourcePlan,
     cancel: crate::net::CancelRef<'_>,
-    mut on: impl FnMut(u32, u32),
+    mut on: impl FnMut(u32, u32, u64, u64),
 ) -> Result<PathBuf, String> {
     let dir = PathBuf::from(&stored.plan.target_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
@@ -535,6 +539,9 @@ pub fn execute(
     if (cancel)() {
         return Err("CANCELLED|已取消".into());
     }
+
+    let dep_count = stored.plan.dependencies.len() as u32;
+    let total_count = dep_count + 1;
 
     // 先装必需依赖，再装本体；两者都在 .part 阶段完成 SHA1/SHA512 校验
     for (i, dep) in stored.plan.dependencies.iter().enumerate() {
@@ -550,12 +557,10 @@ pub fn execute(
             dep.sha512.as_deref(),
             cancel,
             |done, total| {
-                on(
-                    done.min(u32::MAX as u64) as u32,
-                    total.unwrap_or(0).min(u32::MAX as u64) as u32,
-                );
+                on(i as u32, total_count, done, total.unwrap_or(0));
             },
         )?;
+        on(i as u32 + 1, total_count, dep.size, dep.size);
     }
 
     if (cancel)() {
@@ -569,10 +574,7 @@ pub fn execute(
         stored.sha512.as_deref(),
         cancel,
         |done, total| {
-            on(
-                done.min(u32::MAX as u64) as u32,
-                total.unwrap_or(0).min(u32::MAX as u64) as u32,
-            );
+            on(dep_count, total_count, done, total.unwrap_or(0));
         },
     )?;
 
@@ -629,7 +631,7 @@ pub fn live_probe(
         return Err(format!("{}|{}", b.code, b.message));
     }
     let stored = take(&plan.plan_id, 1)?;
-    let p = execute(&stored, &*crate::net::never_cancel(), |_, _| {})?;
+    let p = execute(&stored, &*crate::net::never_cancel(), |_, _, _, _| {})?;
     Ok(p.to_string_lossy().to_string())
 }
 

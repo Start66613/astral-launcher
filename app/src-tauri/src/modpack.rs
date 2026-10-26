@@ -697,7 +697,7 @@ pub fn download_files(
     instance_dir: &Path,
     include_optional: bool,
     should_cancel: crate::net::CancelRef<'_>,
-    mut on: impl FnMut(u32, u32),
+    mut on: impl FnMut(u32, u32, u64, u64),
 ) -> Result<u32, String> {
     let wanted: Vec<&IndexFile> = index
         .files
@@ -707,6 +707,9 @@ pub fn download_files(
     let total = wanted.len() as u32;
     let cancel = should_cancel;
     let mut done = 0u32;
+    // 整个整合包的总字节：只统计真的会下的文件，可选文件不算进去
+    let grand_total: u64 = wanted.iter().map(|f| f.size).sum();
+    let mut done_bytes: u64 = 0;
     for f in wanted {
         if should_cancel() {
             return Err("CANCELLED|已取消".into());
@@ -720,16 +723,20 @@ pub fn download_files(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
         }
+        let base = done_bytes;
         crate::net::download_with_cancel(
             &f.url,
             &dest,
             f.sha1.as_deref(),
             f.sha512.as_deref(),
             cancel,
-            |_, _| {},
+            |cur, _| {
+                on(done, total, base.saturating_add(cur), grand_total);
+            },
         )?;
+        done_bytes = done_bytes.saturating_add(f.size);
         done += 1;
-        on(done, total);
+        on(done, total, done_bytes, grand_total);
     }
     Ok(done)
 }
@@ -889,7 +896,7 @@ pub fn install(
         if should_cancel() {
             return Err("CANCELLED|已取消".into());
         }
-        download_files(&index, &dir, false, &should_cancel, |d, total| {
+        download_files(&index, &dir, false, &should_cancel, |d, total, _b, _tb| {
             on("download", "整合包文件", d, total)
         })?;
         extract_overrides(&stored.pack_path, &dir, &should_cancel, |d, _| {
