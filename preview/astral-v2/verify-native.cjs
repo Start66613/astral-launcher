@@ -30,6 +30,7 @@ fs.mkdirSync(out, { recursive: true });
       await page.locator(".theme-card").filter({hasText:name}).click();await page.waitForTimeout(500);
       assert.equal(await page.locator("html").getAttribute("data-theme"),theme);
       await page.getByRole("button",{name:"启动",exact:true}).click();
+      await page.waitForFunction(()=>document.querySelector(".route-panel:not([hidden])")?.dataset.transition==="idle");
       frames.push(await page.locator(".b-launch-dock").boundingBox());
       await page.screenshot({path:path.join(out,`home-${theme}.png`)});
       await page.getByRole("button",{name:"设置",exact:true}).click();

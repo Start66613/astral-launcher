@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Astral · 日常交互动效对照</title>
+<style>
+  :root{color-scheme:dark;font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:#0d211d;color:#e8eddc}
+  body{max-width:1600px;margin:auto;padding:36px 28px}header{display:flex;align-items:center;gap:20px;flex-wrap:wrap}h1{font-size:25px;font-weight:500;margin:0}p{color:#afc1ae;font-size:13px;line-height:1.8}.toolbar{display:flex;gap:10px;margin:24px 0}button,a{background:#233c30;color:#d7e5b6;padding:10px 16px;border:1px solid #486347;border-radius:8px;font:inherit;font-size:12px;text-decoration:none;cursor:pointer}button:focus-visible,a:focus-visible{outline:2px solid #d7e5b6;outline-offset:3px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}article{border:1px solid #344c3c;border-radius:13px;background:#142b23;overflow:hidden}h2{font-size:14px;font-weight:500;margin:0;padding:16px 19px}video{width:100%;display:block;background:#10201d;aspect-ratio:16/10}small{color:#a8bdab;line-height:1.8}footer{margin-top:24px}@media(max-width:900px){.grid{grid-template-columns:1fr}}
+</style>
+<header><h1>日常交互动效 · 开启 / 关闭</h1><a href="http://127.0.0.1:5198/" target="_blank" rel="noreferrer">打开实际界面，亲自切换</a></header>
+<p>两段均为 1280 × 800 的实际 React 界面录像。依次比较导航、账号弹窗、二级安装页和返回；IPC 与公开元数据使用隔离测试桩，未下载或启动游戏。不是预渲染设计动画，也不代表 Windows 系统缩放验收。</p>
+<div class="toolbar"><button id="play">同步播放</button><button id="pause">暂停</button><button id="reset">从头重播</button></div>
+<div class="grid"><article><h2>动效开启 · 内容过渡 / 弹窗开闭</h2><video src="screenshots/motion/motion-on.webm" controls muted playsinline preload="metadata"></video></article><article><h2>动效关闭 · 状态和操作完整保留</h2><video src="screenshots/motion/motion-off.webm" controls muted playsinline preload="metadata"></video></article></div>
+<footer><small>如果录像尚不存在，请先运行 <code>node preview/astral-v2/verify-motion.cjs</code>。录像、截图和机器结果留在本机，不进入 Git。</small></footer>
+<script>
+const clips=[...document.querySelectorAll('video')];
+document.getElementById('play').onclick=()=>Promise.all(clips.map(v=>v.play().catch(()=>{})));
+document.getElementById('pause').onclick=()=>clips.forEach(v=>v.pause());
+document.getElementById('reset').onclick=()=>clips.forEach(v=>{v.currentTime=0;v.play().catch(()=>{})});
+</script>
+</html>

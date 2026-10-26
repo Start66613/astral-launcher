@@ -1,0 +1,144 @@
+:root {
+  --motion-fast: 140ms;
+  --motion-normal: 220ms;
+  --motion-page: 240ms;
+  --motion-dialog: 200ms;
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-distance: 6px;
+}
+.route-deck,
+.route-panel {
+  min-height: 100%;
+  height: 100%;
+}
+.route-panel[hidden] {
+  display: none !important;
+}
+.route-panel[hidden] *,
+.route-panel[hidden] *::before,
+.route-panel[hidden] *::after {
+  animation-play-state: paused !important;
+}
+.ambient-art {
+  transition: opacity var(--motion-page) ease-out;
+}
+.modal[data-dialog-state="closing"] {
+  pointer-events: none;
+}
+.modal:has(.account-detail) {
+  min-height: min(480px, 85dvh);
+}
+:root[data-eco="on"] .modal::backdrop {
+  backdrop-filter: none;
+}
+.modal[data-dialog-state="opening"]::backdrop {
+  animation: backdrop-enter var(--motion-dialog) var(--motion-ease) both;
+}
+.modal[data-dialog-state="closing"]::backdrop {
+  animation: backdrop-enter var(--motion-dialog) var(--motion-ease) reverse both;
+}
+@keyframes backdrop-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.disclosure-content {
+  display: flow-root;
+}
+.disclosure-content > p:last-child {
+  margin-bottom: 3px;
+}
+.catalog-group svg,
+details summary::marker {
+  transition: transform var(--motion-fast) var(--motion-ease);
+}
+.window-frame button,
+.window-frame input,
+.window-frame select,
+.modal button,
+.modal input,
+.modal select,
+.modal textarea {
+  transition:
+    background-color var(--motion-fast) ease-out,
+    color var(--motion-fast) ease-out,
+    border-color var(--motion-fast) ease-out,
+    box-shadow var(--motion-fast) ease-out,
+    transform var(--motion-fast) var(--motion-ease);
+}
+.window-frame button:not(:disabled):active,
+.modal button:not(:disabled):active {
+  transform: translateY(1px);
+}
+.project-card:not(:disabled):hover,
+.b-world-card:hover,
+.more-grid > button:not(:disabled):hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+}
+.target-grid button[aria-pressed="true"],
+.loader-options button[aria-pressed="true"],
+.choice-list button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background-color: color-mix(in srgb, var(--accent) 9%, var(--panel));
+}
+.toggle i {
+  transition: transform var(--motion-fast) var(--motion-ease);
+}
+.tabs button,
+.segmented button,
+.download-categories button,
+.sidebar nav button {
+  transition:
+    background-color var(--motion-normal) ease-out,
+    color var(--motion-fast) ease-out,
+    border-color var(--motion-normal) ease-out;
+}
+.resource-grid[aria-busy="true"],
+.file-list[aria-busy="true"] {
+  opacity: 0.6;
+}
+.resource-grid,
+.file-list {
+  transition: opacity var(--motion-fast) ease-out;
+}
+.loading-feedback {
+  min-height: 22px;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 12px 0;
+}
+.motion-region .version-viewport {
+  transform: none;
+}
+.banner[role="alert"],
+.task-item.task-error {
+  animation: feedback-enter var(--motion-normal) var(--motion-ease);
+}
+@keyframes feedback-enter {
+  from {
+    opacity: 0.65;
+  }
+  to {
+    opacity: 1;
+  }
+}
+progress::-webkit-progress-value {
+  transition: width var(--motion-fast) linear;
+}
+:root[data-eco="on"] .project-card:hover,
+:root[data-eco="on"] .b-world-card:hover {
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

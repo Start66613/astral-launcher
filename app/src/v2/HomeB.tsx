@@ -1,3 +1,4 @@
+import { ModalPresence, MotionRegion, MotionDetails } from "./motion";
 import { useState } from "react";
 import { Badge, Icon } from "./icons";
 import { THEMES, launchState } from "./model";
@@ -323,7 +324,7 @@ export function HomeB() {
           </div>
         </section>
       </div>
-      {picker && (
+      <ModalPresence present={picker}>
         <Modal title="选择当前版本" close={() => setPicker(false)}>
           <div className="choice-list">
             {versions.map((version) => (
@@ -348,7 +349,7 @@ export function HomeB() {
             ))}
           </div>
         </Modal>
-      )}
+      </ModalPresence>
     </section>
   );
 }

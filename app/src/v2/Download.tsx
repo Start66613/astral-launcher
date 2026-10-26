@@ -1,3 +1,4 @@
+import { ModalPresence, MotionRegion, MotionDetails } from "./motion";
 import { useMemo, useRef, useState } from "react";
 import { Badge, Icon } from "./icons";
 import {
@@ -49,7 +50,7 @@ export function DownloadPage({ category }: { category: string }) {
 
 export function GameCatalog({ source }: { source?: typeof catalog }) {
   const listing = source || catalog;
-  const { navigate, versions, runtime } = usePreview();
+  const { navigate, goBack, versions, runtime } = usePreview();
   const [query, setQuery] = useState("");
   const [type, setType] = useState("all");
   const [folded, setFolded] = useState<string[]>([]);
@@ -185,93 +186,97 @@ export function GameCatalog({ source }: { source?: typeof catalog }) {
         <span>发布时间</span>
         <span>状态 / 操作</span>
       </div>
-      <div
-        className="version-viewport"
-        ref={viewport}
-        onScroll={(event) => setScroll(event.currentTarget.scrollTop)}
-        data-total-rows={rows.length}
-        aria-label="Minecraft 版本列表"
-      >
-        <div style={{ height: rows.length * rowHeight, position: "relative" }}>
-          {visible.map((row, offset) => (
-            <div
-              key={row.key}
-              className="virtual-row"
-              style={{
-                height: rowHeight,
-                transform: `translateY(${(start + offset) * rowHeight}px)`,
-              }}
-            >
-              {row.version ? (
-                <button
-                  className="catalog-version"
-                  onClick={() =>
-                    navigate(`game/${encodeURIComponent(row.version!.id)}`)
-                  }
-                >
-                  <Badge kind={kindIcon(row.version.kind)} />
-                  <span>
-                    <strong>{row.version.id}</strong>
-                    <small>
-                      {row.version.kind === "release"
-                        ? "正式版"
-                        : row.version.kind === "snapshot"
-                          ? "快照版 · 测试内容"
-                          : "历史版本"}
-                    </small>
-                  </span>
-                  <time>{date(row.version.released)}</time>
-                  <span>
-                    {versions.some(
-                      (version) => version.gameVersion === row.version!.id,
-                    ) ? (
-                      <span className="tag installed">
-                        <Icon name="installed" />
-                        {runtime ? "已安装" : "示例已安装"}
-                      </span>
-                    ) : (
-                      <span className="row-install">
-                        选择组件
-                        <Icon name="arrow" />
-                      </span>
-                    )}
-                  </span>
-                </button>
-              ) : (
-                <button
-                  className="catalog-group"
-                  aria-expanded={!folded.includes(row.group)}
-                  onClick={() => {
-                    setFolded((previous) =>
-                      previous.includes(row.group)
-                        ? previous.filter((id) => id !== row.group)
-                        : [...previous, row.group],
-                    );
-                    resetList();
-                  }}
-                >
-                  <Icon
-                    name="chevron"
-                    style={{
-                      transform: folded.includes(row.group)
-                        ? "rotate(-90deg)"
-                        : undefined,
+      <MotionRegion changeKey={type + folded.join("/")}>
+        <div
+          className="version-viewport"
+          ref={viewport}
+          onScroll={(event) => setScroll(event.currentTarget.scrollTop)}
+          data-total-rows={rows.length}
+          aria-label="Minecraft 版本列表"
+        >
+          <div
+            style={{ height: rows.length * rowHeight, position: "relative" }}
+          >
+            {visible.map((row, offset) => (
+              <div
+                key={row.key}
+                className="virtual-row"
+                style={{
+                  height: rowHeight,
+                  transform: `translateY(${(start + offset) * rowHeight}px)`,
+                }}
+              >
+                {row.version ? (
+                  <button
+                    className="catalog-version"
+                    onClick={() =>
+                      navigate(`game/${encodeURIComponent(row.version!.id)}`)
+                    }
+                  >
+                    <Badge kind={kindIcon(row.version.kind)} />
+                    <span>
+                      <strong>{row.version.id}</strong>
+                      <small>
+                        {row.version.kind === "release"
+                          ? "正式版"
+                          : row.version.kind === "snapshot"
+                            ? "快照版 · 测试内容"
+                            : "历史版本"}
+                      </small>
+                    </span>
+                    <time>{date(row.version.released)}</time>
+                    <span>
+                      {versions.some(
+                        (version) => version.gameVersion === row.version!.id,
+                      ) ? (
+                        <span className="tag installed">
+                          <Icon name="installed" />
+                          {runtime ? "已安装" : "示例已安装"}
+                        </span>
+                      ) : (
+                        <span className="row-install">
+                          选择组件
+                          <Icon name="arrow" />
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    className="catalog-group"
+                    aria-expanded={!folded.includes(row.group)}
+                    onClick={() => {
+                      setFolded((previous) =>
+                        previous.includes(row.group)
+                          ? previous.filter((id) => id !== row.group)
+                          : [...previous, row.group],
+                      );
+                      resetList();
                     }}
-                  />
-                  <strong>{row.title}</strong>
-                  <span>{row.count}</span>
-                </button>
-              )}
-            </div>
-          ))}
+                  >
+                    <Icon
+                      name="chevron"
+                      style={{
+                        transform: folded.includes(row.group)
+                          ? "rotate(-90deg)"
+                          : undefined,
+                      }}
+                    />
+                    <strong>{row.title}</strong>
+                    <span>{row.count}</span>
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {!filtered.length && (
+            <Empty
+              title="没有找到这个版本"
+              detail="试试完整版本号，或切换版本类型。"
+            />
+          )}
         </div>
-        {!filtered.length && (
-          <Empty
-            title="没有找到这个版本"
-            detail="试试完整版本号，或切换版本类型。"
-          />
-        )}
-      </div>
+      </MotionRegion>
       <p className="source-note">
         Mojang 官方清单{runtime ? " · 读取于" : "快照 ·"}{" "}
         {date(listing.capturedAt)} · {listing.versions.length}{" "}
@@ -286,7 +291,7 @@ export function GameCatalog({ source }: { source?: typeof catalog }) {
 }
 
 function ResourceCatalog({ category }: { category: string }) {
-  const { navigate, scenario } = usePreview();
+  const { navigate, goBack, scenario } = usePreview();
   const [query, setQuery] = useState("");
   const [loader, setLoader] = useState("all");
   const [channel, setChannel] = useState("all");
@@ -431,7 +436,7 @@ const LOADERS = [
   ["quilt", "Quilt"],
 ];
 export function GameInstaller({ version }: { version: string }) {
-  const { navigate, scenario } = usePreview();
+  const { navigate, goBack, scenario } = usePreview();
   const [loader, setLoader] = useState("game");
   const [build, setBuild] = useState(
     loaderCatalog.fabric.find((item) => item.stable)?.version || "",
@@ -458,7 +463,7 @@ export function GameInstaller({ version }: { version: string }) {
     scenario === "offline";
   return (
     <section className="content-page installer-page" data-page="game-installer">
-      <button className="breadcrumb" onClick={() => navigate("download/game")}>
+      <button className="breadcrumb" onClick={() => goBack("download/game")}>
         <Icon name="back" />
         下载 / 原版游戏
       </button>
@@ -558,7 +563,7 @@ export function GameInstaller({ version }: { version: string }) {
                     "暂无稳定标记"}{" "}
                   · 依据官方 stable 字段；仍需核心校验。
                 </p>
-                <details>
+                <MotionDetails>
                   <summary>
                     选择其他兼容构建 · {loaderCatalog.fabric.length} 个
                   </summary>
@@ -577,7 +582,7 @@ export function GameInstaller({ version }: { version: string }) {
                       ))}
                     </select>
                   </label>
-                </details>
+                </MotionDetails>
                 <a href={loaderCatalog.source} target="_blank" rel="noreferrer">
                   Fabric 官方元数据
                   <Icon name="arrow" />
@@ -794,7 +799,7 @@ export function GameInstaller({ version }: { version: string }) {
           <Icon name="arrow" />
         </button>
       </footer>
-      {confirm && (
+      <ModalPresence present={confirm}>
         <Modal title="确认安装 · 设计预览" close={() => setConfirm(false)}>
           <div className="banner">
             <Icon name="game" />
@@ -816,7 +821,7 @@ export function GameInstaller({ version }: { version: string }) {
             返回配置
           </button>
         </Modal>
-      )}
+      </ModalPresence>
     </section>
   );
 }
@@ -828,7 +833,7 @@ export function ResourceInstaller({ slug }: { slug: string }) {
   return <ResourceDetail key={slug} project={project} />;
 }
 function ResourceDetail({ project }: { project: Resource }) {
-  const { navigate, versions, scenario } = usePreview();
+  const { navigate, goBack, versions, scenario } = usePreview();
   const [targetId, setTargetId] = useState("");
   const [fileId, setFileId] = useState("");
   const [channel, setChannel] = useState("all");
@@ -876,10 +881,7 @@ function ResourceDetail({ project }: { project: Resource }) {
       className="content-page installer-page resource-detail-page"
       data-page="resource-installer"
     >
-      <button
-        className="breadcrumb"
-        onClick={() => navigate(`download/${kind}`)}
-      >
+      <button className="breadcrumb" onClick={() => goBack(`download/${kind}`)}>
         <Icon name="back" />
         下载 /{" "}
         {modpack
@@ -1179,7 +1181,7 @@ function ResourceDetail({ project }: { project: Resource }) {
           <Icon name="arrow" />
         </button>
       </footer>
-      {confirm && (
+      <ModalPresence present={confirm}>
         <Modal
           title={modpack ? "整合包向导 · 确认预览" : "资源安装 · 确认预览"}
           close={() => setConfirm(false)}
@@ -1202,7 +1204,7 @@ function ResourceDetail({ project }: { project: Resource }) {
             返回检查
           </button>
         </Modal>
-      )}
+      </ModalPresence>
     </section>
   );
 }

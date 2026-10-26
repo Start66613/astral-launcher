@@ -1,4 +1,13 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import {
+  MotionPolicy,
+  RouteDeck,
+  ModalPresence,
+  MotionRegion,
+  MotionDetails,
+  useMotionRouter,
+  useDialogMotion,
+} from "./motion";
 import { Badge, Icon } from "./icons";
 import {
   LAUNCH_STEPS,
@@ -94,19 +103,28 @@ export function Modal({
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
-  useEffect(() => {
-    const element = ref.current;
-    element?.showModal();
-    return () => element?.close();
-  }, []);
+  const closing = useDialogMotion(ref, close);
   return (
     <dialog
       ref={ref}
       className={`modal ${wide ? "wide" : ""}`}
       aria-labelledby={titleId}
+      inert={closing}
+      onClickCapture={(event) => {
+        if (closing) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
+      onSubmitCapture={(event) => {
+        if (closing) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
       onCancel={(event) => {
         event.preventDefault();
-        close();
+        if (!closing) close();
       }}
       onClick={(event) => {
         if (event.target !== event.currentTarget) return;
@@ -221,17 +239,22 @@ export default function App({ runtime }: { runtime?: LocalLauncher } = {}) {
     ? "astral.v2.appearance"
     : "astral.v2.preview.preferences";
   const [prefs, setPrefs] = useState(() => loadPreferences(storageKey));
-  const [route, setRoute] = useState(
-    (
-      {
-        launch: "home",
-        download: "download/game",
-        mods: "download/mod",
-      } as Record<string, string>
-    )[location.hash.slice(1)] ||
-      location.hash.slice(1) ||
-      "home",
-  );
+  const main = useRef<HTMLElement>(null);
+  const scrollPositions = useRef(new Map<string, number>());
+  const {
+    route,
+    navigate,
+    back: goBack,
+    direction,
+    revision,
+  } = useMotionRouter((from) => {
+    scrollPositions.current.set(from, main.current?.scrollTop || 0);
+  });
+  const [appEntering, setAppEntering] = useState(true);
+  useEffect(() => {
+    const timer = setTimeout(() => setAppEntering(false), 650);
+    return () => clearTimeout(timer);
+  }, []);
   const [scenario, setScenario] = useState(
     new URLSearchParams(location.search).get("scenario") || "normal",
   );
@@ -245,7 +268,6 @@ export default function App({ runtime }: { runtime?: LocalLauncher } = {}) {
   const [systemReduce, setSystemReduce] = useState(
     matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
-  const main = useRef<HTMLElement>(null);
   const [requestedPage, argument] = route.split("/");
   const page = [
     "home",
@@ -305,37 +327,6 @@ export default function App({ runtime }: { runtime?: LocalLauncher } = {}) {
         .catch((cause) => setNotice(parseApiError(cause).message));
     else if (runtime.mode === "legacy") runtime.legacy.select(id);
   }
-  function navigate(path: string) {
-    if (path === route) return;
-    history.pushState(null, "", `#${path}`);
-    setRoute(path);
-  }
-  useEffect(() => {
-    const handler = () =>
-      setRoute(
-        (
-          {
-            launch: "home",
-            download: "download/game",
-            mods: "download/mod",
-          } as Record<string, string>
-        )[location.hash.slice(1)] ||
-          location.hash.slice(1) ||
-          "home",
-      );
-    window.addEventListener("popstate", handler);
-    window.addEventListener("hashchange", handler);
-    return () => {
-      window.removeEventListener("popstate", handler);
-      window.removeEventListener("hashchange", handler);
-    };
-  }, []);
-  useEffect(() => {
-    main.current?.scrollTo(0, 0);
-    main.current
-      ?.querySelector<HTMLElement>("h1")
-      ?.focus({ preventScroll: true });
-  }, [route]);
   useEffect(() => {
     const media = matchMedia("(prefers-reduced-motion: reduce)");
     const update = () => setSystemReduce(media.matches);
@@ -388,245 +379,294 @@ export default function App({ runtime }: { runtime?: LocalLauncher } = {}) {
         void minimizeWindow().catch((cause) => setNotice(String(cause)));
     } catch {}
   }, [runtime?.core.phase, runtime?.core.session?.sessionId]);
+  function renderPage(path: string) {
+    const [requested, targetArgument] = path.split("/");
+    const targetPage = [
+      "home",
+      "versions",
+      "download",
+      "game",
+      "resource",
+      "settings",
+      "more",
+      ...(!runtime ? ["motion", "research"] : []),
+    ].includes(requested)
+      ? requested
+      : "home";
+    return (
+      <>
+        {targetPage === "home" && <HomeB />}
+        {targetPage === "versions" &&
+          (runtime ? <LiveVersions /> : <Versions />)}
+        {targetPage === "download" &&
+          (runtime ? (
+            <LiveDownload category={targetArgument || "game"} />
+          ) : (
+            <DownloadPage category={targetArgument || "game"} />
+          ))}
+        {targetPage === "game" &&
+          (runtime ? (
+            <LiveGameInstaller
+              key={targetArgument}
+              version={decodeURIComponent(targetArgument || "1.21.1")}
+            />
+          ) : (
+            <GameInstaller
+              version={decodeURIComponent(targetArgument || "1.21.1")}
+            />
+          ))}
+        {targetPage === "resource" &&
+          (runtime ? (
+            <LiveResource
+              key={targetArgument}
+              argument={targetArgument || "mod:sodium"}
+            />
+          ) : (
+            <ResourceInstaller slug={targetArgument || "sodium"} />
+          ))}
+        {targetPage === "settings" && <Settings />}
+        {targetPage === "motion" && !runtime && <MotionLab />}
+        {targetPage === "research" && !runtime && <Research />}
+        {targetPage === "more" && (runtime ? <LiveMore /> : <More />)}
+      </>
+    );
+  }
   const activeNav = ["download", "game", "resource"].includes(page)
     ? "download"
     : ["versions", "home"].includes(page)
       ? "home"
       : page;
   return (
-    <PreviewContext.Provider
+    <MotionPolicy
       value={{
-        runtime,
-        prefs,
-        setPrefs,
-        navigate,
-        versions,
-        currentId,
-        setCurrentId,
-        scenario,
-        setScenario,
-        openAccount: () => setAccountOpen(true),
-        openTasks: () => setTasksOpen(true),
-        openDiagnostics: () =>
-          runtime
-            ? setDiagnosticsOpen(true)
-            : setNotice("设计预览不读取或上传日志。"),
-        notify: setNotice,
-        launchIndex,
-        setLaunchIndex,
-        launchFailure,
-        setLaunchFailure,
+        enabled: prefs.motion && !systemReduce,
+        eco: prefs.eco || navigator.hardwareConcurrency <= 4,
       }}
     >
-      {!runtime && (
-        <div className="review-bar">
-          <span className="review-label">
-            <i />
-            设计预览 <b>示例档案 · 不读写游戏文件</b>
-          </span>
-          <nav aria-label="设计评审">
-            <button
-              aria-pressed={!["motion", "research"].includes(page)}
-              onClick={() => navigate("home")}
-            >
-              界面
-            </button>
-            <button
-              aria-pressed={page === "motion"}
-              onClick={() => navigate("motion")}
-            >
-              三种启动动效
-            </button>
-            <button
-              aria-pressed={page === "research"}
-              onClick={() => navigate("research")}
-            >
-              研究与差距
-            </button>
-          </nav>
-          <label>
-            场景
-            <select
-              aria-label="验收场景"
-              value={scenario}
-              onChange={(event) => setScenario(event.target.value)}
-            >
-              {[
-                ["normal", "正常预览"],
-                ["empty", "无版本"],
-                ["no-account", "无账号"],
-                ["offline", "无网络"],
-                ["download-error", "下载失败"],
-                ["launch-error", "启动失败"],
-                ["running", "游戏运行中"],
-                ["conflict", "兼容性冲突"],
-              ].map(([id, name]) => (
-                <option key={id} value={id}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      )}
-      {runtime && !inTauri && (
-        <div className="browser-note">
-          浏览器预览 · 未连接本地核心；不生成游戏版本、会话或任务。
-        </div>
-      )}
-      <div
-        className={
-          "window-frame layout-b" + (page === "home" ? " is-home" : "")
-        }
+      <PreviewContext.Provider
+        value={{
+          runtime,
+          prefs,
+          setPrefs,
+          navigate,
+          goBack,
+          versions,
+          currentId,
+          setCurrentId,
+          scenario,
+          setScenario,
+          openAccount: () => setAccountOpen(true),
+          openTasks: () => setTasksOpen(true),
+          openDiagnostics: () =>
+            runtime
+              ? setDiagnosticsOpen(true)
+              : setNotice("设计预览不读取或上传日志。"),
+          notify: setNotice,
+          launchIndex,
+          setLaunchIndex,
+          launchFailure,
+          setLaunchFailure,
+        }}
       >
-        <WindowBar />
-        <aside className="sidebar">
-          <a
-            className="brand"
-            href="#home"
-            onClick={(event) => {
-              event.preventDefault();
-              navigate("home");
-            }}
-          >
-            <span className="brand-mark">
-              <Icon name="star" />
+        {!runtime && (
+          <div className="review-bar">
+            <span className="review-label">
+              <i />
+              设计预览 <b>示例档案 · 不读写游戏文件</b>
             </span>
-            <span>
-              Astral<small>LAUNCHER</small>
-            </span>
-          </a>
-          <nav aria-label="主导航">
-            {[
-              ["home", "play", "启动"],
-              ["download", "download", "下载"],
-              ["settings", "settings", "设置"],
-              ["more", "more", "更多"],
-            ].map(([path, icon, label]) => (
+            <nav aria-label="设计评审">
               <button
-                key={path}
-                className={activeNav === path ? "active" : ""}
-                aria-current={activeNav === path ? "page" : undefined}
-                title={label}
-                onClick={() =>
-                  navigate(path === "download" ? "download/game" : path)
-                }
+                aria-pressed={!["motion", "research"].includes(page)}
+                onClick={() => navigate("home")}
               >
-                <Icon name={icon} />
-                <span>{label}</span>
-                <i />
+                界面
               </button>
-            ))}
-          </nav>
-          <div className="sidebar-bottom">
-            <button
-              onClick={() =>
-                runtime
-                  ? setDiagnosticsOpen(true)
-                  : setNotice(
-                      "AI 诊断：先预览与脱敏日志；设计预览不读取或上传日志。",
-                    )
-              }
-              title="AI 诊断"
-            >
-              <Icon name="star" />
-              <span>AI 诊断</span>
-            </button>
-            <button onClick={() => setTasksOpen(true)} title="下载与任务">
-              <Icon name="download" />
-              <span>任务</span>
-            </button>
-            <button
-              className="sidebar-account"
-              onClick={() => setAccountOpen(true)}
-              title="切换账号"
-              aria-label="切换账号"
-            >
-              <span className="avatar">
-                <Icon name="user" />
-              </span>
-            </button>
+              <button
+                aria-pressed={page === "motion"}
+                onClick={() => navigate("motion")}
+              >
+                三种启动动效
+              </button>
+              <button
+                aria-pressed={page === "research"}
+                onClick={() => navigate("research")}
+              >
+                研究与差距
+              </button>
+            </nav>
+            <label>
+              场景
+              <select
+                aria-label="验收场景"
+                value={scenario}
+                onChange={(event) => setScenario(event.target.value)}
+              >
+                {[
+                  ["normal", "正常预览"],
+                  ["empty", "无版本"],
+                  ["no-account", "无账号"],
+                  ["offline", "无网络"],
+                  ["download-error", "下载失败"],
+                  ["launch-error", "启动失败"],
+                  ["running", "游戏运行中"],
+                  ["conflict", "兼容性冲突"],
+                ].map(([id, name]) => (
+                  <option key={id} value={id}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
-        </aside>
-        <div className="workspace">
-          <Artwork />
-          <main ref={main} id="main" className={`main page-${page}`}>
-            {runtime?.error && (
-              <div className="banner error" role="alert">
-                暂时无法连接游戏服务：{runtime.error}
-                <button onClick={() => void runtime.refresh()}>重新连接</button>
-              </div>
-            )}
-            {!runtime && scenario === "offline" && (
-              <div className="banner warn">
-                <Icon name="warning" />
-                网络不可用，正在展示已保存的公开清单快照。安装需恢复连接。
-              </div>
-            )}
-            {page === "home" && <HomeB />}
-            {page === "versions" && (runtime ? <LiveVersions /> : <Versions />)}
-            {page === "download" &&
-              (runtime ? (
-                <LiveDownload category={argument || "game"} />
-              ) : (
-                <DownloadPage category={argument || "game"} />
-              ))}
-            {page === "game" &&
-              (runtime ? (
-                <LiveGameInstaller
-                  key={argument}
-                  version={decodeURIComponent(argument || "1.21.1")}
-                />
-              ) : (
-                <GameInstaller
-                  version={decodeURIComponent(argument || "1.21.1")}
-                />
-              ))}
-            {page === "resource" &&
-              (runtime ? (
-                <LiveResource
-                  key={argument}
-                  argument={argument || "mod:sodium"}
-                />
-              ) : (
-                <ResourceInstaller slug={argument || "sodium"} />
-              ))}
-            {page === "settings" && <Settings />}
-            {page === "motion" && !runtime && <MotionLab />}
-            {page === "research" && !runtime && <Research />}
-            {page === "more" && (runtime ? <LiveMore /> : <More />)}
-          </main>
-        </div>
-      </div>
-      {diagnosticsOpen && (
-        <LiveDiagnostics close={() => setDiagnosticsOpen(false)} />
-      )}
-      {accountOpen && <Account close={() => setAccountOpen(false)} />}
-      {tasksOpen &&
-        (runtime ? (
-          <LiveTasks close={() => setTasksOpen(false)} />
-        ) : (
-          <Tasks close={() => setTasksOpen(false)} />
-        ))}
-      {notice && (
-        <Modal
-          title={runtime ? "操作说明" : "预览说明"}
-          close={() => setNotice("")}
+        )}
+        {runtime && !inTauri && (
+          <div className="browser-note">
+            浏览器预览 · 未连接本地核心；不生成游戏版本、会话或任务。
+          </div>
+        )}
+        <div
+          data-app-enter={appEntering && prefs.intro}
+          className={
+            "window-frame layout-b" + (page === "home" ? " is-home" : "")
+          }
         >
-          <p className="body-copy">{notice}</p>
-          <button className="button primary full" onClick={() => setNotice("")}>
-            知道了
-          </button>
-        </Modal>
-      )}
-    </PreviewContext.Provider>
+          <WindowBar />
+          <aside className="sidebar">
+            <a
+              className="brand"
+              href="#home"
+              onClick={(event) => {
+                event.preventDefault();
+                navigate("home");
+              }}
+            >
+              <span className="brand-mark">
+                <Icon name="star" />
+              </span>
+              <span>
+                Astral<small>LAUNCHER</small>
+              </span>
+            </a>
+            <nav aria-label="主导航">
+              {[
+                ["home", "play", "启动"],
+                ["download", "download", "下载"],
+                ["settings", "settings", "设置"],
+                ["more", "more", "更多"],
+              ].map(([path, icon, label]) => (
+                <button
+                  key={path}
+                  className={activeNav === path ? "active" : ""}
+                  aria-current={activeNav === path ? "page" : undefined}
+                  title={label}
+                  onClick={() =>
+                    navigate(path === "download" ? "download/game" : path)
+                  }
+                >
+                  <Icon name={icon} />
+                  <span>{label}</span>
+                  <i />
+                </button>
+              ))}
+            </nav>
+            <div className="sidebar-bottom">
+              <button
+                onClick={() =>
+                  runtime
+                    ? setDiagnosticsOpen(true)
+                    : setNotice(
+                        "AI 诊断：先预览与脱敏日志；设计预览不读取或上传日志。",
+                      )
+                }
+                title="AI 诊断"
+              >
+                <Icon name="star" />
+                <span>AI 诊断</span>
+              </button>
+              <button onClick={() => setTasksOpen(true)} title="下载与任务">
+                <Icon name="download" />
+                <span>任务</span>
+              </button>
+              <button
+                className="sidebar-account"
+                onClick={() => setAccountOpen(true)}
+                title="切换账号"
+                aria-label="切换账号"
+              >
+                <span className="avatar">
+                  <Icon name="user" />
+                </span>
+              </button>
+            </div>
+          </aside>
+          <div className="workspace">
+            <Artwork />
+            <main ref={main} id="main" className={`main page-${page}`}>
+              {runtime?.error && (
+                <div className="banner error" role="alert">
+                  暂时无法连接游戏服务：{runtime.error}
+                  <button onClick={() => void runtime.refresh()}>
+                    重新连接
+                  </button>
+                </div>
+              )}
+              {!runtime && scenario === "offline" && (
+                <div className="banner warn">
+                  <Icon name="warning" />
+                  网络不可用，正在展示已保存的公开清单快照。安装需恢复连接。
+                </div>
+              )}
+              <RouteDeck
+                route={route}
+                direction={direction}
+                revision={revision}
+                main={main}
+                scroll={scrollPositions.current}
+                intro={prefs.intro}
+                render={renderPage}
+              />
+            </main>
+          </div>
+        </div>
+        <ModalPresence present={diagnosticsOpen}>
+          <LiveDiagnostics close={() => setDiagnosticsOpen(false)} />
+        </ModalPresence>
+        <ModalPresence present={accountOpen}>
+          <Account close={() => setAccountOpen(false)} />
+        </ModalPresence>
+        <ModalPresence present={tasksOpen}>
+          {runtime ? (
+            <LiveTasks close={() => setTasksOpen(false)} />
+          ) : (
+            <Tasks close={() => setTasksOpen(false)} />
+          )}
+        </ModalPresence>
+        <ModalPresence present={!!notice}>
+          <Modal
+            title={runtime ? "操作说明" : "预览说明"}
+            close={() => setNotice("")}
+          >
+            <p className="body-copy">{notice}</p>
+            <button
+              className="button primary full"
+              onClick={() => setNotice("")}
+            >
+              知道了
+            </button>
+          </Modal>
+        </ModalPresence>
+      </PreviewContext.Provider>
+    </MotionPolicy>
   );
 }
 
 function Account({ close }: { close: () => void }) {
   const { scenario, runtime } = usePreview();
   const [tab, setTab] = useState("offline");
-  const [username, setUsername] = useState(runtime?.config?.username || "");
+  const [username, setUsername] = useState(
+    runtime?.config?.username ||
+      (scenario === "no-account" ? "" : "ForestWalker"),
+  );
   const [saving, setSaving] = useState(false);
   const [profileError, setProfileError] = useState("");
   async function saveProfile() {
@@ -662,60 +702,55 @@ function Account({ close }: { close: () => void }) {
           </button>
         ))}
       </div>
-      {tab === "offline" ? (
-        <div className="account-detail">
-          <span className="avatar large">
-            <Icon name="user" />
-          </span>
-          <h3>
-            {runtime
-              ? runtime.config?.username || "尚未选择离线档案"
-              : scenario === "no-account"
-                ? "尚未选择离线档案"
-                : "ForestWalker"}
-          </h3>
-          <p>离线档案 · 未验证 Microsoft 身份</p>
-          <label className="field">
-            离线用户名
-            <input
-              value={runtime ? username : undefined}
-              onChange={(event) => setUsername(event.target.value)}
-              defaultValue={
-                runtime
-                  ? undefined
-                  : scenario === "no-account"
-                    ? ""
-                    : "ForestWalker"
-              }
-              placeholder="输入你的名字"
-              maxLength={16}
-            />
-          </label>
-          {profileError && (
-            <p className="error-text" role="alert">
-              {profileError}
+      <MotionRegion changeKey={tab}>
+        {tab === "offline" ? (
+          <div className="account-detail">
+            <span className="avatar large">
+              <Icon name="user" />
+            </span>
+            <h3>
+              {runtime
+                ? runtime.config?.username || "尚未选择离线档案"
+                : scenario === "no-account"
+                  ? "尚未选择离线档案"
+                  : "ForestWalker"}
+            </h3>
+            <p>离线档案 · 未验证 Microsoft 身份</p>
+            <label className="field">
+              离线用户名
+              <input
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="输入你的名字"
+                maxLength={16}
+              />
+            </label>
+            {profileError && (
+              <p className="error-text" role="alert">
+                {profileError}
+              </p>
+            )}
+            <button
+              className="button primary full"
+              disabled={!!runtime && (saving || !inTauri)}
+              onClick={runtime ? () => void saveProfile() : close}
+            >
+              {runtime ? "保存离线档案" : "返回预览"}
+            </button>
+          </div>
+        ) : (
+          <div className="account-detail">
+            <Badge kind="user" large />
+            <h3>Microsoft 未登录</h3>
+            <p>
+              授权功能暂不可用。接入官方授权后，这里才能显示经过验证的正版账号。
             </p>
-          )}
-          <button
-            className="button primary full"
-            disabled={!!runtime && (saving || !inTauri)}
-            onClick={runtime ? () => void saveProfile() : close}
-          >
-            {runtime ? "保存离线档案" : "返回预览"}
-          </button>
-        </div>
-      ) : (
-        <div className="account-detail">
-          <Badge kind="user" large />
-          <h3>Microsoft 未登录</h3>
-          <p>
-            授权功能暂不可用。接入官方授权后，这里才能显示经过验证的正版账号。
-          </p>
-          <button className="button primary full" disabled>
-            登录 Microsoft
-          </button>
-        </div>
-      )}
+            <button className="button primary full" disabled>
+              登录 Microsoft
+            </button>
+          </div>
+        )}
+      </MotionRegion>
     </Modal>
   );
 }
@@ -726,7 +761,7 @@ function Settings() {
     if (key === "theme" || (key === "randomOnStartup" && value)) {
       const url = new URL(location.href);
       url.searchParams.delete("theme");
-      history.replaceState(null, "", url);
+      history.replaceState(history.state, "", url);
     }
     setPrefs((old) => ({ ...old, [key]: value }));
   };
@@ -946,7 +981,8 @@ function Settings() {
 }
 
 function Versions() {
-  const { versions, currentId, setCurrentId, navigate, notify } = usePreview();
+  const { versions, currentId, setCurrentId, navigate, goBack, notify } =
+    usePreview();
   const [selected, setSelected] = useState(currentId);
   const [tab, setTab] = useState("overview");
   const [query, setQuery] = useState("");
@@ -954,7 +990,7 @@ function Versions() {
     versions.find((version) => version.id === selected) || versions[0];
   return (
     <section className="content-page" data-page="versions">
-      <button className="breadcrumb" onClick={() => navigate("home")}>
+      <button className="breadcrumb" onClick={() => goBack("home")}>
         <Icon name="back" />
         启动 / 我的版本
       </button>
@@ -1047,204 +1083,211 @@ function Versions() {
                 </button>
               ))}
             </div>
-            {current.shared && (
-              <div className="banner warn">
-                <Icon name="warning" />
-                此版本使用共享游戏目录。为了保护其他版本，不提供改名、删除或目录内写入。
-              </div>
-            )}
-            {tab === "overview" && (
-              <>
-                <div className="detail-grid">
-                  <div>
-                    <span>游戏版本</span>
-                    <strong>{current.gameVersion}</strong>
-                  </div>
-                  <div>
-                    <span>加载器</span>
-                    <strong>
-                      {current.loader === "game" ? "纯净原版" : current.loader}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Mod 数量</span>
-                    <strong>
-                      {current.mods} <small>个 · 示例</small>
-                    </strong>
-                  </div>
-                  <div>
-                    <span>文件位置</span>
-                    <strong>
-                      {current.shared ? "共享游戏目录" : "独立游戏目录"}
-                    </strong>
-                  </div>
+            <MotionRegion changeKey={tab}>
+              {current.shared && (
+                <div className="banner warn">
+                  <Icon name="warning" />
+                  此版本使用共享游戏目录。为了保护其他版本，不提供改名、删除或目录内写入。
                 </div>
-                <div className="banner">
-                  <Icon name="folder" />
-                  {current.shared
-                    ? "此目录里的存档和配置会被其他共享目录版本使用。"
-                    : "这个版本的 mods、config、saves 与其他独立版本分开保存。"}
-                </div>
-                <div className="action-grid">
-                  <button
-                    className="button secondary"
-                    onClick={() =>
-                      notify(
-                        "预览不会打开真实目录。正式实现只使用 Rust 返回的当前版本路径。",
-                      )
-                    }
-                  >
-                    打开游戏目录
-                  </button>
-                  <button
-                    className="button secondary"
-                    disabled={current.shared}
-                    onClick={() =>
-                      notify(
-                        "名称编辑会仅提交变化字段；此处为设计评审，不修改真实版本。",
-                      )
-                    }
-                  >
-                    编辑名称
-                  </button>
-                  <button
-                    className="button secondary"
-                    disabled
-                    title="核心尚未提供复制命令"
-                  >
-                    复制配置 · 待支持
-                  </button>
-                  <button
-                    className="button danger"
-                    disabled={current.shared}
-                    onClick={() =>
-                      notify(
-                        "删除前须显示版本名和目录，二次确认；默认移入应用回收站，运行中或任务中拒绝删除。此预览不删除文件。",
-                      )
-                    }
-                  >
-                    删除与数据保护
-                  </button>
-                </div>
-              </>
-            )}
-            {tab === "components" && (
-              <>
-                <h3>游戏组件</h3>
-                <div className="file-row">
-                  <Badge kind={current.loader} />
-                  <span>
-                    <strong>
-                      {current.loader === "game"
-                        ? "Minecraft 原版"
-                        : current.loader}
-                    </strong>
-                    <small>
-                      {current.loaderVersion || current.gameVersion}
-                    </small>
-                  </span>
-                  <button
-                    className="button secondary"
-                    disabled={current.shared}
-                    onClick={() => navigate(`game/${current.gameVersion}`)}
-                  >
-                    安装组件
-                  </button>
-                </div>
-              </>
-            )}
-            {tab === "mods" && (
-              <>
-                <header className="section-heading">
-                  <h3>当前版本的 Mod</h3>
-                  <button
-                    className="text-button"
-                    onClick={() => navigate("download/mod")}
-                  >
-                    获取 Mod
-                    <Icon name="arrow" />
-                  </button>
-                </header>
-                {current.shared ? (
-                  <p className="muted">共享目录版本不提供 Mod 写入操作。</p>
-                ) : (
-                  <>
-                    <div className="file-row">
-                      <Badge kind="mod" />
-                      <span>
-                        <strong>Sodium</strong>
-                        <small>示例条目 · 具体文件版本以扫描结果为准</small>
-                      </span>
-                      <span className="tag">启用</span>
+              )}
+              {tab === "overview" && (
+                <>
+                  <div className="detail-grid">
+                    <div>
+                      <span>游戏版本</span>
+                      <strong>{current.gameVersion}</strong>
                     </div>
-                    <div className="file-row">
-                      <Badge kind="api" />
-                      <span>
-                        <strong>Fabric API</strong>
-                        <small>示例条目 · 不代表真实已安装</small>
-                      </span>
-                      <span className="tag">启用</span>
+                    <div>
+                      <span>加载器</span>
+                      <strong>
+                        {current.loader === "game"
+                          ? "纯净原版"
+                          : current.loader}
+                      </strong>
                     </div>
-                  </>
-                )}
-              </>
-            )}
-            {tab === "saves" && (
-              <div className="action-grid">
-                {["存档", "资源包", "光影包", "截图"].map((name) => (
-                  <button
-                    key={name}
-                    className="resource-folder"
-                    onClick={() =>
-                      notify(
-                        `${name}管理会使用当前版本的 Rust 返回目录；预览不读取真实文件。`,
-                      )
-                    }
-                  >
+                    <div>
+                      <span>Mod 数量</span>
+                      <strong>
+                        {current.mods} <small>个 · 示例</small>
+                      </strong>
+                    </div>
+                    <div>
+                      <span>文件位置</span>
+                      <strong>
+                        {current.shared ? "共享游戏目录" : "独立游戏目录"}
+                      </strong>
+                    </div>
+                  </div>
+                  <div className="banner">
                     <Icon name="folder" />
-                    <strong>{name}</strong>
-                    <Icon name="arrow" />
+                    {current.shared
+                      ? "此目录里的存档和配置会被其他共享目录版本使用。"
+                      : "这个版本的 mods、config、saves 与其他独立版本分开保存。"}
+                  </div>
+                  <div className="action-grid">
+                    <button
+                      className="button secondary"
+                      onClick={() =>
+                        notify(
+                          "预览不会打开真实目录。正式实现只使用 Rust 返回的当前版本路径。",
+                        )
+                      }
+                    >
+                      打开游戏目录
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={current.shared}
+                      onClick={() =>
+                        notify(
+                          "名称编辑会仅提交变化字段；此处为设计评审，不修改真实版本。",
+                        )
+                      }
+                    >
+                      编辑名称
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled
+                      title="核心尚未提供复制命令"
+                    >
+                      复制配置 · 待支持
+                    </button>
+                    <button
+                      className="button danger"
+                      disabled={current.shared}
+                      onClick={() =>
+                        notify(
+                          "删除前须显示版本名和目录，二次确认；默认移入应用回收站，运行中或任务中拒绝删除。此预览不删除文件。",
+                        )
+                      }
+                    >
+                      删除与数据保护
+                    </button>
+                  </div>
+                </>
+              )}
+              {tab === "components" && (
+                <>
+                  <h3>游戏组件</h3>
+                  <div className="file-row">
+                    <Badge kind={current.loader} />
+                    <span>
+                      <strong>
+                        {current.loader === "game"
+                          ? "Minecraft 原版"
+                          : current.loader}
+                      </strong>
+                      <small>
+                        {current.loaderVersion || current.gameVersion}
+                      </small>
+                    </span>
+                    <button
+                      className="button secondary"
+                      disabled={current.shared}
+                      onClick={() => navigate(`game/${current.gameVersion}`)}
+                    >
+                      安装组件
+                    </button>
+                  </div>
+                </>
+              )}
+              {tab === "mods" && (
+                <>
+                  <header className="section-heading">
+                    <h3>当前版本的 Mod</h3>
+                    <button
+                      className="text-button"
+                      onClick={() => navigate("download/mod")}
+                    >
+                      获取 Mod
+                      <Icon name="arrow" />
+                    </button>
+                  </header>
+                  {current.shared ? (
+                    <p className="muted">共享目录版本不提供 Mod 写入操作。</p>
+                  ) : (
+                    <>
+                      <div className="file-row">
+                        <Badge kind="mod" />
+                        <span>
+                          <strong>Sodium</strong>
+                          <small>示例条目 · 具体文件版本以扫描结果为准</small>
+                        </span>
+                        <span className="tag">启用</span>
+                      </div>
+                      <div className="file-row">
+                        <Badge kind="api" />
+                        <span>
+                          <strong>Fabric API</strong>
+                          <small>示例条目 · 不代表真实已安装</small>
+                        </span>
+                        <span className="tag">启用</span>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+              {tab === "saves" && (
+                <div className="action-grid">
+                  {["存档", "资源包", "光影包", "截图"].map((name) => (
+                    <button
+                      key={name}
+                      className="resource-folder"
+                      onClick={() =>
+                        notify(
+                          `${name}管理会使用当前版本的 Rust 返回目录；预览不读取真实文件。`,
+                        )
+                      }
+                    >
+                      <Icon name="folder" />
+                      <strong>{name}</strong>
+                      <Icon name="arrow" />
+                    </button>
+                  ))}
+                </div>
+              )}
+              {tab === "runtime" && (
+                <>
+                  <h3>只为这个版本设置</h3>
+                  <label className="field">
+                    Java
+                    <input
+                      readOnly
+                      value="自动管理（手动 Java 路径暂未生效）"
+                    />
+                  </label>
+                  <label className="field">
+                    游戏内存
+                    <select defaultValue="auto">
+                      <option value="auto">自动分配</option>
+                      <option>4096 MB · 示例</option>
+                      <option>6144 MB · 示例</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    JVM 参数
+                    <textarea placeholder="留空使用默认参数；示例编辑不写入游戏配置" />
+                  </label>
+                  <button
+                    className="button secondary"
+                    onClick={() =>
+                      notify(
+                        "这里仅预览编辑表单；正式阶段使用 update_instance，只提交变化字段。",
+                      )
+                    }
+                  >
+                    预览保存说明
                   </button>
-                ))}
-              </div>
-            )}
-            {tab === "runtime" && (
-              <>
-                <h3>只为这个版本设置</h3>
-                <label className="field">
-                  Java
-                  <input readOnly value="自动管理（手动 Java 路径暂未生效）" />
-                </label>
-                <label className="field">
-                  游戏内存
-                  <select defaultValue="auto">
-                    <option value="auto">自动分配</option>
-                    <option>4096 MB · 示例</option>
-                    <option>6144 MB · 示例</option>
-                  </select>
-                </label>
-                <label className="field">
-                  JVM 参数
-                  <textarea placeholder="留空使用默认参数；示例编辑不写入游戏配置" />
-                </label>
-                <button
-                  className="button secondary"
-                  onClick={() =>
-                    notify(
-                      "这里仅预览编辑表单；正式阶段使用 update_instance，只提交变化字段。",
-                    )
-                  }
-                >
-                  预览保存说明
-                </button>
-              </>
-            )}
-            {tab === "logs" && (
-              <Empty
-                title="日志由你选择分享"
-                detail="读取日志、脱敏预览和导出后续接入；预览不会读取你的游戏日志。"
-              />
-            )}
+                </>
+              )}
+              {tab === "logs" && (
+                <Empty
+                  title="日志由你选择分享"
+                  detail="读取日志、脱敏预览和导出后续接入；预览不会读取你的游戏日志。"
+                />
+              )}
+            </MotionRegion>
           </div>
         </div>
       )}
@@ -1461,7 +1504,7 @@ function MotionLab() {
           </span>
         </div>
       </div>
-      <details className="trace">
+      <MotionDetails className="trace">
         <summary>查看当前示例事件（仅评审）</summary>
         <pre>
           {JSON.stringify(
@@ -1470,7 +1513,7 @@ function MotionLab() {
             2,
           )}
         </pre>
-      </details>
+      </MotionDetails>
     </section>
   );
 }

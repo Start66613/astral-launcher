@@ -2682,16 +2682,16 @@ progress:indeterminate::-webkit-progress-bar {
   background-size: 18px 18px;
   mask-image: radial-gradient(ellipse, #000, transparent 70%);
 }
-:root[data-intro="on"][data-motion="on"] .sidebar nav > button {
+:root[data-intro="on"][data-motion="on"] [data-app-enter="true"] .sidebar nav > button {
   animation: entrance 0.35s ease-out both;
 }
-:root[data-intro="on"][data-motion="on"] .sidebar nav > button:nth-child(2) {
+:root[data-intro="on"][data-motion="on"] [data-app-enter="true"] .sidebar nav > button:nth-child(2) {
   animation-delay: 30ms;
 }
-:root[data-intro="on"][data-motion="on"] .sidebar nav > button:nth-child(3) {
+:root[data-intro="on"][data-motion="on"] [data-app-enter="true"] .sidebar nav > button:nth-child(3) {
   animation-delay: 60ms;
 }
-:root[data-intro="on"][data-motion="on"] .sidebar nav > button:nth-child(4) {
+:root[data-intro="on"][data-motion="on"] [data-app-enter="true"] .sidebar nav > button:nth-child(4) {
   animation-delay: 90ms;
 }
 @keyframes firefly {
@@ -2753,15 +2753,13 @@ progress:indeterminate::-webkit-progress-bar {
     transform: translateY(0);
   }
 }
-:root[data-intro="on"][data-motion="on"] .brand {
+:root[data-intro="on"][data-motion="on"] [data-app-enter="true"] .brand {
   animation: entrance 0.35s ease-out both;
 }
-:root[data-intro="on"][data-motion="on"] .sidebar nav {
+:root[data-intro="on"][data-motion="on"] [data-app-enter="true"] .sidebar nav {
   animation: entrance 0.45s ease-out both;
 }
-:root[data-intro="on"][data-motion="on"] .workspace {
-  animation: entrance 0.55s ease-out both;
-}
+
 :root[data-eco="on"] .launch-effect i:nth-of-type(n + 4) {
   display: none;
 }

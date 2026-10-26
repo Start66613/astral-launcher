@@ -21,6 +21,7 @@ export type PreviewState = {
   prefs: Preferences;
   setPrefs: Dispatch<SetStateAction<Preferences>>;
   navigate: (path: string) => void;
+  goBack: (fallback: string) => void;
   versions: PreviewVersion[];
   currentId: string;
   setCurrentId: (id: string) => void;

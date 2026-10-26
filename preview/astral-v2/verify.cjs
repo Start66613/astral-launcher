@@ -16,7 +16,7 @@ async function test(name, run) { try { await run(); results.push({ name, passed:
   const page = await context.newPage();
   page.setDefaultTimeout(6000);
   page.on('pageerror', error => errors.push(error.message));
-  const goto = async (route = 'home', query = '') => { await page.goto(`http://127.0.0.1:5202/?${query}#${route}`); await page.locator('h1').waitFor(); await page.waitForTimeout(600); assert.equal(await page.locator('vite-error-overlay').count(), 0); };
+  const goto = async (route = 'home', query = '') => { await page.goto(`http://127.0.0.1:5202/?${query}#${route}`); await page.locator('.route-panel:not([hidden]) h1').waitFor(); await page.waitForTimeout(600); assert.equal(await page.locator('vite-error-overlay').count(), 0); };
   const shot = async name => page.screenshot({ path: path.join(out, `${name}.png`) });
   const overflow = () => page.evaluate(() => ({ body: document.documentElement.scrollWidth > innerWidth, main: document.querySelector('main').scrollWidth > document.querySelector('main').clientWidth + 2 }));
   for (const [width, height] of [[1080, 640], [1280, 800], [1600, 900]]) {
@@ -53,7 +53,7 @@ async function test(name, run) { try { await run(); results.push({ name, passed:
     await page.getByRole('button', { name: /林野手札 暖纸白/ }).click();
     await page.getByRole('switch', { name: '森林壁纸' }).click();
     await page.getByRole('switch', { name: '界面动画', exact: true }).click();
-    await page.goto('http://127.0.0.1:5202/#settings'); await page.locator('h1').waitFor();
+    await page.goto('http://127.0.0.1:5202/#settings'); await page.locator('.route-panel:not([hidden]) h1').waitFor();
     assert.equal(await page.locator('html').getAttribute('data-theme'), 'fieldnotes');
     assert.equal(await page.locator('html').getAttribute('data-motion'), 'off');
     assert.equal(await page.locator('.ambient-art img.on').count(), 0);
@@ -64,7 +64,7 @@ async function test(name, run) { try { await run(); results.push({ name, passed:
     await goto('home', 'theme=nightfall&mode=dark'); await page.getByRole('button', { name: '切换', exact: true }).click();
     await page.locator('dialog .choice-list button').filter({ hasText: '旧日时光' }).click();
     assert.match(await page.locator('.current-version').innerText(), /旧日时光/);
-    assert.equal(await page.locator('dialog').count(), 0);
+    await page.locator('dialog').waitFor({state:'detached'}); assert.equal(await page.locator('dialog').count(), 0);
   });
   await test('account state remains explicitly offline / Microsoft unavailable', async () => {
     await goto('home', 'scenario=no-account'); await page.locator('.account-control').click();
@@ -104,24 +104,24 @@ async function test(name, run) { try { await run(); results.push({ name, passed:
   await test('resource chooses target then exact compatible file; shared target blocked', async () => {
     await goto('resource/sodium');
     assert.equal(await page.getByRole('button', { name: /确认安装/ }).isDisabled(), true);
-    assert.equal(await page.locator('.target-grid button').filter({ hasText: '旧日时光' }).isDisabled(), true);
-    await page.locator('.target-grid button').filter({ hasText: '林间小径' }).click();
-    assert(await page.locator('.file-option').count() >= 2);
-    await page.locator('.file-option').nth(1).click();
+    assert.equal(await page.locator('.route-panel:not([hidden]) .target-grid button').filter({ hasText: '旧日时光' }).isDisabled(), true);
+    await page.locator('.route-panel:not([hidden]) .target-grid button').filter({ hasText: '林间小径' }).click();
+    assert(await page.locator('.route-panel:not([hidden]) .file-option').count() >= 2);
+    await page.locator('.route-panel:not([hidden]) .file-option').nth(1).click();
     assert.equal(await page.getByRole('button', { name: /确认安装/ }).isDisabled(), false);
     await shot('resource-sodium-file-choice');
     await page.getByRole('button', { name: /确认安装/ }).click();
     assert.match(await page.locator('dialog').innerText(), /尚无核心安全安装计划/); await page.keyboard.press('Escape');
   });
   await test('datapack requires world; modpack has separate independent version flow', async () => {
-    await goto('resource/terralith'); await page.locator('.target-grid button').filter({ hasText: '林间小径' }).click();
-    await page.locator('.file-option').first().click();
+    await goto('resource/terralith'); await page.locator('.route-panel:not([hidden]) .target-grid button').filter({ hasText: '林间小径' }).click();
+    await page.locator('.route-panel:not([hidden]) .file-option').first().click();
     assert.equal(await page.getByRole('button', { name: /确认安装/ }).isDisabled(), true);
     await page.getByRole('combobox', { name: '目标存档' }).selectOption('pine_home');
     assert.equal(await page.getByRole('button', { name: /确认安装/ }).isDisabled(), false); await shot('resource-datapack-world');
-    await goto('resource/fabulously-optimized'); assert.equal(await page.locator('.target-grid').count(), 0);
+    await goto('resource/fabulously-optimized'); assert.equal(await page.locator('.route-panel:not([hidden]) .target-grid').count(), 0);
     assert.equal(await page.getByRole('textbox', { name: '整合包版本名称' }).count(), 1);
-    await page.locator('.file-option').first().click(); await shot('modpack-wizard');
+    await page.locator('.route-panel:not([hidden]) .file-option').first().click(); await shot('modpack-wizard');
   });
   for (const route of ['download/mod', 'download/modpack', 'download/datapack', 'download/resourcepack', 'download/shaderpack', 'versions', 'settings', 'research', 'more']) {
     await test(`secondary page ${route}`, async () => { await goto(route); assert.deepEqual(await overflow(), { body: false, main: false }); await shot(route.replace('/', '-')); });
@@ -180,7 +180,7 @@ async function test(name, run) { try { await run(); results.push({ name, passed:
         await page.setViewportSize({ width, height }); await goto(route);
         assert.deepEqual(await overflow(), { body: false, main: false });
         if (['game/1.21.1', 'resource/sodium', 'resource/terralith', 'resource/fabulously-optimized'].includes(route)) {
-          const button = await page.locator('.install-footer .button').boundingBox();
+          const button = await page.locator('.route-panel:not([hidden]) .install-footer .button').boundingBox();
           assert(button && button.y >= 0 && button.y + button.height <= height, 'Fixed install action must remain fully visible');
         }
       });
@@ -189,7 +189,7 @@ async function test(name, run) { try { await run(); results.push({ name, passed:
   for (const scale of [1.25, 1.5]) {
     await test(`DPI browser emulation ${scale * 100}% (not native Windows certification)`, async () => {
       const scaled = await browser.newContext({ viewport: { width: Math.round(1600 / scale), height: Math.round(900 / scale) }, deviceScaleFactor: scale });
-      const p = await scaled.newPage(); await p.goto('http://127.0.0.1:5202/?theme=nightfall#home'); await p.locator('h1').waitFor(); await p.waitForTimeout(600);
+      const p = await scaled.newPage(); await p.goto('http://127.0.0.1:5202/?theme=nightfall#home'); await p.locator('.route-panel:not([hidden]) h1').waitFor(); await p.waitForTimeout(600);
       assert.equal(await p.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       await p.screenshot({ path: path.join(out, `scale-emulation-${scale * 100}.png`) }); await scaled.close();
     });
