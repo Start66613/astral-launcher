@@ -1561,6 +1561,14 @@ fn managed_instance(id: &str) -> Result<Instance, String> {
     Ok(inst)
 }
 
+/// 下载调度器的实时状态：并发数、每个域名的占用、累计下载量。
+///
+/// 前端可以轮询它显示"正在同时下载 N 个文件"，不需要自己维护计数。
+#[tauri::command]
+fn net_scheduler_stats() -> serde_json::Value {
+    net::scheduler_stats()
+}
+
 #[tauri::command]
 fn list_mods(instance_id: String) -> Result<Vec<mods::ModFile>, String> {
     let inst = managed_instance(&instance_id)?;
@@ -1760,6 +1768,7 @@ pub fn run() {
             list_sessions,
             list_saves,
             get_stats,
+            net_scheduler_stats,
             list_mods,
             set_mod_enabled,
             delete_mod,
@@ -3422,6 +3431,118 @@ pub fn selftest() -> i32 {
                 slow_dest.to_string_lossy()
             ));
             check!("part meta cleaned after commit", !meta_path.exists());
+
+            // 11) 并发上限：12 个文件同时下，活跃数不能超过配置上限
+            let conc_dir = dl.join("conc");
+            let _ = std::fs::create_dir_all(&conc_dir);
+            let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut handles = Vec::new();
+            for i in 0..12 {
+                let url = srv.data_url(96 * 1024, 8 * 1024, 25);
+                let dest = conc_dir.join(format!("c{i}.bin"));
+                let peak_c = peak.clone();
+                handles.push(std::thread::spawn(move || {
+                    let opts = net::DownloadOptions {
+                        allow_local_http: true,
+                        ..Default::default()
+                    };
+                    let mut max_seen = 0usize;
+                    let r = net::download(&url, &dest, &opts, &*net::never_cancel(), |_, _| {
+                        let a = net::scheduler_stats()["active"]
+                            .as_u64()
+                            .unwrap_or(0) as usize;
+                        if a > max_seen {
+                            max_seen = a;
+                        }
+                        peak_c.fetch_max(a, std::sync::atomic::Ordering::SeqCst);
+                    });
+                    (r.map(|x| x.bytes), max_seen)
+                }));
+            }
+            let mut all_ok = true;
+            for h in handles {
+                match h.join() {
+                    Ok((r, _)) if r == Ok(96 * 1024) => {}
+                    _ => all_ok = false,
+                }
+            }
+            let peak_seen = peak.load(std::sync::atomic::Ordering::SeqCst);
+            let stats_after = net::scheduler_stats();
+            check!(
+                "download concurrency capped",
+                all_ok
+                    && peak_seen <= 6
+                    && stats_after["active"].as_u64() == Some(0)
+                    && stats_after["downloads"].as_u64().unwrap_or(0) >= 12
+            );
+
+            // 12) 同域上限：一个域名最多 3 个同时进行
+            let host_peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut hs = Vec::new();
+            for i in 0..8 {
+                let url = srv.data_url(64 * 1024, 8 * 1024, 30);
+                let dest = conc_dir.join(format!("h{i}.bin"));
+                let hp = host_peak.clone();
+                hs.push(std::thread::spawn(move || {
+                    let opts = net::DownloadOptions {
+                        allow_local_http: true,
+                        ..Default::default()
+                    };
+                    let _ = net::download(&url, &dest, &opts, &*net::never_cancel(), |_, _| {
+                        let s = net::scheduler_stats();
+                        let used = s["hosts"]["127.0.0.1"].as_u64().unwrap_or(0) as usize;
+                        hp.fetch_max(used, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }));
+            }
+            for h in hs {
+                let _ = h.join();
+            }
+            check!(
+                "download per-host capped",
+                host_peak.load(std::sync::atomic::Ordering::SeqCst) <= 3
+            );
+
+            // 13) 取消时排队中的下载不会卡死，也不会写出正式文件
+            let queued_dest = dl.join("queued.bin");
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop2 = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                stop2.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            let qcancel = net::cancel_from({
+                let f = stop.clone();
+                move || f.load(std::sync::atomic::Ordering::SeqCst)
+            });
+            let qr = net::download(
+                &srv.data_url(2 * 1024 * 1024, 16 * 1024, 40),
+                &queued_dest,
+                &local_opts(None),
+                &*qcancel,
+                |_, _| {},
+            );
+            check!(
+                "download cancel while queued",
+                qr.as_ref()
+                    .map(|_| false)
+                    .unwrap_or_else(|e| e.starts_with("CANCELLED"))
+                    && !queued_dest.exists()
+            );
+
+            // 14) 调度统计字段齐全，前端能直接用
+            let s = net::scheduler_stats();
+            check!(
+                "scheduler stats shape",
+                s["active"].is_number()
+                    && s["maxActive"].as_u64() == Some(6)
+                    && s["maxPerHost"].as_u64() == Some(3)
+                    && s["downloads"].is_number()
+                    && s["bytes"].is_number()
+                    && s["resumed"].is_number()
+                    && s["retries"].is_number()
+                    && s["hosts"].is_object()
+            );
         }
         Err(e) => {
             check!("download plain + sha1", false);

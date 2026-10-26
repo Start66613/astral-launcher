@@ -447,6 +447,123 @@ fn clear_partial(dest: &Path) {
     let _ = std::fs::remove_file(meta_path(dest));
 }
 
+// ── 并发调度 ────────────────────────────────────────────────────
+
+/// 全局同时下载数上限。太大容易被 CDN 限速，太小又慢。
+const MAX_ACTIVE_TOTAL: usize = 6;
+/// 同一个域名同时下载数上限，避免把单个站点打挂或被 429。
+const MAX_ACTIVE_PER_HOST: usize = 3;
+
+static ACTIVE_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ACTIVE_HOSTS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// 累计统计，给前端显示"已下载多少 / 当前速度"用。
+#[derive(Default)]
+struct Counters {
+    downloads: u64,
+    bytes: u64,
+    resumed: u64,
+    retries: u64,
+}
+
+static COUNTERS: OnceLock<Mutex<Counters>> = OnceLock::new();
+
+fn counters() -> &'static Mutex<Counters> {
+    COUNTERS.get_or_init(|| Mutex::new(Counters::default()))
+}
+
+fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .and_then(|r| r.split(['/', '?', '#']).next())
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+struct Slot {
+    host: String,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        ACTIVE_TOTAL.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut m) = ACTIVE_HOSTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+        {
+            if let Some(n) = m.get_mut(&self.host) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    m.remove(&self.host);
+                }
+            }
+        }
+    }
+}
+
+/// 拿一个下载并发名额；满了就等，等待过程可被取消打断。
+fn acquire_slot(host: &str, cancel: CancelRef<'_>) -> Result<Slot, String> {
+    loop {
+        {
+            let hosts = ACTIVE_HOSTS.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut m = hosts.lock().map_err(|_| "INTERNAL|下载调度器不可用".to_string())?;
+            let used = *m.get(host).unwrap_or(&0);
+            let total = ACTIVE_TOTAL.load(std::sync::atomic::Ordering::SeqCst);
+            if used < MAX_ACTIVE_PER_HOST && total < MAX_ACTIVE_TOTAL {
+                *m.entry(host.to_string()).or_insert(0) += 1;
+                ACTIVE_TOTAL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(Slot {
+                    host: host.to_string(),
+                });
+            }
+        }
+        if (cancel)() {
+            return Err("CANCELLED|任务已取消".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+}
+
+/// 当前并发与累计统计，给前端与自检看。
+pub fn scheduler_stats() -> serde_json::Value {
+    let active = ACTIVE_TOTAL.load(std::sync::atomic::Ordering::SeqCst);
+    let hosts: HashMap<String, usize> = ACTIVE_HOSTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+    let c = counters().lock().map(|c| (c.downloads, c.bytes, c.resumed, c.retries)).unwrap_or((0, 0, 0, 0));
+    serde_json::json!({
+        "active": active,
+        "maxActive": MAX_ACTIVE_TOTAL,
+        "maxPerHost": MAX_ACTIVE_PER_HOST,
+        "hosts": hosts,
+        "downloads": c.0,
+        "bytes": c.1,
+        "resumed": c.2,
+        "retries": c.3,
+    })
+}
+
+fn count_download(bytes: u64, resumed: bool) {
+    if let Ok(mut c) = counters().lock() {
+        c.downloads += 1;
+        c.bytes = c.bytes.saturating_add(bytes);
+        if resumed {
+            c.resumed += 1;
+        }
+    }
+}
+
+fn count_retry() {
+    if let Ok(mut c) = counters().lock() {
+        c.retries += 1;
+    }
+}
+
 // ── 下载 ────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -540,6 +657,7 @@ pub fn download(
 
     let owner = unique_owner();
     let _lock = acquire_write(dest, &owner, cancel, std::time::Duration::from_secs(600))?;
+    let _slot = acquire_slot(&host_of(url), cancel)?;
 
     if (cancel)() {
         return Err("CANCELLED|任务已取消".into());
@@ -679,6 +797,7 @@ pub fn download(
                 })?;
                 let _ = std::fs::remove_file(meta_path(dest));
 
+                count_download(size, was_resuming);
                 return Ok(DownloadReport {
                     bytes: size,
                     resumed: was_resuming,
@@ -708,6 +827,7 @@ pub fn download(
                     }
                     return Err(last_err);
                 }
+                count_retry();
                 // 指数退避，但可以被取消打断
                 let wait = std::time::Duration::from_millis(300 * 3u64.pow(attempt - 1));
                 let deadline = std::time::Instant::now() + wait;
