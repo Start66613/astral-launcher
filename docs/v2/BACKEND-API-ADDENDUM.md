@@ -3301,3 +3301,66 @@ const errs = await invoke<LogSearchResult>("search_log", {
 - **命中太多只返最近的**：`skipped` 是被丢掉的旧条数，`matches` 里是最后 `limit` 条。排查问题基本都在看最后发生了什么。
 - **超大日志只扫尾部**：超过 16 MB 只扫最后 16 MB，此时 `scannedTailOnly: true`、`note` 里会写明「行号从这一段开头算起」，不会假装是全文行号。`.gz` 归档日志照样能搜（解压上限 64 MB）。
 - **只读**：不写文件、不联网、不上传。
+
+## 42. Mod 图标（V2.5 新增）
+
+`ModFile.iconPath` 一直是 `null`，Mod 列表只能显示文件名。这一节补上图标读取。
+
+### 42.1 命令
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `read_mod_icon` | `instanceId`, `fileName` | `ModIcon \| null` |
+
+没有图标返回 `null`，**不是错误**。只有文件名非法、文件不存在、jar 打不开才返回 `Err`。
+
+### 42.2 类型
+
+```ts
+interface ModIcon {
+  fileName: string;
+  entry: string;       // 在 jar 里的路径
+  mime: string;        // image/png | image/jpeg | image/webp | image/gif
+  sizeBytes: number;
+  dataUrl: string;     // data:image/png;base64,...
+  source: "fabric" | "quilt" | "forge" | "root";
+}
+```
+
+`ModFile` 新增一个字段：
+
+```ts
+interface ModFile {
+  // ...原有字段
+  hasIcon: boolean;    // jar 里有没有能用的图标
+}
+```
+
+`iconPath` 字段保留但恒为 `null`（历史兼容），图标请走 `read_mod_icon`。
+
+### 42.3 图标从哪来
+
+按顺序尝试，第一个命中且条目真的存在就用它：
+
+| 来源 | 声明方式 |
+| --- | --- |
+| Fabric | `fabric.mod.json` 的 `"icon"`（字符串，或 `{"1x":"a.png","2x":"b.png"}` 对象） |
+| Quilt | `quilt.mod.json` 的 `quilt_loader.metadata.icon` |
+| Forge / NeoForge | `META-INF/mods.toml` / `neoforge.mods.toml` 里的 `logoFile = "x.png"`（`a.png,b.png` 取第一个） |
+| 兜底 | jar 根目录的 `icon.png` / `logo.png` / `icon.jpg` |
+
+对象形式优先取 `2x`（大图更清楚），没有就取任意一张。
+
+### 42.4 行为约定
+
+- **列表不解压图片**：`list_mods` 只是打开 jar 查条目在不在，返回 `hasIcon` 布尔。列 100 个 Mod 也不会把几 MB 图片塞进 IPC。
+- **要图才读**：前端按需对可见的几行调 `read_mod_icon`，可以配合 IntersectionObserver 懒加载。
+- **上限 512 KiB**：超了当没有图标（有些整合包里塞了整张壁纸当 logo）。
+- **不写盘**：不缓存、不生成缩略图，每次现读。jar 是只读的，不存在一致性问题。
+- **符号链接拒绝**：`mods/` 里指向别处的 jar 不会被读。
+
+### 42.5 前端接入建议
+
+- 列表行左侧留 32×32 的位置：`hasIcon` 为真时调 `read_mod_icon` 填 `<img src={dataUrl}>`，否则显示首字母占位。
+- 图标只在行进入可视区时读，读完记在组件状态里，别每次渲染都 invoke。
+- 同一个实例切走再回来时清一次缓存（Mod 可能被换了）。

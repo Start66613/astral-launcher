@@ -24,6 +24,7 @@ mod local_import;
 mod log_search;
 mod logs;
 mod migrate;
+mod mod_icon;
 mod modpack;
 mod mods;
 mod modscan;
@@ -3424,6 +3425,16 @@ fn list_mods(instance_id: String) -> Result<Vec<mods::ModFile>, String> {
     Ok(mods::list(std::path::Path::new(&inst.dirs.mods)))
 }
 
+/// 读某个 Mod 的图标（data URL）。没有图标返回 `null`，不是错误。
+#[tauri::command]
+fn read_mod_icon(
+    instance_id: String,
+    file_name: String,
+) -> Result<Option<mod_icon::ModIcon>, String> {
+    let inst = managed_instance(&instance_id)?;
+    mod_icon::read(std::path::Path::new(&inst.dirs.mods), &file_name)
+}
+
 #[tauri::command]
 fn set_mod_enabled(
     instance_id: String,
@@ -3735,6 +3746,7 @@ pub fn run() {
             disk_usage,
             analyze_disk_usage,
             list_mods,
+            read_mod_icon,
             set_mod_enabled,
             delete_mod,
             list_packs,
@@ -4179,6 +4191,80 @@ pub fn selftest() -> i32 {
     );
     let _ = std::fs::remove_dir_all(&scan_dir);
     let _ = std::fs::remove_dir_all(&clean_dir);
+
+    // Mod 图标：四种加载器的声明方式都能认出来，列表里给出 hasIcon
+    {
+        use std::io::Write as _;
+        let mi = std::env::temp_dir().join(format!("astral-modicon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mi);
+        let _ = std::fs::create_dir_all(&mi);
+
+        const PNG: &[u8] = &[
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x08, 0x06, 0x00, 0x00,
+            0x00,
+        ];
+
+        // Fabric 声明图标
+        {
+            let f = std::fs::File::create(mi.join("fabric-demo.jar")).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("fabric.mod.json", o).unwrap();
+            z.write_all(
+                br#"{"id":"demo","name":"Demo","version":"1.0","icon":"assets/demo/icon.png"}"#,
+            )
+            .unwrap();
+            z.start_file("assets/demo/icon.png", o).unwrap();
+            z.write_all(PNG).unwrap();
+            z.finish().unwrap();
+        }
+        // 没有图标的 Mod
+        {
+            let f = std::fs::File::create(mi.join("plain.jar")).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("readme.txt", o).unwrap();
+            z.write_all(b"nothing here").unwrap();
+            z.finish().unwrap();
+        }
+
+        let listed = mods::list(&mi);
+        let fabric_row = listed.iter().find(|m| m.file_name == "fabric-demo.jar");
+        let plain_row = listed.iter().find(|m| m.file_name == "plain.jar");
+        check!(
+            "mod list reports has icon",
+            fabric_row.map(|m| m.has_icon).unwrap_or(false)
+                && plain_row.map(|m| !m.has_icon).unwrap_or(false)
+        );
+
+        let icon = mod_icon::read(&mi, "fabric-demo.jar");
+        check!(
+            "mod icon reads as data url",
+            icon.as_ref()
+                .ok()
+                .and_then(|o| o.as_ref())
+                .map(|o| o.mime == "image/png"
+                    && o.source == "fabric"
+                    && o.entry == "assets/demo/icon.png"
+                    && o.data_url.starts_with("data:image/png;base64,"))
+                .unwrap_or(false)
+        );
+
+        check!(
+            "mod icon missing is not an error",
+            mod_icon::read(&mi, "plain.jar")
+                .map(|o| o.is_none())
+                .unwrap_or(false)
+        );
+
+        check!(
+            "mod icon rejects bad names",
+            mod_icon::read(&mi, "../evil.jar").is_err() && mod_icon::read(&mi, "nope.jar").is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&mi);
+    }
 
     // 本地文件导入：按内容判断类型、重名不覆盖、一个坏文件不影响其他
     {

@@ -10,7 +10,7 @@
 
 A1–A5、B1–B4、C1–C4、D1–D2 已完成并有自动化测试；D3 的测试矩阵已随各功能逐项落地；
 D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发布检查清单与自动更新
-签名方案尚未完成。共 163 个 Tauri 命令、343 项自检、325 个 Rust 单元测试（319 通过 6 忽略）。
+签名方案尚未完成。共 164 个 Tauri 命令、347 项自检、333 个 Rust 单元测试（327 通过 6 忽略）。
 
 ---
 
@@ -121,6 +121,7 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 | E29 | 一键进服 | ✅ | `quick_join.rs` + 3 个命令；1.20+ 用 `--quickPlayMultiplayer`，1.19- 用 `--server/--port`，版本号读不出来时走老参数；地址与端口校验，收藏与临时地址两种入口，`preview_server_join` 只读预览 |
 | E30 | 整合包更新执行 | ✅ | `pack_apply.rs` + 3 个命令；按计划先备份再改、失败整批回滚，计划指纹对不上要求重新预览，回滚记录留 5 份，不碰存档 |
 | E31 | 日志搜索与级别筛选 | ✅ | `log_search.rs` + `search_log`；关键词搜索（可选大小写敏感）、按 error/warn/info/debug/trace 过滤、各级别条数统计；超大日志只扫尾部并标明，命中过多只返最近的 |
+| E32 | Mod 图标 | ✅ | `mod_icon.rs` + `read_mod_icon`；认 Fabric / Quilt / Forge-NeoForge 三种声明与根目录兜底，列表给 `hasIcon` 不解压图片，图标上限 512 KiB，无图标不是错误 |
 
 ---
 
@@ -146,10 +147,10 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 ## 3. 测试策略
 
 - **单元测试**：纯逻辑（解析、分类、命名、路径校验、状态机）放 `#[cfg(test)]`。
-  当前 325 个，319 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
+  当前 333 个，327 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
 - **自检（`--selftest`）**：所有需要真实文件系统、真实 HTTP、真实进程的检查都放这里。
   用 `testsrv.rs` 起一个只监听 `127.0.0.1` 的临时服务器，能确定性制造 503、慢速、
-  重定向、Range 响应。当前 343 项。
+  重定向、Range 响应。当前 347 项。
 - **为什么不依赖 `cargo test` 跑全部**：本机 `cargo test` 的测试二进制在仓库目录里
   运行会因路径 ACL 报"拒绝访问"（见 `10-cargo-test-调查.md`），所以 `scripts/run-tests.ps1`
   会先把二进制复制到 `%TEMP%` 再跑。CI 上没有这个问题。

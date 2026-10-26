@@ -19,7 +19,10 @@ pub struct ModFile {
     pub loader: Option<String>,
     pub enabled: bool,
     pub size_bytes: u64,
+    /// 保留字段：图标现在走 `has_icon` + `read_mod_icon`，这里不再放路径
     pub icon_path: Option<String>,
+    /// jar 里有没有能用的图标（列目录时顺手判断，不解压图片）
+    pub has_icon: bool,
     pub project_id: Option<String>,
 }
 
@@ -29,6 +32,7 @@ struct JarMeta {
     version: Option<String>,
     loader: Option<String>,
     project_id: Option<String>,
+    has_icon: bool,
 }
 
 fn read_entry<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
@@ -137,6 +141,9 @@ fn read_jar_meta(path: &Path) -> JarMeta {
         }
     }
 
+    // 顺手判断有没有图标：只查条目存不存在，不解压图片
+    meta.has_icon = crate::mod_icon::entry_in(&mut zip).is_some();
+
     meta
 }
 
@@ -190,6 +197,7 @@ fn build(dir: &Path, file_name: &str, enabled: bool, meta: JarMeta) -> ModFile {
         enabled,
         size_bytes: size,
         icon_path: None,
+        has_icon: meta.has_icon,
         project_id: meta.project_id,
     }
 }
