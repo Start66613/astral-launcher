@@ -2692,3 +2692,144 @@ await invoke("set_config", { config: { ...currentConfig, gameDir: report.path } 
 - `looksLikeMinecraft === false && exists === true` 时给一个更明显的警告：
   「这个目录里没有 Minecraft 的文件，切过去之后启动器里会是空的」。
 - 切换成功后要重新拉 `list_instances` / `list_saves`，因为 `gameDir` 变了。
+
+---
+
+## 36. 整合包更新（V2.5 新增）
+
+装上整合包之后，作者发新版本了启动器原来完全不知道 —— 玩家只能自己回 Modrinth 看一眼。
+这两个命令就是补这块：先查有没有新版本，再给一份"会加什么、删什么、要多少空间"的计划。
+**两个都是只读的**，真正替换留给后续版本，而且必须先让玩家看过这份计划。
+
+### 36.1 命令
+
+| 命令 | 参数 | 返回 |
+|---|---|---|
+| `check_modpack_update` | `{ instanceId: string }` | `PackUpdateCheck` |
+| `plan_modpack_update` | `{ instanceId: string, versionId: string }` | `PackUpdatePlan` |
+
+### 36.2 类型
+
+```ts
+export interface PackUpdateCheck {
+  instanceId: string;
+  packName: string;
+  projectId: string;
+  installedVersionId: string;
+  installedVersionName: string;
+  latestVersionId: string;
+  latestVersionName: string;
+  latestPublished: string | null;
+  /** 作者写的更新说明，已截断到 4000 字 */
+  latestChangelog: string | null;
+  updateAvailable: boolean;
+  /** 本地导入的包没有来源信息，这里是 false */
+  canAutoCheck: boolean;
+  /** 给玩家看的说明，可以全部展示 */
+  notes: string[];
+}
+
+export interface PackChange {
+  path: string;
+  /** mod / config / other */
+  kind: string;
+  oldSize: number;
+  newSize: number;
+  /** 只有 added / changed 才有下载地址 */
+  url: string;
+}
+
+export interface PackUpdatePlan {
+  planId: string;
+  instanceId: string;
+  packName: string;
+  fromVersionId: string;
+  fromVersionName: string;
+  toVersionId: string;
+  toVersionName: string;
+  added: PackChange[];
+  removed: PackChange[];
+  changed: PackChange[];
+  unchanged: number;
+  downloadBytes: number;
+  diskNeeded: number;
+  diskFree: number | null;
+  mcVersionFrom: string;
+  mcVersionTo: string;
+  loaderFrom: string | null;
+  loaderTo: string | null;
+  /** 固定 true：更新过程不碰存档 */
+  keepsWorlds: boolean;
+  /** 固定 false */
+  touchesSaves: boolean;
+  issues: { code: string; message: string; blocking: boolean }[];
+  blocking: boolean;
+}
+```
+
+### 36.3 调用示例
+
+```ts
+import { invoke } from "@tauri-apps/api/core";
+
+// 1. 进实例详情页时查一下（失败不用弹错误，整合包之外还要看别的）
+let check: PackUpdateCheck | null = null;
+try {
+  check = await invoke<PackUpdateCheck>("check_modpack_update", {
+    instanceId: instance.id,
+  });
+} catch {
+  check = null;
+}
+
+// 2. 有更新才显示横幅
+if (check?.canAutoCheck && check.updateAvailable) {
+  showBanner(`${check.packName} 有新版本 ${check.latestVersionName}`, async () => {
+    const plan = await invoke<PackUpdatePlan>("plan_modpack_update", {
+      instanceId: instance.id,
+      versionId: check!.latestVersionId,
+    });
+
+    if (plan.blocking) {
+      showErrors(plan.issues.filter((i) => i.blocking).map((i) => i.message));
+      return;
+    }
+
+    // 3. 让玩家看清楚会动什么
+    await confirm({
+      title: `从 ${plan.fromVersionName} 更新到 ${plan.toVersionName}`,
+      lines: [
+        `新增 ${plan.added.length} 个文件`,
+        `删除 ${plan.removed.length} 个文件`,
+        `改动 ${plan.changed.length} 个文件`,
+        `${plan.unchanged} 个文件不用动`,
+        `需要下载约 ${Math.ceil(plan.downloadBytes / 1048576)} MB`,
+        "存档不会被改动",
+      ],
+      notes: plan.issues.filter((i) => !i.blocking).map((i) => i.message),
+    });
+  });
+}
+```
+
+### 36.4 行为约定
+
+- **只读**。两个命令都不写实例文件；`plan_modpack_update` 会把两个版本的 `.mrpack` 下到
+  `{game}/.astral/modpacks/` 缓存里（只下 `.mrpack` 本身，不下里面的 Mod），这样第二次规划不用重下。
+- **本地导入的包查不了**。`check_modpack_update` 返回 `canAutoCheck: false` + 一条 note，不报错也不假装有更新。
+- **不是整合包装的实例直接报错**。返回 `INVALID_VALUE|这个实例不是从整合包装的…`，因为没有任何东西可比。
+- **游戏版本变了就是阻塞**。`mcVersionFrom !== mcVersionTo` 时 `blocking: true`，因为那等于换一个实例，
+  不是"更新"。加载器类型变了同理。
+- **删 Mod 和覆盖配置只提示不阻塞**。新版本移除了 Mod、或要覆盖 `config/` 时给 `NOTE`，
+  让玩家自己决定（这些改动是可预期的，不是错误）。
+- **磁盘不够是阻塞**。`diskFree < downloadBytes` 时 `DISK_FULL` + `blocking: true`。
+- **`keepsWorlds` / `touchesSaves` 是给玩家看的承诺**。更新流程只动 `mods/` 与 `config/`，
+  永远不碰 `saves/`；这两个字段写死是为了让界面能直接显示"存档不会被动"。
+
+### 36.5 前端接入建议
+
+- 更新横幅放在实例详情页顶部，不要弹窗打断启动。
+- `latestChangelog` 可以直接用 markdown 渲染（作者写的是 Markdown）。
+- 计划里的 `added` / `removed` / `changed` 按 `kind` 分组展示：Mod 一组、配置一组、其他一组。
+- `removed` 里的条目要标红，并提示"这些文件会从实例里删掉"。
+- 阻塞时不要给"仍然继续"的按钮 —— 换游戏版本请引导玩家新建实例。

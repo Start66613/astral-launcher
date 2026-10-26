@@ -27,6 +27,7 @@ mod mods;
 mod modscan;
 mod nbt;
 mod net;
+mod pack_update;
 mod packs;
 mod plan;
 mod preflight;
@@ -1210,6 +1211,29 @@ async fn modpack_installed_versions(project_id: String) -> Result<Vec<serde_json
     let game = game_root();
     tauri::async_runtime::spawn_blocking(move || {
         Ok(modpack::installed_versions(&game, &project_id))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 查这个实例的整合包有没有新版本
+#[tauri::command]
+async fn check_modpack_update(instance_id: String) -> Result<pack_update::PackUpdateCheck, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || pack_update::check(&game, &instance_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 规划整合包更新：会加什么、删什么、要多少空间（只读，不改文件）
+#[tauri::command]
+async fn plan_modpack_update(
+    instance_id: String,
+    version_id: String,
+) -> Result<pack_update::PackUpdatePlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || {
+        pack_update::plan(&game, &instance_id, &version_id)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3450,6 +3474,8 @@ pub fn run() {
             export_modpack,
             plan_modpack_export,
             modpack_installed_versions,
+            check_modpack_update,
+            plan_modpack_update,
             verify_exported_modpack,
             check_mod_updates,
             start_mod_update,
@@ -5161,6 +5187,115 @@ pub fn selftest() -> i32 {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // 整合包更新：查作者有没有发新版本、新旧差异、本地导入的包查不了
+    if let Ok(srv) = testsrv::TestServer::start() {
+        let base_url = srv.base();
+        let pu = std::env::temp_dir().join(format!("astral-pu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&pu);
+        let _ = std::fs::create_dir_all(instance::instances_root(&pu));
+        let pu_meta = instance::InstanceMeta {
+            id: "pu_selftest".into(),
+            name: "更新测试".into(),
+            game_version: "1.20.1".into(),
+            loader_kind: Some("fabric".into()),
+            loader_version: Some("0.16.9".into()),
+            launch_version: None,
+            memory_mb: None,
+            jvm_args: vec![],
+            java_path: None,
+            cover: None,
+            created_at: time::now_iso(),
+        };
+        let pu_ok = instance::create(&pu, &pu_meta).is_ok();
+        let pu_dir = instance::instance_dir(&pu, "pu_selftest");
+
+        // 造两个版本的 mrpack，放进缓存目录，省掉真的下载
+        let v1 = r#"{"name":"Pack","dependencies":{"minecraft":"1.20.1","fabric-loader":"0.16.9"},"files":[
+            {"path":"mods/keep.jar","downloads":["https://cdn.modrinth.com/a"],"fileSize":10,"hashes":{"sha1":"aa"}},
+            {"path":"mods/gone.jar","downloads":["https://cdn.modrinth.com/b"],"fileSize":20,"hashes":{"sha1":"bb"}}]}"#;
+        let v2 = r#"{"name":"Pack","dependencies":{"minecraft":"1.20.1","fabric-loader":"0.16.9"},"files":[
+            {"path":"mods/keep.jar","downloads":["https://cdn.modrinth.com/a"],"fileSize":10,"hashes":{"sha1":"aa"}},
+            {"path":"mods/fresh.jar","downloads":["https://cdn.modrinth.com/c"],"fileSize":40,"hashes":{"sha1":"ee"}}]}"#;
+        let made =
+            pack_update::write_test_pack(&pack_update::cache_path(&pu, "pack-v1.mrpack"), v1)
+                .is_ok()
+                && pack_update::write_test_pack(
+                    &pack_update::cache_path(&pu, "pack-v2.mrpack"),
+                    v2,
+                )
+                .is_ok();
+        let wrote_prov = made
+            && modpack::write_provenance(
+                &pu_dir,
+                &modpack::PackProvenance {
+                    project_id: "testpack".into(),
+                    version_id: "ver_old".into(),
+                    version_name: "1.0.0".into(),
+                    source: "modrinth".into(),
+                    pack_name: "Pack".into(),
+                    installed_at: time::now_iso(),
+                },
+            )
+            .is_ok();
+
+        let chk = pack_update::check_at(&base_url, &pu, "pu_selftest");
+        check!(
+            "pack update finds a newer version",
+            pu_ok
+                && wrote_prov
+                && chk
+                    .as_ref()
+                    .map(|c| c.can_auto_check
+                        && c.update_available
+                        && c.latest_version_id == "ver_new"
+                        && c.installed_version_id == "ver_old")
+                    .unwrap_or(false)
+        );
+
+        let pl = pack_update::plan_at(&base_url, &pu, "pu_selftest", "ver_new");
+        check!(
+            "pack update plan diffs files",
+            pl.as_ref()
+                .map(|p| {
+                    p.added.len() == 1
+                        && p.added[0].path == "mods/fresh.jar"
+                        && p.removed.len() == 1
+                        && p.removed[0].path == "mods/gone.jar"
+                        && p.changed.is_empty()
+                        && p.unchanged == 1
+                        && p.download_bytes == 40
+                        && p.keeps_worlds
+                        && !p.touches_saves
+                })
+                .unwrap_or(false)
+        );
+        check!(
+            "pack update refuses the current version",
+            pack_update::plan_at(&base_url, &pu, "pu_selftest", "ver_old").is_err()
+        );
+
+        // 本地导入的包没有项目 id，不能假装查得到
+        let _ = modpack::write_provenance(
+            &pu_dir,
+            &modpack::PackProvenance {
+                project_id: String::new(),
+                version_id: "local_1".into(),
+                version_name: "本地包".into(),
+                source: "local".into(),
+                pack_name: "本地包".into(),
+                installed_at: time::now_iso(),
+            },
+        );
+        check!(
+            "pack update refuses local imports",
+            pack_update::check_at(&base_url, &pu, "pu_selftest")
+                .map(|c| !c.can_auto_check && !c.update_available && !c.notes.is_empty())
+                .unwrap_or(false)
+        );
+
+        let _ = std::fs::remove_dir_all(&pu);
     }
 
     let st = stats::stats("7d", &|id| id.to_string());

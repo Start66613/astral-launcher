@@ -328,6 +328,48 @@ fn handle(
         return send_body(&mut stream, &headers, size, size.max(1), 0, port, served);
     }
 
+    // 模拟 Modrinth `/project/{id}/version` 与 `/version/{id}`：整合包更新检查用
+    // 版本 id 用 `ver_old` / `ver_new` 区分，各自指向一个本地 .mrpack
+    if path.starts_with("/project/") && path.ends_with("/version") {
+        let origin = format!("http://127.0.0.1:{port}");
+        let body = format!(
+            "[{{\"id\":\"ver_new\",\"version_number\":\"2.0.0\",\"name\":\"v2\",\
+              \"date_published\":\"2025-06-01T00:00:00Z\",\"changelog\":\"新增若干 Mod\",\
+              \"project_id\":\"testpack\",\
+              \"files\":[{{\"url\":\"{origin}/data?size=64\",\"filename\":\"pack-v2.mrpack\"}}]}}]"
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        served.fetch_add(body.len() as u64, Ordering::SeqCst);
+        stream.write_all(resp.as_bytes())?;
+        return Ok(());
+    }
+
+    if path.starts_with("/version/") {
+        let id = path.trim_start_matches("/version/");
+        let (num, file) = if id == "ver_new" {
+            ("2.0.0", "pack-v2.mrpack")
+        } else {
+            ("1.0.0", "pack-v1.mrpack")
+        };
+        let origin = format!("http://127.0.0.1:{port}");
+        let body = format!(
+            "{{\"id\":\"{id}\",\"version_number\":\"{num}\",\"project_id\":\"testpack\",\
+              \"files\":[{{\"url\":\"{origin}/data?size=64\",\"filename\":\"{file}\"}}]}}"
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        served.fetch_add(body.len() as u64, Ordering::SeqCst);
+        stream.write_all(resp.as_bytes())?;
+        return Ok(());
+    }
+
     if path == "/json" {
         let size = query_int(query, "size", 64) as u32;
         let body = format!("{{\"ok\":true,\"size\":{size}}}");
