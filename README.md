@@ -1,9 +1,10 @@
 # Astral Launcher
 
-一个 Windows 上的 Minecraft 启动器。界面是「森林物语 · 萤火夜航」，核心支持国内镜像与实例隔离，AI 崩溃分析用 BYOK（未接）。
+一个 Windows 上的 Minecraft 启动器。界面是「森林物语 · 萤火夜航」，核心支持国内镜像、实例隔离与四类加载器。
 
-> 当前进度：**W4 / 契约 v3.3** —— 实例、会话、任务、模组、Fabric 加载器都已可用；
-> 森林物语界面已接入真实数据。整合包解包、MSA 登录、AI 诊断还没做。
+> 当前进度：**V2 后端**（`feature/astral-v2-core`）—— 安装计划、四类加载器（Fabric / Quilt /
+> Forge / NeoForge）全部**真机实测**安装与启动；资源安装、依赖、整合包、Java、日志诊断均已落地。
+> 微软登录仍缺 Azure 应用，AI 分析未接。
 
 ![森林物语 · 首页](shots/ui-home.png)
 
@@ -16,19 +17,22 @@
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | 版本清单 | ✅ | Mojang 官方 / BMCLAPI 镜像，920 个版本 |
-| 安装 | ✅ | 元数据 → 依赖库 → 资源索引 → 并行下载 + SHA1；缺 Java 自动装 Mojang JRE |
-| 启动 | ✅ | 离线登录，约 0.9 秒开窗；进程退出推 `astral://game-exit` |
-| 实例 | ✅ | 托管实例独立 `mods/config/saves/logs`；兼容实例从 `versions/` 直读并标注归属 |
-| 会话 | ✅ | `GameSession` 记录 pid，重启后按 pid 对账，不再靠 PID 常亮 |
-| 任务 | ✅ | `Task` + `revision` 单调递增，可补拉、终态粘滞 |
-| 国内镜像 | ✅ | BMCLAPI 改写依赖库与资源；版本元数据/客户端 jar 仍走官方 |
-| 模组 | ✅ | 列表 / 启停 / 删除；jar 元数据尽力解析（fabric/forge/neoforge） |
-| 加载器 | ◐ | Fabric / Quilt 已通；Forge / NeoForge 未做 |
-| 资源下载 | ✅ | Modrinth 搜索 + 下载到对应目录 |
-| 界面 | ✅ | 森林物语：全幅场景、窄侧栏、启动坞；深浅主题 |
-| AI 崩溃分析 | ◐ | 抽屉交互完成，未接 DeepSeek |
-| 整合包安装 | ❌ | 只下 `.mrpack`，未解包建实例 |
-| 微软登录 | ❌ | crate 有设备码流程，未接 UI |
+| 安装 | ✅ | 两段式计划（准备 → 执行），失败回滚；缺 Java 自动准备 |
+| 启动 | ✅ | 离线登录；四类加载器均实测进主菜单 |
+| 实例 | ✅ | 托管实例独立 `mods/config/saves/logs`；兼容实例标注共享目录 |
+| 会话 | ✅ | `GameSession` 记录 pid，重启按 pid 对账；退出码未知 ≠ 崩溃 |
+| 任务 | ✅ | revision 单调、终态粘滞、真取消（两阶段）、跨重启 `INTERRUPTED`、去重、重试、稳定 `phase` |
+| 加载器 | ✅ | Fabric / Quilt / Forge / NeoForge 安装 + 启动**全部实测** |
+| 资源安装 | ✅ | Mod / 资源包 / 光影包 / 数据包，目标目录由 Rust 解析 |
+| 依赖 | ✅ | 自动补必需依赖，找不到则明确报错 |
+| 模组更新 | ✅ | 按 SHA1 反查，原子替换（先新后旧） |
+| 整合包 | ✅ | `.mrpack` 安装与导出，均实测 |
+| Java | ✅ | 扫描本机 + Adoptium 自动下载 + 按版本推荐 |
+| 光影组件 | ✅ | Iris / Oculus 可用性判断；OptiFine 明确不可自动安装 |
+| 日志诊断 | ✅ | 读取 + 本机脱敏预览（不上传） |
+| 国内镜像 | ✅ | BMCLAPI 改写依赖库与资源 |
+| AI 崩溃分析 | ❌ | 未接 DeepSeek（需用户 Key + 上传确认流程） |
+| 微软登录 | ❌ | 缺 Azure 应用 ID；令牌需 DPAPI 加密 |
 
 ## 结构
 
@@ -39,14 +43,17 @@ app/                       Tauri 2 + React 19 + TS + Rust
     core.rs                安装、启动、加载器装配（基于 portablemc）
     instance.rs            实例模型、目录、健康检查
     session.rs             游戏会话与 pid 对账
-    task.rs                任务注册表（revision / 终态粘滞）
-    mods.rs                模组列表、启停、删除
-    loader.rs              Fabric meta 目录
-    stats.rs / time.rs     存档与统计、时间工具
-  src-tauri/vendor/portablemc   打了镜像与 JVM 参数补丁的上游 crate（Apache-2.0）
-docs/                      方案书、决策记录、契约、实现记录
-preview/                   设计原型与森林物语原型
-shots/                     运行截图
+    task.rs                任务注册表（取消 / 持久化 / phase / 重试）
+    plan.rs                两段式安装计划
+    resources.rs           Modrinth 资源查询与定向安装
+    modpack.rs             .mrpack 解析、安装、导出
+    updates.rs             模组更新检查与原子替换
+    jdk.rs / java.rs       JDK 下载与 Java 探测
+    logs.rs                日志读取与脱敏
+    components.rs          光影支持组件目录
+    net.rs                 白名单、原子下载、哈希校验
+    loader.rs / mods.rs    加载器目录、模组文件管理
+    stats.rs / worlds.rs   存档与统计
 ```
 
 ## 开发
@@ -56,36 +63,50 @@ cd app
 pnpm install
 pnpm dev            # 只看界面，不需要 Rust
 pnpm tauri dev      # 原生窗口
-pnpm tauri build    # 出 exe（约 11 MB）
+pnpm tauri build    # 出 exe
 ```
 
-前提：Node 18+、Rust stable（MSVC toolchain）、WebView2（Win10 1803+ 自带）。
+前提：Node 18+、Rust stable（MSVC toolchain）、WebView2。
 
-> 如果 pnpm 在 PowerShell 里被执行策略挡住，用 `node <pnpm.mjs 路径> ...` 调用。
+### 测试
+
+```powershell
+# 无界面自检（当前 93 项，输出 log + json）
+.\astral.exe --selftest
+
+# 单元测试（46 项，release 构建后复制到仓库外运行）
+# pwsh -NoProfile -File scripts/run-tests.ps1
+
+# 命令注册表校验（防止写了命令忘记注册）
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-commands.ps1
+```
+
+> `cargo test` 在本机因测试二进制加载失败（0xC0000139）不可用，
+> 详见 [`docs/v2/10-cargo-test-调查.md`](docs/v2/10-cargo-test-调查.md)。
 
 ## 配置
 
-`%APPDATA%\Astral\config.json`
+`%APPDATA%\Astral\config.json`（原子写 + `.bak`）
 
 ```jsonc
 {
   "gameDir": "C:\\Users\\你\\AppData\\Roaming\\.minecraft",
-  "source": "official",        // official | bmclapi
+  "source": "official",          // official | bmclapi
   "username": "Player",
-  "activeInstanceId": null
+  "activeInstanceId": null,
+  "msaClientId": null            // 可选：你自己的 Azure 应用 ID
 }
 ```
-
-界面上在「设置」里改；`set_config` 支持只传要改的字段。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [api-contract.md](docs/api-contract.md) | **前后端接口契约 v3.3**（命令、事件、错误码、实例布局） |
-| [api-contract-bridge.md](docs/api-contract-bridge.md) | `bridge.ts` / `types.ts` 的增量代码块 |
-| [00](docs/00-方案对比与路线图.md) · [01](docs/01-决策记录与修订.md) | 方案论证与决策记录 |
-| [02](docs/02-W1-实现记录.md) · [03](docs/03-W2-核心接入.md) · [04](docs/04-W3-启动与资源.md) · [05](docs/05-W4-核心实现.md) | 各阶段实现记录 |
+| [api-contract.md](docs/api-contract.md) | 接口契约 v4（v1–v3.3 保留） |
+| [api-contract-bridge-v2.md](docs/api-contract-bridge-v2.md) | V2 新命令的 TS 包装与接入规则 |
+| [docs/v2/09](docs/v2/09-V2-总览与验收状态.md) | 54 个命令的当前状态 |
+| [docs/v2/12](docs/v2/12-验收报告.md) | 验收报告：证据、未验证项、复现命令 |
+| [docs/v2/11](docs/v2/11-合并预演.md) | 合并预演（零冲突） |
 
 ## 合规
 

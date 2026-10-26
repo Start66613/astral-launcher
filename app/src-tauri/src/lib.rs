@@ -1,14 +1,24 @@
+mod components;
 mod core;
 mod error;
+mod export;
+mod account;
 mod instance;
+mod java;
+mod jdk;
 mod loader;
+mod logs;
+mod modpack;
 mod mods;
 mod net;
+mod plan;
+mod resources;
 mod worlds;
 mod session;
 mod stats;
 mod task;
 mod time;
+mod updates;
 
 use core::Config;
 use instance::Instance;
@@ -59,7 +69,7 @@ fn get_api_info() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": API_VERSION,
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "mirror"],
+        "features": ["instances", "sessions", "tasks", "saves", "stats", "mods", "loaders", "loader-builds", "worlds", "game-install", "resources", "logs", "modpack", "java", "components", "accounts", "updates", "mirror"],
     })
 }
 
@@ -94,6 +104,13 @@ fn set_config(config: serde_json::Value) -> Result<Config, String> {
         }
     }
     cur = serde_json::from_value(merged).map_err(|e| format!("INVALID_NAME|配置格式不对|{e}"))?;
+    // 用户名会进 JVM 参数，必须是合法 ASCII，否则 portablemc 截断时可能 panic
+    account::validate_username(&cur.username)?;
+    if let Some(id) = &cur.msa_client_id {
+        if !id.trim().is_empty() {
+            account::validate_client_id(id)?;
+        }
+    }
     core::save_config(&cur)?;
     Ok(cur)
 }
@@ -182,6 +199,13 @@ struct InstancePatch {
 #[tauri::command]
 fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String> {
     let game = game_root();
+    // 运行中或有任务时不允许修改（改名会让启动/安装期间的路径漂移）
+    if session::active(Some(&id)).is_some() {
+        return error::fail(error::INSTANCE_BUSY, "实例正在运行，先退出游戏");
+    }
+    if task::has_running(&id) {
+        return error::fail(error::INSTANCE_BUSY, "实例有进行中的任务");
+    }
     let mut meta = instance::read_meta(&game, &id)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在或不是托管实例".to_string())?;
     if let Some(name) = patch.name {
@@ -230,6 +254,9 @@ struct CreateInstanceRequest {
 #[tauri::command]
 async fn start_create_instance(request: CreateInstanceRequest) -> Result<Task, String> {
     instance::validate_name(&request.name)?;
+    if task::has_running_kind("create", None, Some(&request.game_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
     let t = task::create(
         "create",
         None,
@@ -246,6 +273,7 @@ async fn start_create_instance(request: CreateInstanceRequest) -> Result<Task, S
             game_version: request.game_version,
             loader_kind: request.loader_kind,
             loader_version: request.loader_version,
+            launch_version: None,
             memory_mb: request.memory_mb,
             jvm_args: vec![],
             java_path: None,
@@ -316,6 +344,9 @@ async fn start_install(
     app: AppHandle,
     game_version: String,
 ) -> Result<Task, String> {
+    if task::has_running_kind("install", None, Some(&game_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
     let t = task::create(
         "install",
         None,
@@ -323,27 +354,42 @@ async fn start_install(
         format!("安装 {game_version}"),
     );
     let tid = t.task_id.clone();
-    let app2 = app.clone();
-    std::thread::spawn(move || {
-        task::start(&tid);
-        let cfg = core::load_config();
-        let dir = PathBuf::from(&cfg.game_dir);
-        let t2 = tid.clone();
-        let v = game_version.clone();
-        let res = core::install(&game_version, &dir, &cfg.username, move |p| {
-            task::progress(&t2, &p.stage, p.label, p.done, p.total);
-        });
-        match res {
-            Ok(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
-            Ok(_) => task::finish(&tid, serde_json::json!({ "kind": "install", "gameVersion": v })),
-            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
-            Err(e) => {
-                task::fail(&tid, e);
-            }
-        }
-        let _ = app2;
-    });
+    task::set_retry_spec(
+        &t.task_id,
+        serde_json::json!({ "kind": "install", "gameVersion": game_version }),
+    );
+    let gv = game_version.clone();
+    let _ = app;
+    std::thread::spawn(move || run_install(&tid, gv));
     Ok(t)
+}
+
+/// 安装游戏本体的 worker：命令与「重试」共用同一份逻辑
+fn run_install(tid: &str, game_version: String) {
+    task::start(tid);
+    let cfg = core::load_config();
+    let dir = PathBuf::from(&cfg.game_dir);
+    let t2 = tid.to_string();
+    let v = game_version.clone();
+    // 后台线程 panic 必须变成任务失败，不能让任务永远 running
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        core::install(&game_version, &dir, &cfg.username, move |p| {
+            task::progress(&t2, &p.stage, p.label, p.done, p.total);
+        })
+    }))
+    .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()));
+    match res {
+        // 活儿已经干完才收到取消：如实报告完成，不假装已取消
+        Ok(_) if task::is_cancelled(tid) => task::finish(
+            tid,
+            serde_json::json!({ "kind": "install", "gameVersion": v, "cancelledLate": true }),
+        ),
+        Ok(_) => task::finish(tid, serde_json::json!({ "kind": "install", "gameVersion": v })),
+        Err(_) if task::is_cancelled(tid) => task::cancelled(tid),
+        Err(e) => {
+            task::fail(tid, e);
+        }
+    }
 }
 
 #[tauri::command]
@@ -351,6 +397,9 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
     let game = game_root();
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    // 启动前再校验一次用户名（配置可能是旧版本写的）
+    let cfg_now = core::load_config();
+    account::validate_username(&cfg_now.username)?;
     if session::active(Some(&instance_id)).is_some() {
         return error::fail(error::INSTANCE_BUSY, "该实例正在运行");
     }
@@ -378,24 +427,45 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
         };
         let t2 = tid.clone();
         let version = inst.game_version.clone();
-        let loader = inst
-            .loader
-            .as_ref()
-            .map(|l| (l.kind.clone(), l.version.clone()));
-        let spawned = core::spawn_with(
-            &version,
-            loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
-            &main_dir,
-            mc_dir.as_deref(),
-            &cfg.username,
-            inst.memory_mb,
-            &inst.jvm_args,
-            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
-        );
+        // Forge/NeoForge：启动 installer 生成的版本，不再走 fabric 装配
+        let is_installer_loader = matches!(inst.loader.as_ref().map(|l| l.kind.as_str()), Some("forge") | Some("neoforge"));
+        let version = if is_installer_loader {
+            inst.launch_version.clone().unwrap_or(version)
+        } else {
+            version
+        };
+        let loader = if is_installer_loader {
+            None
+        } else {
+            inst.loader
+                .as_ref()
+                .map(|l| (l.kind.clone(), l.version.clone()))
+        };
+        // 没指定 Java 时按版本要求自动挑一个（加载器版本会沿继承链找 javaVersion）
+        let auto_java: Option<std::path::PathBuf> = match inst.java_path.as_deref() {
+            Some(p) => Some(std::path::PathBuf::from(p)),
+            None => core::auto_java_for(&main_dir, &version),
+        };
+        let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            task::progress(&tid, "validate", "检查实例与版本文件", 0, 0);
+            core::spawn_with(
+                &version,
+                loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
+                &main_dir,
+                mc_dir.as_deref(),
+                &cfg.username,
+                inst.memory_mb,
+                &inst.jvm_args,
+                auto_java.as_deref(),
+                move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+            )
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|启动线程崩溃".to_string()));
 
         match spawned {
             Ok(mut child) => {
                 let pid = child.id();
+                task::progress(&tid, "spawned", "进程已创建", 1, 1);
                 let sess = session::begin(&instance_id, &tid, pid);
                 task::finish(
                     &tid,
@@ -469,6 +539,899 @@ fn get_stats(range: Option<String>) -> stats::Stats {
     })
 }
 
+// ── 资源（Modrinth） ────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_resource_project(project_id: String) -> Result<resources::ResourceProject, String> {
+    tauri::async_runtime::spawn_blocking(move || resources::project(&project_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn list_resource_files(
+    project_id: String,
+    game_version: Option<String>,
+    loader: Option<String>,
+) -> Result<Vec<resources::ResourceFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resources::files(&project_id, game_version.as_deref(), loader.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn prepare_resource_install(
+    request: resources::ResourceInstallRequest,
+) -> Result<resources::ResourcePlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || resources::prepare(&game, request, &play_stats))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, String> {
+    let stored = resources::take(&plan_id, revision)?;
+    if let Some(first) = stored.plan.issues.iter().find(|i| i.blocking) {
+        return Err(format!("{}|{}", first.code, first.message));
+    }
+    let title = format!("安装 {}", stored.plan.file_name);
+    let t = task::create(
+        "resource-install",
+        Some(stored.plan.instance_id.clone()),
+        None,
+        title,
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let t2 = tid.clone();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let tid_c = tid.clone();
+            resources::execute(
+                &stored,
+                move || task::is_cancelled(&tid_c),
+                move |c, total| {
+                    task::progress(&t2, "download", format!("下载 {c}/{total}"), c, total);
+                },
+            )
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|资源安装线程崩溃".to_string()));
+
+        match res {
+            // 已经装完才收到取消：如实报告完成，不假装已取消
+            Ok(path) if task::is_cancelled(&tid) => task::finish(
+                &tid,
+                serde_json::json!({
+                    "kind": "resource-install",
+                    "path": path.to_string_lossy(),
+                    "file": stored.plan.file_name,
+                    "cancelledLate": true,
+                }),
+            ),
+            Ok(path) => task::finish(
+                &tid,
+                serde_json::json!({
+                    "kind": "resource-install",
+                    "path": path.to_string_lossy(),
+                    "file": stored.plan.file_name,
+                }),
+            ),
+            Err(e) if task::is_cancelled(&tid) || e.starts_with("CANCELLED") => {
+                task::cancelled(&tid)
+            }
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
+}
+
+// ── 整合包导出 ──────────────────────────────────────────────────
+
+#[tauri::command]
+async fn export_modpack(request: export::ExportRequest) -> Result<export::ExportResult, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || export::export(&game, &request, &play_stats))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ── 模组更新检查 ────────────────────────────────────────────────
+
+#[tauri::command]
+async fn check_mod_updates(
+    instance_id: String,
+    limit: Option<u32>,
+) -> Result<updates::UpdateReport, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || {
+        let inst = instance::find(&game, &instance_id, &play_stats)
+            .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+        let loader = inst.loader.as_ref().map(|l| l.kind.clone());
+        Ok(updates::check(
+            std::path::Path::new(&inst.dirs.mods),
+            &inst.game_version,
+            loader.as_deref(),
+            limit,
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 原子更新：先下新文件并校验，成功后才删旧文件
+#[tauri::command]
+async fn start_mod_update(
+    instance_id: String,
+    file_name: String,
+    project_id: String,
+    version_id: String,
+) -> Result<Task, String> {
+    if task::has_running_kind("mod-update", Some(&instance_id), None) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
+    let t = task::create(
+        "mod-update",
+        Some(instance_id.clone()),
+        None,
+        format!("更新 {file_name}"),
+    );
+    let tid = t.task_id.clone();
+    task::set_retry_spec(
+        &t.task_id,
+        serde_json::json!({
+            "kind": "mod-update",
+            "instanceId": instance_id,
+            "fileName": file_name,
+            "projectId": project_id,
+            "versionId": version_id,
+        }),
+    );
+    std::thread::spawn(move || {
+        run_mod_update(&tid, &instance_id, &file_name, &project_id, &version_id)
+    });
+    Ok(t)
+}
+
+/// 模组更新的 worker：命令与「重试」共用
+fn run_mod_update(tid: &str, instance_id: &str, file_name: &str, project_id: &str, version_id: &str) {
+    task::start(tid);
+    let game = game_root();
+    let t2 = tid.to_string();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        updates::apply_update(
+            &game,
+            instance_id,
+            file_name,
+            project_id,
+            version_id,
+            move |c, t, _s, _ts| {
+                task::progress(&t2, "download", format!("下载 {c}/{t}"), c, t);
+            },
+        )
+    }))
+    .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|更新线程崩溃".to_string()));
+
+    match res {
+        Ok((new_file, removed)) => task::finish(
+            tid,
+            serde_json::json!({ "kind": "mod-update", "file": new_file, "removed": removed }),
+        ),
+        Err(_) if task::is_cancelled(tid) => task::cancelled(tid),
+        Err(e) => task::fail(tid, e),
+    }
+}
+
+// ── 任务重试 ────────────────────────────────────────────────────
+
+/// 校验任务能否重试，返回 (kind, 发起参数)
+fn retry_spec_of(task_id: &str) -> Result<(String, serde_json::Value), String> {
+    let old = task::get(task_id).ok_or_else(|| "INVALID_VALUE|任务不存在".to_string())?;
+    if !matches!(old.state.as_str(), "error" | "cancelled") {
+        return Err("INVALID_VALUE|只有失败或已取消的任务可以重试".into());
+    }
+    let spec = old
+        .retry_spec
+        .ok_or_else(|| "UNSUPPORTED|该任务没有记录发起参数，无法重试".to_string())?;
+    let kind = spec
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .unwrap_or("")
+        .to_string();
+    if kind.is_empty() {
+        return Err("UNSUPPORTED|任务缺少类型信息".into());
+    }
+    Ok((kind, spec))
+}
+
+#[tauri::command]
+fn retry_task(task_id: String) -> Result<Task, String> {
+    let (kind, spec) = retry_spec_of(&task_id)?;
+    let get = |k: &str| {
+        spec.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("UNSUPPORTED|缺少参数 {k}"))
+    };
+
+    match kind.as_str() {
+        "install" => {
+            let gv = get("gameVersion")?;
+            if task::has_running_kind("install", None, Some(&gv)) {
+                return Err("BUSY|该版本已在安装中".into());
+            }
+            let t = task::create("install", None, Some(gv.clone()), format!("重试安装 {gv}"));
+            task::set_retry_spec(&t.task_id, spec.clone());
+            task::update(&t.task_id, |x| x.retry_of = Some(task_id.clone()));
+            let tid = t.task_id.clone();
+            std::thread::spawn(move || run_install(&tid, gv));
+            Ok(t)
+        }
+        "mod-update" => {
+            let inst = get("instanceId")?;
+            let file = get("fileName")?;
+            let pid = get("projectId")?;
+            let vid = get("versionId")?;
+            if task::has_running_kind("mod-update", Some(&inst), None) {
+                return Err("BUSY|该实例已有更新任务在运行".into());
+            }
+            let t = task::create(
+                "mod-update",
+                Some(inst.clone()),
+                None,
+                format!("重试更新 {file}"),
+            );
+            task::set_retry_spec(&t.task_id, spec.clone());
+            task::update(&t.task_id, |x| x.retry_of = Some(task_id.clone()));
+            let tid = t.task_id.clone();
+            std::thread::spawn(move || run_mod_update(&tid, &inst, &file, &pid, &vid));
+            Ok(t)
+        }
+        _ => Err("UNSUPPORTED|该任务需要重新规划，请从界面重新发起".into()),
+    }
+}
+
+/// 本项目下载过的 JDK（只读列表，删除需用户单独确认）
+#[tauri::command]
+fn list_managed_jdks() -> Vec<jdk::ManagedJdk> {
+    jdk::list_managed(&game_root())
+}
+
+/// 列出某个光影组件的全部兼容发行版本（供玩家自选）
+#[tauri::command]
+fn list_component_versions(
+    id: String,
+    game_version: String,
+    loader: Option<String>,
+) -> Result<Vec<components::ComponentVersion>, String> {
+    components::versions(&id, &game_version, loader.as_deref())
+}
+// ── JDK 下载 ────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn install_java(major: u32) -> Result<Task, String> {
+    if task::has_running_kind("jdk", None, None) {
+        return Err("BUSY|已有 Java 下载任务在运行".into());
+    }
+    let t = task::create("jdk", None, None, format!("下载 Java {major}"));
+    task::set_retry_spec(&t.task_id, serde_json::json!({ "kind": "install-java", "major": major }));
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let t2 = tid.clone();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let tc = tid.clone();
+            jdk::install(
+                major,
+                &game,
+                move || task::is_cancelled(&tc),
+                move |stage, done, total| {
+                    task::progress(&t2, stage, format!("Java {major} {done}/{total}"), done, total);
+                },
+            )
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|Java 下载线程崩溃".to_string()));
+
+        match res {
+            Ok(r) => task::finish(
+                &tid,
+                serde_json::json!({
+                    "kind": "install-java",
+                    "major": r.major,
+                    "version": r.version,
+                    "path": r.path,
+                }),
+            ),
+            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
+}
+
+// ── 账号 ────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MsaStatus {
+    configured: bool,
+    client_id_masked: Option<String>,
+    reason: Option<String>,
+    steps: Vec<String>,
+}
+
+#[tauri::command]
+fn msa_status() -> MsaStatus {
+    let cfg = core::load_config();
+    match cfg.msa_client_id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(id) => MsaStatus {
+            configured: true,
+            client_id_masked: Some(format!("{}…{}", &id[..8.min(id.len())], &id[id.len().saturating_sub(4)..])),
+            reason: None,
+            steps: vec![],
+        },
+        None => MsaStatus {
+            configured: false,
+            client_id_masked: None,
+            reason: Some("未配置 Azure 应用 ID，微软登录不可用".into()),
+            steps: vec![
+                "在 Azure Portal 注册一个应用（个人账号即可，选择「移动和桌面应用」）".into(),
+                "在「身份验证」里启用「允许公共客户端流」，不需要回调地址".into(),
+                "把应用（客户端）ID 填进配置项 msaClientId".into(),
+                "本启动器不内置任何第三方客户端 ID，必须用你自己的应用".into(),
+            ],
+        },
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountView {
+    kind: String,
+    name: String,
+    online: bool,
+    note: Option<String>,
+}
+
+#[tauri::command]
+fn get_account() -> AccountView {
+    AccountView {
+        kind: "offline".into(),
+        name: core::load_config().username,
+        online: false,
+        note: Some("离线档案：联机时由服务器分配身份".into()),
+    }
+}
+
+// ── 光影支持组件 ────────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_component_catalog(
+    game_version: String,
+    loader: Option<String>,
+) -> Result<components::ComponentCatalog, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        components::catalog(&game_version, loader.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+// ── Java ────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JavaReport {
+    runtimes: Vec<java::JavaRuntime>,
+    /// 当前选中实例需要的 Java 主版本（读不到为 null）
+    required_major: Option<u32>,
+    /// 建议使用的运行时（路径）
+    recommended: Option<String>,
+}
+
+#[tauri::command]
+async fn list_java_runtimes(instance_id: Option<String>) -> Result<JavaReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game = game_root();
+        let runtimes = java::scan(&game);
+        let required = instance_id
+            .as_deref()
+            .and_then(|id| instance::find(&game, id, &play_stats))
+            .and_then(|i| java::required_major(&game, &i.game_version));
+        let recommended = required
+            .and_then(|m| java::pick_for(&runtimes, m))
+            .map(|r| r.path);
+        JavaReport {
+            runtimes,
+            required_major: required,
+            recommended,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+// ── 整合包 ──────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn prepare_modpack_install(
+    request: modpack::ModpackRequest,
+) -> Result<modpack::ModpackPlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || modpack::prepare(&game, request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, String> {
+    let stored = modpack::take(&plan_id, revision)?;
+    if let Some(first) = stored.plan.issues.iter().find(|i| i.blocking) {
+        return Err(format!("{}|{}", first.code, first.message));
+    }
+    if task::has_running_kind("modpack", None, Some(&stored.plan.info.mc_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
+    let t = task::create(
+        "modpack",
+        None,
+        Some(stored.plan.info.mc_version.clone()),
+        format!("安装整合包 {}", stored.plan.info.name),
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let cfg = core::load_config();
+        let mut created: Option<String> = None;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<Instance, String> {
+                let index = modpack::read_index(&stored.pack_path)?;
+                let meta = instance::InstanceMeta {
+                    id: instance::new_id(),
+                    name: stored.plan.info.name.clone(),
+                    game_version: index.mc_version.clone(),
+                    loader_kind: index.loader_kind.clone(),
+                    loader_version: index.loader_version.clone(),
+                    launch_version: None,
+                    memory_mb: None,
+                    jvm_args: vec![],
+                    java_path: None,
+                    cover: None,
+                    created_at: time::now_iso(),
+                };
+                let inst = instance::create(&game, &meta)?;
+                created = Some(inst.id.clone());
+                // 整合包安装期间也要保护这个实例
+                task::bind_instance(&tid, &inst.id);
+
+                if !core::version_installed(&game, &index.mc_version) {
+                    let t2 = tid.clone();
+                    core::install(&index.mc_version, &game, &cfg.username, move |p| {
+                        task::progress(&t2, &p.stage, format!("游戏本体 {}", p.label), p.done, p.total);
+                    })?;
+                }
+                task::check_cancel(&tid)?;
+
+                if let (Some(kind), Some(ver)) = (&index.loader_kind, &index.loader_version) {
+                    let t2 = tid.clone();
+                    if kind == "forge" || kind == "neoforge" {
+                        let generated = core::install_forge_like(
+                            kind,
+                            &index.mc_version,
+                            ver,
+                            &game,
+                            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                        )?;
+                        let mut m = instance::read_meta(&game, &inst.id)
+                            .ok_or_else(|| "INSTANCE_NOT_FOUND|元数据丢失".to_string())?;
+                        m.launch_version = Some(generated);
+                        instance::save_meta(&game, &m)?;
+                    } else {
+                        core::install_loader(
+                            &index.mc_version,
+                            kind,
+                            ver,
+                            &game,
+                            &cfg.username,
+                            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                        )?;
+                    }
+                }
+                task::check_cancel(&tid)?;
+
+                let inst_dir = instance::instance_dir(&game, &inst.id);
+                let t2 = tid.clone();
+                let tc = tid.clone();
+                modpack::download_files(
+                    &index,
+                    &inst_dir,
+                    &move || task::is_cancelled(&tc),
+                    move |d, total| {
+                        task::progress(&t2, "download", format!("整合包文件 {d}/{total}"), d, total);
+                    },
+                )?;
+                task::check_cancel(&tid)?;
+
+                let t3 = tid.clone();
+                let tc2 = tid.clone();
+                modpack::extract_overrides(
+                    &stored.pack_path,
+                    &inst_dir,
+                    &move || task::is_cancelled(&tc2),
+                    move |d, _| {
+                        task::progress(&t3, "extract", format!("解压覆盖文件 {d}"), d, 0);
+                    },
+                )?;
+
+                let fresh = instance::find(&game, &inst.id, &play_stats)
+                    .ok_or_else(|| "INTERNAL|安装后读不到实例".to_string())?;
+                Ok(fresh)
+            },
+        ));
+
+        match result {
+            // 已经装完才收到取消：如实报告完成，不假装已取消
+            Ok(Ok(inst)) if task::is_cancelled(&tid) => {
+                emit_instance_changed(&inst.id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({ "kind": "modpack", "instance": inst, "cancelledLate": true }),
+                );
+            }
+            Ok(Ok(inst)) => {
+                emit_instance_changed(&inst.id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({ "kind": "modpack", "instance": inst }),
+                );
+            }
+            Ok(Err(e)) if task::is_cancelled(&tid) || e.starts_with("CANCELLED") => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::cancelled(&tid);
+            }
+            Ok(Err(e)) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::fail(&tid, e);
+            }
+            Err(_) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game, id, false);
+                }
+                task::fail(&tid, "INTERNAL|后台任务异常|整合包线程崩溃".into());
+            }
+        }
+    });
+    Ok(t)
+}
+
+// ── 日志与诊断 ──────────────────────────────────────────────────
+
+fn instance_dir_of(instance_id: &str) -> Result<PathBuf, String> {
+    let game = game_root();
+    let inst = instance::find(&game, instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    Ok(PathBuf::from(inst.dir))
+}
+
+#[tauri::command]
+fn list_logs(instance_id: String) -> Result<Vec<logs::LogFile>, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    Ok(logs::list(&dir))
+}
+
+#[tauri::command]
+fn read_log(
+    instance_id: String,
+    log_id: String,
+    limit: Option<u32>,
+) -> Result<logs::LogText, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    logs::read(&dir, &log_id, limit)
+}
+
+/// 只生成脱敏预览；上传由用户在界面上确认后另行处理
+#[tauri::command]
+fn prepare_diagnosis(
+    instance_id: String,
+    log_ids: Vec<String>,
+    max_lines: Option<u32>,
+) -> Result<logs::DiagnosisPreview, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    logs::prepare(&dir, &log_ids, max_lines.unwrap_or(300))
+}
+
+// ── 安装计划 ────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn prepare_game_install(
+    request: plan::GameInstallRequest,
+) -> Result<plan::GameInstallPlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || plan::prepare(&game, request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn start_game_install(plan_id: String, revision: u32) -> Result<Task, String> {
+    let p = plan::take(&plan_id, revision)?;
+    if let Some(first) = plan::has_blocking(&p) {
+        return Err(format!("{}|{}", first.code, first.message));
+    }
+
+    if task::has_running_kind("game-install", None, Some(&p.request.game_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
+    let t = task::create(
+        "game-install",
+        None,
+        Some(p.request.game_version.clone()),
+        format!("安装 {}", p.request.name),
+    );
+    let tid = t.task_id.clone();
+
+    // 后台执行，body 抽成 run_game_install 便于自检复用
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let (result, created) = run_game_install(&tid, &p);
+        match result {
+            Ok(inst) => {
+                emit_instance_changed(&inst.id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({ "kind": "game-install", "instance": inst }),
+                );
+            }
+            Err(_) if task::is_cancelled(&tid) => {
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game_root(), id, false);
+                }
+                task::cancelled(&tid);
+            }
+            Err(e) => {
+                // 失败回滚：只删本次新建的实例目录
+                if let Some(id) = &created {
+                    let _ = instance::delete(&game_root(), id, false);
+                }
+                task::fail(&tid, e);
+            }
+        }
+    });
+
+    Ok(t)
+}
+
+/// 安装计划的执行体（命令与自检共用）
+///
+/// 返回 (结果, 本次新建的实例 id)，调用方据此决定回滚。
+fn run_game_install(
+    tid: &str,
+    p: &plan::GameInstallPlan,
+) -> (Result<Instance, String>, Option<String>) {
+    let game = game_root();
+    let cfg = core::load_config();
+    let v = p.request.game_version.clone();
+    let mut created: Option<String> = None;
+
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Instance, String> {
+            if !core::version_installed(&game, &v) {
+                let t2 = tid.to_string();
+                core::install(&v, &game, &cfg.username, move |pr| {
+                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                })?;
+            }
+            task::check_cancel(&tid)?;
+
+            let meta = instance::InstanceMeta {
+                id: p.target.proposed_instance_id.clone(),
+                name: p.request.name.trim().to_string(),
+                game_version: v.clone(),
+                loader_kind: p.request.loader.as_ref().map(|l| l.kind.clone()),
+                loader_version: p.request.loader.as_ref().map(|l| l.version.clone()),
+                launch_version: None,
+                memory_mb: p.request.memory_mb,
+                jvm_args: vec![],
+                java_path: None,
+                cover: None,
+                created_at: time::now_iso(),
+            };
+            let inst = instance::create(&game, &meta)?;
+            created = Some(inst.id.clone());
+            // 实例已存在，立刻把任务绑上去，避免安装期间被删除/改名
+            task::bind_instance(tid, &inst.id);
+            task::check_cancel(&tid)?;
+
+            if let Some(l) = &p.request.loader {
+                let t2 = tid.to_string();
+                if l.kind == "forge" || l.kind == "neoforge" {
+                    // installer 会生成 {mc}-forge-{ver} 之类的版本，记下来供启动使用
+                    let generated = core::install_forge_like(&l.kind, &v, &l.version, &game, move |pr| {
+                        task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                    })?;
+                    let mut meta = instance::read_meta(&game, &inst.id)
+                        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例元数据丢失".to_string())?;
+                    meta.launch_version = Some(generated);
+                    instance::save_meta(&game, &meta)?;
+                } else {
+                    core::install_loader(&v, &l.kind, &l.version, &game, &cfg.username, move |pr| {
+                        task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                    })?;
+                }
+            }
+            task::check_cancel(&tid)?;
+
+            // 计划里挑选的光影支持组件：加载器装好之后再按实例真实 id 安装
+            for comp in &p.components {
+                task::check_cancel(&tid)?;
+                let req = resources::ResourceInstallRequest {
+                    instance_id: inst.id.clone(),
+                    kind: "mod".into(),
+                    project_id: comp.project_id.clone(),
+                    version_id: comp.version_id.clone(),
+                    world_id: None,
+                    overwrite: false,
+                };
+                let rp = resources::prepare(&game, req, &play_stats)?;
+                if let Some(bad) = rp.issues.iter().find(|i| i.blocking) {
+                    return Err(format!(
+                        "INCOMPATIBLE|{} 无法安装|{}",
+                        comp.label, bad.message
+                    ));
+                }
+                let stored = resources::take(&rp.plan_id, rp.revision)?;
+                let label = comp.label.clone();
+                let t2 = tid.to_string();
+                let t3 = tid.to_string();
+                resources::execute(
+                    &stored,
+                    move || task::is_cancelled(&t3),
+                    move |done, total| {
+                        task::progress(
+                            &t2,
+                            "component",
+                            format!("安装 {label} {done}/{total}"),
+                            done,
+                            total,
+                        );
+                    },
+                )?;
+            }
+            task::check_cancel(&tid)?;
+
+            let fresh = instance::find(&game, &inst.id, &play_stats)
+                .ok_or_else(|| "INTERNAL|安装后读不到实例".to_string())?;
+            if !fresh.health.ok {
+                return Err(format!(
+                    "VERIFY_FAILED|安装完成但文件不完整|{}",
+                    fresh.health.reasons.join("; ")
+                ));
+            }
+            Ok(fresh)
+        }));
+
+
+    match result {
+        Ok(r) => (r, created),
+        Err(_) => (Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()), created),
+    }
+}
+
+/// 修复实例：只补缺失的文件，不动已有内容
+#[tauri::command]
+async fn repair_instance(instance_id: String) -> Result<Task, String> {
+    let inst = managed_instance(&instance_id)?;
+    if session::active(Some(&instance_id)).is_some() {
+        return Err("INSTANCE_BUSY|实例正在运行，先退出游戏".into());
+    }
+    if task::has_running_kind("repair", Some(&instance_id), None) {
+        return Err("BUSY|该实例已有修复任务在运行".into());
+    }
+    let t = task::create(
+        "repair",
+        Some(instance_id.clone()),
+        Some(inst.game_version.clone()),
+        format!("修复 {}", inst.name),
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let game = game_root();
+        let cfg = core::load_config();
+        let meta = match instance::read_meta(&game, &instance_id) {
+            Some(m) => m,
+            None => {
+                task::fail(&tid, "INSTANCE_NOT_FOUND|实例不存在".into());
+                return;
+            }
+        };
+        let steps = core::repair_steps(&game, &meta);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+            for step in &steps {
+                task::check_cancel(&tid)?;
+                match *step {
+                    "base" => {
+                        let t2 = tid.to_string();
+                        core::install(&meta.game_version, &game, &cfg.username, move |pr| {
+                            task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                        })?;
+                    }
+                    "loader" => {
+                        if let (Some(kind), Some(ver)) = (&meta.loader_kind, &meta.loader_version) {
+                            let t2 = tid.to_string();
+                            if kind == "forge" || kind == "neoforge" {
+                                let generated = core::install_forge_like(kind, &meta.game_version, ver, &game, move |pr| {
+                                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                                })?;
+                                let mut m = meta.clone();
+                                m.launch_version = Some(generated);
+                                instance::save_meta(&game, &m)?;
+                            } else {
+                                core::install_loader(&meta.game_version, kind, ver, &game, &cfg.username, move |pr| {
+                                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                                })?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|修复线程崩溃".to_string()));
+
+        match res {
+            Ok(()) => {
+                let version = instance::read_meta(&game, &instance_id)
+                    .and_then(|m| m.launch_version)
+                    .unwrap_or_else(|| meta.game_version.clone());
+                let health = instance::health_for_test(&game, &version);
+                if health.ok {
+                    task::finish(
+                        &tid,
+                        serde_json::json!({
+                            "kind": "repair",
+                            "instanceId": instance_id,
+                            "steps": steps,
+                            "ok": true
+                        }),
+                    );
+                } else {
+                    task::fail(
+                        &tid,
+                        format!("VERIFY_FAILED|修复后仍不完整|{}", health.reasons.join("; ")),
+                    );
+                }
+            }
+            Err(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
+}
+/// 结构化日志诊断：返回命中的问题分类与脱敏原文（不上传任何内容）
+#[tauri::command]
+fn diagnose_instance(
+    instance_id: String,
+    log_id: Option<String>,
+    max_lines: Option<u32>,
+) -> Result<logs::DiagnosisReport, String> {
+    let inst = managed_instance(&instance_id)?;
+    logs::diagnose(
+        std::path::Path::new(&inst.dir),
+        log_id.as_deref(),
+        max_lines.unwrap_or(5000).min(20000),
+    )
+}
 // ── 加载器 ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -492,6 +1455,19 @@ async fn start_install_loader(
     version: String,
 ) -> Result<Task, String> {
     let inst = managed_instance(&instance_id)?;
+    if task::has_running_kind("loader", Some(&instance_id), Some(&inst.game_version)) {
+        return Err("BUSY|同类任务正在运行，请等待或取消".into());
+    }
+    // 先确认这个加载器版本确实存在且适配该游戏版本（避免跑到一半 404）
+    let builds = loader::builds(&inst.game_version, &kind)?;
+    if !builds.iter().any(|b| b.version == version) {
+        let sample: Vec<String> = builds.iter().take(3).map(|b| b.version.clone()).collect();
+        return Err(format!(
+            "INCOMPATIBLE|{kind} {version} 没有适用于 Minecraft {} 的构建|可用示例：{}",
+            inst.game_version,
+            if sample.is_empty() { "无".to_string() } else { sample.join(", ") }
+        ));
+    }
     let t = task::create(
         "loader",
         Some(instance_id.clone()),
@@ -504,33 +1480,59 @@ async fn start_install_loader(
         let cfg = core::load_config();
         let main_dir = PathBuf::from(&cfg.game_dir);
         let t2 = tid.clone();
-        let res = core::install_loader(
-            &inst.game_version,
-            &kind,
-            &version,
-            &main_dir,
-            &cfg.username,
-            move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
-        );
-        match res {
-            Ok(_) if task::is_cancelled(&tid) => task::cancelled(&tid),
-            Ok(_) => {
-                let game = game_root();
-                if let Some(mut meta) = instance::read_meta(&game, &instance_id) {
-                    meta.loader_kind = Some(kind.clone());
-                    meta.loader_version = Some(version.clone());
-                    let _ = instance::save_meta(&game, &meta);
-                }
-                emit_instance_changed(&instance_id, "updated");
-                task::finish(
-                    &tid,
-                    serde_json::json!({
-                        "kind": "loader",
-                        "loader": { "kind": kind, "version": version },
-                    }),
-                );
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Option<String>, String> {
+            if kind == "forge" || kind == "neoforge" {
+                // installer 产出的 version id 要记进实例，启动时用它
+                core::install_forge_like(&kind, &inst.game_version, &version, &main_dir, move |p| {
+                    task::progress(&t2, &p.stage, p.label, p.done, p.total);
+                })
+                .map(Some)
+            } else {
+                core::install_loader(
+                    &inst.game_version,
+                    &kind,
+                    &version,
+                    &main_dir,
+                    &cfg.username,
+                    move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                )
+                .map(|_| None)
             }
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|加载器线程崩溃".to_string()));
+        let late = task::is_cancelled(&tid);
+        match res {
+            Err(_) if late => task::cancelled(&tid),
             Err(e) => task::fail(&tid, e),
+            Ok(generated) => {
+                let game = game_root();
+                // 元数据写入失败必须让任务失败，否则前端以为装好了但实例仍记不到 loader
+                let saved = match instance::read_meta(&game, &instance_id) {
+                    Some(mut meta) => {
+                        meta.loader_kind = Some(kind.clone());
+                        meta.loader_version = Some(version.clone());
+                        if generated.is_some() {
+                            meta.launch_version = generated.clone();
+                        }
+                        instance::save_meta(&game, &meta)
+                    }
+                    None => Err("INSTANCE_NOT_FOUND|实例元数据丢失".to_string()),
+                };
+                match saved {
+                    Ok(_) => {
+                        emit_instance_changed(&instance_id, "updated");
+                        task::finish(
+                            &tid,
+                            serde_json::json!({
+                                "kind": "loader",
+                                "loader": { "kind": kind, "version": version },
+                                "cancelledLate": late,
+                            }),
+                        );
+                    }
+                    Err(e) => task::fail(&tid, e),
+                }
+            }
         }
     });
     Ok(t)
@@ -613,14 +1615,33 @@ fn legacy_msg(encoded: String) -> String {
     }
 }
 
-struct DlgHandler<F: FnMut(u32, u32, u32, u32)>(F);
-
-impl<F: FnMut(u32, u32, u32, u32)> portablemc::download::Handler for DlgHandler<F> {
-    fn on_progress(&mut self, count: u32, total: u32, size: u32, total_size: u32) {
-        (self.0)(count, total, size, total_size)
+/// 旧版下载命令的目录规则（可单独测试）
+///
+/// 规则：Mod / 数据包必须指定实例，不允许直接写共享游戏目录；
+/// 资源包 / 光影包 / 整合包允许落到全局目录（它们本来就不是实例专属）。
+pub fn legacy_sub_dir(kind: &str) -> &'static str {
+    match kind {
+        "resourcepack" => "resourcepacks",
+        "shaderpack" => "shaderpacks",
+        "modpack" => "modpacks",
+        "datapack" => "datapacks",
+        _ => "mods",
     }
 }
 
+pub fn legacy_requires_instance(kind: &str) -> bool {
+    matches!(kind, "mod" | "datapack")
+}
+
+/// ⚠️ 旧接口：新代码请用 prepare_resource_install + start_resource_install。
+///
+/// 本轮安全加固：
+/// - Mod / 数据包必须给 instanceId，禁止写共享目录；
+/// - 目标已存在时默认拒绝覆盖（除非显式 overwrite=true）；
+/// - 可选传入 sha1 / sha512，下载后校验（校验通过才落正式文件）；
+/// - 目标路径同时校验落在实例目录（若给了实例）与游戏目录内。
+///
+/// 已知限制：重定向由底层下载器跟随，白名单只校验初始 URL。
 #[tauri::command]
 async fn download_to(
     app: AppHandle,
@@ -628,25 +1649,29 @@ async fn download_to(
     kind: String,
     filename: String,
     instance_id: Option<String>,
+    sha1: Option<String>,
+    sha512: Option<String>,
+    overwrite: Option<bool>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let cfg = core::load_config();
         let game = PathBuf::from(&cfg.game_dir);
-        let sub = match kind.as_str() {
-            "resourcepack" => "resourcepacks",
-            "shaderpack" => "shaderpacks",
-            "modpack" => "modpacks",
-            "datapack" => "datapacks",
-            _ => "mods",
-        };
-        // 指定实例时落到实例目录（契约 v3 §5.7）
-        let dir = match instance_id {
+        let sub = legacy_sub_dir(&kind);
+
+        if instance_id.is_none() && legacy_requires_instance(&kind) {
+            return Err(
+                "INVALID_VALUE|Mod / 数据包必须指定实例；建议改用 prepare_resource_install".into(),
+            );
+        }
+
+        let (dir, root) = match instance_id {
             Some(id) => {
                 let inst = instance::find(&game, &id, &play_stats)
                     .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
-                PathBuf::from(inst.dir).join(sub)
+                let d = PathBuf::from(&inst.dir);
+                (d.join(sub), d)
             }
-            None => game.join(sub),
+            None => (game.join(sub), game.clone()),
         };
 
         let safe = PathBuf::from(&filename)
@@ -654,15 +1679,24 @@ async fn download_to(
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "download.bin".into());
 
-        // 目标必须落在游戏目录内（防空目录穿越与 junction 逃逸），且先落 .part
-        let dest = net::ensure_within(&game, &dir.join(&safe))?;
+        // 目标必须落在（实例或游戏）目录内，且先落 .part
+        let dest = net::ensure_within(&root, &dir.join(&safe))?;
+        let _ = net::ensure_within(&game, &dest)?;
+
+        if dest.exists() && overwrite != Some(true) {
+            return Err(format!(
+                "FILE_EXISTS|{} 已存在；如需覆盖请显式传 overwrite=true",
+                safe
+            ));
+        }
 
         let name = safe.clone();
         let app2 = app.clone();
-        net::download_atomic(
+        net::download_verified(
             &url,
             &dest,
-            None,
+            sha1.as_deref(),
+            sha512.as_deref(),
             move |c: u32, tc: u32, s: u32, ts: u32| {
                 let _ = app2.emit("astral://file", (&name, c, tc, s, ts));
             },
@@ -672,6 +1706,7 @@ async fn download_to(
     .await
     .map_err(|e| e.to_string())?
 }
+
 
 // ── 启动 ────────────────────────────────────────────────────────
 
@@ -706,9 +1741,12 @@ pub fn run() {
             get_tasks,
             get_task,
             cancel_task,
+            retry_task,
             start_install,
             start_launch,
             start_create_instance,
+            prepare_game_install,
+            start_game_install,
             get_active_session,
             list_sessions,
             list_saves,
@@ -719,7 +1757,28 @@ pub fn run() {
             list_loaders,
             start_install_loader,
             list_loader_builds,
+            repair_instance,
             list_target_worlds,
+            get_resource_project,
+            list_resource_files,
+            prepare_resource_install,
+            start_resource_install,
+            export_modpack,
+            check_mod_updates,
+            start_mod_update,
+            msa_status,
+            get_account,
+            get_component_catalog,
+            list_component_versions,
+            list_java_runtimes,
+            install_java,
+            list_managed_jdks,
+            prepare_modpack_install,
+            start_modpack_install,
+            list_logs,
+            read_log,
+            prepare_diagnosis,
+            diagnose_instance,
             install_version,
             launch_version,
             download_to
@@ -735,9 +1794,12 @@ pub fn run() {
 pub fn selftest() -> i32 {
     let mut fails = 0i32;
     let mut log = String::new();
+    let mut results: Vec<(String, bool)> = Vec::new();
     macro_rules! check {
         ($name:expr, $cond:expr) => {{
-            if $cond {
+            let ok = $cond;
+            results.push(($name.to_string(), ok));
+            if ok {
                 log.push_str(&format!("PASS {}\n", $name));
             } else {
                 fails += 1;
@@ -790,6 +1852,7 @@ pub fn selftest() -> i32 {
         game_version: "1.20.1".into(),
         loader_kind: None,
         loader_version: None,
+        launch_version: None,
         memory_mb: None,
         jvm_args: vec![],
         java_path: None,
@@ -927,6 +1990,17 @@ pub fn selftest() -> i32 {
         session::stats_for("inst_selftest").last_played.is_some()
     );
 
+    // 按 pid 对账：pid 0 永不存活，重启后应被收尾并标记 reconciled
+    let _dead = session::begin("inst_reconcile", "task_r", 0);
+    session::reconcile();
+    let rec = session::list(Some("inst_reconcile"), 1);
+    check!(
+        "session reconcile",
+        rec.first()
+            .map(|s| s.reconciled && s.exit_code.is_none() && s.state == "exited")
+            .unwrap_or(false)
+    );
+
     let save = game.join("saves").join("World1");
     let _ = std::fs::create_dir_all(&save);
     let _ = std::fs::write(save.join("level.dat"), "x");
@@ -1001,6 +2075,1146 @@ pub fn selftest() -> i32 {
     );
     let _ = std::fs::remove_dir_all(&saves_dir);
 
+    // 离线身份：用户名校验 + 旧 UUID 兼容检测
+    check!(
+        "username valid",
+        account::validate_username("Steve").is_ok() && account::validate_username("a_b1").is_ok()
+    );
+    check!(
+        "username invalid",
+        account::validate_username("ab").is_err()
+            && account::validate_username("玩家").is_err()
+            && account::validate_username("bad name").is_err()
+    );
+    let id_dir = std::env::temp_dir().join(format!("astral-identity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&id_dir);
+    check!(
+        "no legacy identity on empty",
+        !account::has_legacy_identity(&id_dir, "Steve")
+    );
+    let pd = id_dir.join("World1").join("playerdata");
+    let _ = std::fs::create_dir_all(&pd);
+    let legacy_file = format!("{}.dat", account::legacy_uuid("Steve").hyphenated());
+    let _ = std::fs::write(pd.join(&legacy_file), b"x");
+    check!(
+        "legacy identity detected",
+        account::has_legacy_identity(&id_dir, "Steve")
+    );
+    let _ = std::fs::remove_dir_all(&id_dir);
+
+    // 安装计划：校验 → 一次性取走 → 改写/过期拒绝
+    let plan_game = std::env::temp_dir().join(format!("astral-plan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&plan_game);
+    let _ = std::fs::create_dir_all(plan_game.join("versions/1.20.1"));
+    let _ = std::fs::write(plan_game.join("versions/1.20.1/1.20.1.json"), "{}");
+    let _ = std::fs::write(plan_game.join("versions/1.20.1/1.20.1.jar"), "x");
+
+    let req = plan::GameInstallRequest {
+        name: "计划测试".into(),
+        game_version: "1.20.1".into(),
+        loader: None,
+        memory_mb: Some(2048),
+        shader_support: None,
+        shader_support_version: None,
+    };
+    let p = plan::prepare(&plan_game, req.clone()).expect("prepare");
+    check!(
+        "plan prepared",
+        p.plan_id.starts_with("plan_") && p.issues.iter().all(|i| !i.blocking)
+    );
+    check!("plan reuses installed", p.files.is_empty());
+    check!("plan take", plan::take(&p.plan_id, 1).is_ok());
+    check!("plan single use", plan::take(&p.plan_id, 1).is_err());
+
+    let mut bad_name = req.clone();
+    bad_name.name = "bad/name".into();
+    let p_bad = plan::prepare(&plan_game, bad_name).expect("prepare bad");
+    check!(
+        "plan rejects bad name",
+        p_bad.issues.iter().any(|i| i.blocking && i.code == "INVALID_NAME")
+    );
+
+    let mut forge_req = req.clone();
+    forge_req.loader = Some(plan::LoaderSelection {
+        kind: "forge".into(),
+        version: "47.2.0".into(),
+    });
+    let p_forge = plan::prepare(&plan_game, forge_req).expect("prepare forge");
+    check!(
+        "plan accepts forge",
+        p_forge.issues.iter().all(|i| !i.blocking)
+    );
+
+    check!(
+        "installer url forge",
+        core::installer_url("forge", "1.20.1", "47.2.0")
+            .map(|u| u.ends_with("forge-1.20.1-47.2.0-installer.jar"))
+            .unwrap_or(false)
+    );
+    check!(
+        "installer url neoforge",
+        core::installer_url("neoforge", "1.21.1", "21.1.72")
+            .map(|u| u.ends_with("neoforge-21.1.72-installer.jar"))
+            .unwrap_or(false)
+    );
+    check!(
+        "installer url neoforge 1.20.1",
+        core::installer_url("neoforge", "1.20.1", "47.1.106")
+            .map(|u| u.contains("net/neoforged/forge/1.20.1-47.1.106/"))
+            .unwrap_or(false)
+    );
+
+    let p_rev = plan::prepare(&plan_game, req.clone()).expect("prepare rev");
+    check!("plan revision guard", plan::take(&p_rev.plan_id, 2).is_err());
+    let _ = std::fs::remove_dir_all(&plan_game);
+
+    // 可选的真实安装验证：ASTRAL_LIVE_FORGE="mc|ver|dir" 或 "kind|mc|ver|dir"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_FORGE") {
+        let raw: Vec<&str> = spec.split('|').collect();
+        let parts: Vec<&str> = if raw.len() == 4 {
+            raw[1..].to_vec()
+        } else {
+            raw.clone()
+        };
+        let kind = if raw.len() == 4 { raw[0] } else { "forge" };
+        if parts.len() == 3 {
+            let dir = std::path::PathBuf::from(parts[2]);
+            log.push_str(&format!("LIVE {kind} start: {spec}\n"));
+            let mut progress_lines = 0;
+            let r = core::install_forge_like(kind, parts[0], parts[1], &dir, |p| {
+                progress_lines += 1;
+                if progress_lines <= 5 {
+                    log.push_str(&format!("  {kind}: {} {}\n", p.stage, p.label));
+                }
+            });
+            match r {
+                Ok(id) => log.push_str(&format!("LIVE {kind} ok: {id}\n")),
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE {kind} failed: {e}\n"));
+                }
+            }
+        }
+    }
+
+    // 可选的真实启动验证：ASTRAL_LIVE_LAUNCH="dir|version"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_LAUNCH") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 || parts.len() == 4 {
+            let dir = std::path::PathBuf::from(parts[0]);
+            // 2 段：dir|version；4 段：dir|version|loaderKind|loaderVersion
+            let loader = if parts.len() == 4 {
+                Some((parts[2].to_string(), parts[3].to_string()))
+            } else {
+                None
+            };
+            log.push_str(&format!("LIVE launch start: {spec}\n"));
+            // 与启动命令走同一个自动挑 Java 的函数
+            let picked_java = core::auto_java_for(&dir, parts[1]);
+            match &picked_java {
+                Some(p) => log.push_str(&format!("LIVE launch java={}\n", p.display())),
+                None => log.push_str("LIVE launch java=default\n"),
+            }
+            let r = core::spawn_with(
+                parts[1],
+                loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
+                &dir,
+                Some(&dir),
+                "Steve",
+                Some(2048),
+                &[],
+                picked_java.as_deref(),
+                |_p| {},
+            );
+            match r {
+                Ok(mut child) => {
+                    let pid = child.id();
+                    let mut alive_ticks = 0;
+                    for _ in 0..20 {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                log.push_str(&format!(
+                                    "LIVE launch exited early: code={:?}\n",
+                                    status.code()
+                                ));
+                                fails += 1;
+                                break;
+                            }
+                            _ => alive_ticks += 1,
+                        }
+                    }
+                    if alive_ticks >= 20 {
+                        log.push_str(&format!(
+                            "LIVE launch ok: pid {pid} still running after 60s\n"
+                        ));
+                        let _ = child.kill();
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE launch failed: {e}\n"));
+                }
+            }
+        }
+    }
+
+    // 可选的真实资源安装验证：ASTRAL_LIVE_RESOURCE="gameDir"
+    if let Ok(dir) = std::env::var("ASTRAL_LIVE_RESOURCE") {
+        let mut spec = dir.split(|c| c == '|');
+        let game_dir = spec.next().unwrap_or("").to_string();
+        let project_id = spec.next().unwrap_or("AANobbMI").to_string();
+        let game = std::path::PathBuf::from(&game_dir);
+        log.push_str(&format!("LIVE resource start: {dir}\n"));
+        let meta = instance::InstanceMeta {
+            id: instance::new_id(),
+            name: "resource-test".into(),
+            game_version: "1.20.1".into(),
+            loader_kind: Some("fabric".into()),
+            loader_version: Some("0.16.9".into()),
+            launch_version: None,
+            memory_mb: None,
+            jvm_args: vec![],
+            java_path: None,
+            cover: None,
+            created_at: time::now_iso(),
+        };
+        let run = || -> Result<String, String> {
+            let inst = instance::create(&game, &meta)?;
+            let files = resources::files(&project_id, Some("1.20.1"), Some("fabric"))?;
+            let first = files
+                .first()
+                .ok_or_else(|| "VERSION_NOT_FOUND|没有兼容文件".to_string())?;
+            let req = resources::ResourceInstallRequest {
+                instance_id: inst.id.clone(),
+                kind: "mod".into(),
+                project_id: project_id.clone(),
+                version_id: first.version_id.clone(),
+                world_id: None,
+                overwrite: false,
+            };
+            let rp = resources::prepare(&game, req, &play_stats)?;
+            if let Some(b) = rp.issues.iter().find(|i| i.blocking) {
+                return Err(format!("{}|{}", b.code, b.message));
+            }
+            let stored = resources::take(&rp.plan_id, 1)?;
+            let p = resources::execute(&stored, || false, |_, _| {})?;
+            Ok(p.to_string_lossy().to_string())
+        };
+        match run() {
+            Ok(p) => log.push_str(&format!("LIVE resource ok: {p}\n")),
+            Err(e) => {
+                fails += 1;
+                log.push_str(&format!("LIVE resource failed: {e}\n"));
+            }
+        }
+    }
+
+    // 日志与诊断预览
+    let log_dir = std::env::temp_dir().join(format!("astral-logs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&log_dir);
+    let _ = std::fs::create_dir_all(log_dir.join("logs"));
+    let _ = std::fs::create_dir_all(log_dir.join("crash-reports"));
+    let _ = std::fs::write(
+        log_dir.join("logs/latest.log"),
+        "line1\nline2\nAuthorization: Bearer abc123\ncontact steve@example.com\nfrom 192.168.1.20\n",
+    );
+    let _ = std::fs::write(log_dir.join("crash-reports/crash-1.txt"), "boom\n");
+    let logs_list = logs::list(&log_dir);
+    check!("logs listed", logs_list.len() == 2);
+    let latest = logs_list.iter().find(|l| l.name == "latest.log").cloned();
+    check!(
+        "log id stable",
+        latest
+            .as_ref()
+            .map(|l| l.id.starts_with("log_") && l.kind == "game")
+            .unwrap_or(false)
+    );
+    let tail = logs::read(&log_dir, &latest.as_ref().unwrap().id, Some(2)).expect("read log");
+    check!("log tail limit", tail.lines == 2 && tail.truncated);
+    check!(
+        "log unknown id rejected",
+        logs::read(&log_dir, "log_00000000", None).is_err()
+    );
+    let preview = logs::prepare(&log_dir, &[latest.unwrap().id], 50).expect("preview");
+    check!(
+        "diagnosis redacted",
+        preview.redactions >= 3
+            && preview.text.contains("<email>")
+            && preview.text.contains("<ip>")
+            && preview.text.contains("<redacted>")
+    );
+    let _ = std::fs::remove_dir_all(&log_dir);
+
+    // 可选的真实整合包安装：ASTRAL_LIVE_MODPACK="gameDir|projectId"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_MODPACK") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let game = std::path::PathBuf::from(parts[0]);
+            let pid = parts[1].to_string();
+            log.push_str(&format!("LIVE modpack start: {spec}\n"));
+            let r = (|| -> Result<String, String> {
+                let vers = crate::net::fetch_json(&format!(
+                    "https://api.modrinth.com/v2/project/{pid}/version"
+                ))?;
+                let arr = vers
+                    .as_array()
+                    .ok_or_else(|| "INTERNAL|版本列表格式异常".to_string())?;
+                let pick = arr
+                    .iter()
+                    .find(|v| {
+                        v.get("game_versions")
+                            .and_then(|g| g.as_array())
+                            .map(|a| a.iter().any(|x| x.as_str() == Some("1.20.1")))
+                            .unwrap_or(false)
+                    })
+                    .or_else(|| arr.first())
+                    .ok_or_else(|| "VERSION_NOT_FOUND|没有版本".to_string())?;
+                let vid = pick
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "INTERNAL|版本缺少 id".to_string())?
+                    .to_string();
+                let plan = modpack::prepare(
+                    &game,
+                    modpack::ModpackRequest {
+                        project_id: pid.clone(),
+                        version_id: vid,
+                        name: None,
+                        memory_mb: None,
+                    },
+                )?;
+                if let Some(b) = plan.issues.iter().find(|i| i.blocking) {
+                    return Err(format!("{}|{}", b.code, b.message));
+                }
+                let stored = modpack::take(&plan.plan_id, 1)?;
+                modpack::install(&stored, &game, "Steve", || false, |_s, _l, _d, _t| {})
+            })();
+            match r {
+                Ok(id) => log.push_str(&format!("LIVE modpack ok: {id}\n")),
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE modpack failed: {e}\n"));
+                }
+            }
+        }
+    }
+
+    // Java 探测的纯逻辑
+    check!(
+        "java major parse",
+        java::parse_major("1.8.0_402") == Some(8)
+            && java::parse_major("17.0.9") == Some(17)
+            && java::parse_major("25.0.1+8-LTS") == Some(25)
+            && java::parse_major("garbage").is_none()
+    );
+    let mk_java = |m: u32| java::JavaRuntime {
+        path: format!("j{m}"),
+        version: m.to_string(),
+        major: m,
+        vendor: "t".into(),
+        bits: Some(64),
+        source: "t".into(),
+    };
+    let rts = vec![mk_java(25), mk_java(21), mk_java(17)];
+    check!(
+        "java pick",
+        java::pick_for(&rts, 17).map(|r| r.major) == Some(17)
+            && java::pick_for(&rts, 18).map(|r| r.major) == Some(21)
+            && java::pick_for(&rts, 30).is_none()
+    );
+
+    // 可选的真实 Java 探测：ASTRAL_LIVE_JAVA="gameDir"
+    if let Ok(dir) = std::env::var("ASTRAL_LIVE_JAVA") {
+        let game = std::path::PathBuf::from(&dir);
+        let rts = java::scan(&game);
+        log.push_str(&format!("LIVE java found {} runtimes\n", rts.len()));
+        for r in rts.iter().take(5) {
+            log.push_str(&format!(
+                "  java {} (major {}) {} {}\n",
+                r.version, r.major, r.vendor, r.path
+            ));
+        }
+        if rts.is_empty() {
+            fails += 1;
+            log.push_str("LIVE java failed: 没有找到任何 Java\n");
+        }
+    }
+
+    // 光影组件匹配逻辑
+    check!(
+        "component loader match",
+        components::loader_allows(&["fabric", "quilt"], Some("fabric"))
+            && components::loader_allows(&["fabric", "quilt"], Some("QUILT"))
+            && !components::loader_allows(&["fabric"], Some("forge"))
+            && !components::loader_allows(&["fabric"], None)
+    );
+
+    // 可选的真实组件目录：ASTRAL_LIVE_COMPONENTS="1.20.1|fabric"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_COMPONENTS") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let cat = components::catalog(parts[0], Some(parts[1]));
+            for c in &cat.shader_support {
+                log.push_str(&format!(
+                    "  component {} available={} version={:?} reason={:?}\n",
+                    c.id, c.available, c.version, c.unavailable_reason
+                ));
+            }
+            let iris = cat.shader_support.iter().find(|c| c.id == "iris");
+            if iris.map(|c| c.available).unwrap_or(false) {
+                log.push_str("LIVE components ok\n");
+            } else {
+                fails += 1;
+                log.push_str("LIVE components failed: iris 不可用\n");
+            }
+        }
+    }
+
+    // 账号：客户端 ID 校验与离线档案
+    check!(
+        "msa client id shape",
+        account::validate_client_id("12345678-1234-1234-1234-123456789abc").is_ok()
+            && account::validate_client_id("not-a-guid").is_err()
+    );
+    let acct = get_account();
+    check!(
+        "account is offline",
+        acct.kind == "offline" && !acct.online && !acct.name.is_empty()
+    );
+    let msa = msa_status();
+    check!("msa status honest", msa.configured == msa.reason.is_none());
+
+    // 可选的真实多类型资源安装：ASTRAL_LIVE_RESKINDS="gameDir"
+    if let Ok(dir) = std::env::var("ASTRAL_LIVE_RESKINDS") {
+        let game = std::path::PathBuf::from(&dir);
+        log.push_str(&format!("LIVE reskinds start: {dir}\n"));
+        let run = || -> Result<Vec<String>, String> {
+            let meta = instance::InstanceMeta {
+                id: instance::new_id(),
+                name: "reskinds-test".into(),
+                game_version: "1.20.1".into(),
+                loader_kind: Some("fabric".into()),
+                loader_version: Some("0.16.9".into()),
+                launch_version: None,
+                memory_mb: None,
+                jvm_args: vec![],
+                java_path: None,
+                cover: None,
+                created_at: time::now_iso(),
+            };
+            let inst = instance::create(&game, &meta)?;
+            let saves = std::path::Path::new(&inst.dirs.saves);
+            std::fs::create_dir_all(saves.join("TestWorld"))
+                .map_err(|e| e.to_string())?;
+            std::fs::write(saves.join("TestWorld/level.dat"), b"x").map_err(|e| e.to_string())?;
+            let world = worlds::list(saves).into_iter().next()
+                .ok_or_else(|| "INTERNAL|测试存档没被识别".to_string())?;
+
+            let mut out = Vec::new();
+            for (kind, pid, wid) in [
+                ("resourcepack", "w0TnApzs", None),
+                ("shaderpack", "HVnmMxH1", None),
+                ("datapack", "8oi3bsk5", Some(world.world_id.as_str())),
+            ] {
+                match resources::live_probe(&game, &inst.id, kind, pid, wid, "1.20.1", Some("fabric")) {
+                    Ok(p) => out.push(format!("{kind} ok: {p}")),
+                    Err(e) => out.push(format!("{kind} failed: {e}")),
+                }
+            }
+            Ok(out)
+        };
+        match run() {
+            Ok(lines) => {
+                for l in &lines {
+                    log.push_str(&format!("  LIVE {l}\n"));
+                    if l.contains("failed") {
+                        fails += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                fails += 1;
+                log.push_str(&format!("LIVE reskinds failed: {e}\n"));
+            }
+        }
+        log.push_str("LIVE reskinds done\n");
+    }
+
+    // 可选的真实更新检查：ASTRAL_LIVE_UPDATES="gameDir|instanceId"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_UPDATES") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let game = std::path::PathBuf::from(parts[0]);
+            if let Some(inst) = instance::find(&game, parts[1], &play_stats) {
+                let loader = inst.loader.as_ref().map(|l| l.kind.clone());
+                let rep = updates::check(
+                    std::path::Path::new(&inst.dirs.mods),
+                    &inst.game_version,
+                    loader.as_deref(),
+                    Some(20),
+                );
+                log.push_str(&format!(
+                    "LIVE updates checked={} unknown={} updates={} skipped={}\n",
+                    rep.checked,
+                    rep.unknown,
+                    rep.updates.len(),
+                    rep.skipped
+                ));
+                for u in rep.updates.iter().take(5) {
+                    log.push_str(&format!(
+                        "  update {} {} -> {}\n",
+                        u.file_name, u.current_version, u.latest_version
+                    ));
+                }
+                if rep.checked == 0 {
+                    fails += 1;
+                    log.push_str("LIVE updates failed: 没有识别出任何 Modrinth 文件\n");
+                }
+            } else {
+                fails += 1;
+                log.push_str("LIVE updates failed: 实例不存在\n");
+            }
+        }
+    }
+
+    // 可选的真实更新执行：ASTRAL_LIVE_UPDATE_APPLY="gameDir|instanceId"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_UPDATE_APPLY") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let game = std::path::PathBuf::from(parts[0]);
+            match instance::find(&game, parts[1], &play_stats) {
+                Some(inst) => {
+                    let loader = inst.loader.as_ref().map(|l| l.kind.clone());
+                    let rep = updates::check(
+                        std::path::Path::new(&inst.dirs.mods),
+                        &inst.game_version,
+                        loader.as_deref(),
+                        Some(5),
+                    );
+                    if let Some(u) = rep.updates.first() {
+                        log.push_str(&format!(
+                            "LIVE update-apply start: {} -> {}\n",
+                            u.file_name, u.latest_version
+                        ));
+                        match updates::apply_update(
+                            &game,
+                            parts[1],
+                            &u.file_name,
+                            &u.project_id,
+                            &u.latest_version_id,
+                            |_, _, _, _| {},
+                        ) {
+                            Ok((new, removed)) => log.push_str(&format!(
+                                "LIVE update-apply ok: {removed} -> {new}\n"
+                            )),
+                            Err(e) => {
+                                fails += 1;
+                                log.push_str(&format!("LIVE update-apply failed: {e}\n"));
+                            }
+                        }
+                    } else {
+                        log.push_str("LIVE update-apply skip: 没有可更新的模组\n");
+                    }
+                }
+                None => {
+                    fails += 1;
+                    log.push_str("LIVE update-apply failed: 实例不存在\n");
+                }
+            }
+        }
+    }
+
+    // 可选的真实导出：ASTRAL_LIVE_EXPORT="gameDir|instanceId"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_EXPORT") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let game = std::path::PathBuf::from(parts[0]);
+            let req = export::ExportRequest {
+                instance_id: parts[1].to_string(),
+                name: "Astral Export Test".into(),
+                version: Some("1.0.0".into()),
+                include_config: false,
+            };
+            match export::export(&game, &req, &play_stats) {
+                Ok(r) => {
+                    log.push_str(&format!(
+                        "LIVE export ok: {} (indexed={} overrides={} bytes={})\n",
+                        r.path, r.indexed_files, r.override_files, r.bytes
+                    ));
+                    match modpack::read_index(std::path::Path::new(&r.path)) {
+                        Ok(idx) => log.push_str(&format!(
+                            "LIVE export roundtrip: mc={} files={} loader={:?}\n",
+                            idx.mc_version,
+                            idx.files.len(),
+                            idx.loader_kind
+                        )),
+                        Err(e) => {
+                            fails += 1;
+                            log.push_str(&format!("LIVE export roundtrip failed: {e}\n"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE export failed: {e}\n"));
+                }
+            }
+        }
+    }
+
+    // 任务去重：同 kind + 同版本视为重复
+    let dup = task::create("dedupe-test", None, Some("9.9.9".into()), "去重测试");
+    check!(
+        "task dedupe detects",
+        task::has_running_kind("dedupe-test", None, Some("9.9.9"))
+    );
+    check!(
+        "task dedupe ignores other version",
+        !task::has_running_kind("dedupe-test", None, Some("8.8.8"))
+    );
+    task::cancelled(&dup.task_id);
+    check!(
+        "task dedupe ignores terminal",
+        !task::has_running_kind("dedupe-test", None, Some("9.9.9"))
+    );
+
+    // 重试：只有终态 + 有参数 + 已知类型才允许
+    let rt = task::create("retry-demo", None, None, "重试演示");
+    check!("retry rejects running", retry_spec_of(&rt.task_id).is_err());
+    task::fail(&rt.task_id, "NETWORK|演示失败".into());
+    check!("retry rejects missing spec", retry_spec_of(&rt.task_id).is_err());
+    task::set_retry_spec(&rt.task_id, serde_json::json!({"kind":"unknown-kind"}));
+    check!(
+        "retry rejects unknown kind",
+        retry_task(rt.task_id.clone()).is_err()
+    );
+    let ok_spec = task::create("retry-demo-2", None, None, "重试演示2");
+    task::fail(&ok_spec.task_id, "NETWORK|x".into());
+    task::set_retry_spec(&ok_spec.task_id, serde_json::json!({"kind":"install","gameVersion":"1.2.3"}));
+    check!(
+        "retry accepts known kind",
+        retry_spec_of(&ok_spec.task_id).map(|(k, _)| k == "install").unwrap_or(false)
+    );
+
+    // 可选的真实 JDK 下载：ASTRAL_LIVE_JDK="major|gameDir"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_JDK") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 2 {
+            let major: u32 = parts[0].parse().unwrap_or(21);
+            let game = std::path::PathBuf::from(parts[1]);
+            log.push_str(&format!("LIVE jdk start: java {major}\n"));
+            match jdk::install(major, &game, || false, |_s, _d, _t| {}) {
+                Ok(r) => {
+                    log.push_str(&format!(
+                        "LIVE jdk ok: version={} path={} bytes={}\n",
+                        r.version, r.path, r.bytes
+                    ));
+                    match std::process::Command::new(&r.path).arg("-version").output() {
+                        Ok(o) => {
+                            let txt = String::from_utf8_lossy(&o.stderr).to_string();
+                            log.push_str(&format!(
+                                "LIVE jdk runs: {}\n",
+                                txt.lines().next().unwrap_or("")
+                            ));
+                        }
+                        Err(e) => {
+                            fails += 1;
+                            log.push_str(&format!("LIVE jdk runs failed: {e}\n"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE jdk failed: {e}\n"));
+                }
+            }
+        }
+    }
+
+    // 启动阶段映射：内部 stage → 稳定 phase
+    check!(
+        "phase mapping",
+        task::phase_of("validate") == "validating"
+            && task::phase_of("resolve") == "checking-files"
+            && task::phase_of("jvm") == "preparing-java"
+            && task::phase_of("download") == "downloading"
+            && task::phase_of("spawned") == "process-created"
+            && task::phase_of("error") == "failed"
+    );
+    let pt = task::create("phase-demo", None, None, "阶段演示");
+    task::progress(&pt.task_id, "jvm", "准备 Java", 1, 2);
+    check!(
+        "phase set on progress",
+        task::get(&pt.task_id)
+            .map(|x| x.phase == "preparing-java")
+            .unwrap_or(false)
+    );
+    task::finish(&pt.task_id, serde_json::json!({"ok": true}));
+    check!(
+        "phase set on finish",
+        task::get(&pt.task_id).map(|x| x.phase == "done").unwrap_or(false)
+    );
+
+    // 健康检查：跟着 inheritsFrom 看 jar / 依赖库 / 资源索引
+    let hgame = std::env::temp_dir().join(format!("astral-health-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&hgame);
+    let _ = std::fs::create_dir_all(hgame.join("versions/1.20.1"));
+    let _ = std::fs::create_dir_all(hgame.join("versions/1.20.1-forge-47.2.0"));
+    let parent = r#"{"assetIndex":{"id":"5"},"libraries":[{"downloads":{"artifact":{"path":"org/ow2/asm/asm/9.5/asm-9.5.jar"}}}]}"#;
+    let child = r#"{"inheritsFrom":"1.20.1","libraries":[{"downloads":{"artifact":{"path":"net/forge/fmlloader/1.0/fmlloader-1.0.jar"}}}]}"#;
+    let _ = std::fs::write(hgame.join("versions/1.20.1/1.20.1.json"), parent);
+    let _ = std::fs::write(
+        hgame.join("versions/1.20.1-forge-47.2.0/1.20.1-forge-47.2.0.json"),
+        child,
+    );
+    let broken = instance::health_for_test(&hgame, "1.20.1-forge-47.2.0");
+    check!(
+        "health reports missing",
+        !broken.ok
+            && broken.reasons.iter().any(|r| r.contains("依赖库"))
+            && broken.reasons.iter().any(|r| r.contains("资源索引"))
+    );
+    // 补齐 jar / 库 / 索引后应当健康
+    let _ = std::fs::create_dir_all(hgame.join("versions/1.20.1"));
+    let _ = std::fs::write(hgame.join("versions/1.20.1/1.20.1.jar"), b"x");
+    let _ = std::fs::create_dir_all(hgame.join("libraries/org/ow2/asm/asm/9.5"));
+    let _ = std::fs::write(hgame.join("libraries/org/ow2/asm/asm/9.5/asm-9.5.jar"), b"x");
+    let _ = std::fs::create_dir_all(hgame.join("libraries/net/forge/fmlloader/1.0"));
+    let _ = std::fs::write(hgame.join("libraries/net/forge/fmlloader/1.0/fmlloader-1.0.jar"), b"x");
+    let _ = std::fs::create_dir_all(hgame.join("assets/indexes"));
+    let _ = std::fs::write(hgame.join("assets/indexes/5.json"), b"{}");
+    let healthy = instance::health_for_test(&hgame, "1.20.1-forge-47.2.0");
+    check!(
+        "health ok after fill",
+        healthy.ok && healthy.reasons.is_empty()
+    );
+    let _ = std::fs::remove_dir_all(&hgame);
+
+    // 可选的真实健康检查：ASTRAL_LIVE_HEALTH="gameDir"
+    if let Ok(dir) = std::env::var("ASTRAL_LIVE_HEALTH") {
+        let game = std::path::PathBuf::from(&dir);
+        let list = instance::discover(&game, &play_stats);
+        log.push_str(&format!("LIVE health instances={}\n", list.len()));
+        for i in list.iter().take(6) {
+            log.push_str(&format!(
+                "  {} ok={} reasons={:?}\n",
+                i.name, i.health.ok, i.health.reasons
+            ));
+        }
+        if list.is_empty() {
+            fails += 1;
+            log.push_str("LIVE health failed: 没发现实例\n");
+        }
+    }
+
+    // 平台规则：macOS 专用库不应在 Windows 上被判为缺失
+    let osx_only = serde_json::json!({"rules":[{"action":"allow","os":{"name":"osx"}}]});
+    let win_only = serde_json::json!({"rules":[{"action":"allow","os":{"name":"windows"}}]});
+    let generic = serde_json::json!({});
+    check!(
+        "platform rules",
+        !instance::lib_allowed_for_test(&osx_only)
+            && instance::lib_allowed_for_test(&win_only)
+            && instance::lib_allowed_for_test(&generic)
+    );
+
+    // 阶段中文名
+    check!(
+        "stage label mapping",
+        task::stage_label_of("jvm") == "准备 Java"
+            && task::stage_label_of("download") == "下载文件"
+            && task::stage_label_of("spawned") == "进程已创建"
+    );
+    let lbl = task::create("label-demo", None, None, "标签演示");
+    task::progress(&lbl.task_id, "download", "下载中", 1, 2);
+    check!(
+        "stage label set",
+        task::get(&lbl.task_id)
+            .map(|x| x.stage_label == "下载文件" && x.phase == "downloading")
+            .unwrap_or(false)
+    );
+
+    // #8 已失效 PID 的会话不能被当成"还在运行"
+    let dead = session::begin("inst_dead", "task_dead", 0);
+    check!("session dead not active", session::active(Some("inst_dead")).is_none());
+    check!(
+        "session dead reconciled",
+        session::list(Some("inst_dead"), 1)
+            .first()
+            .map(|s| s.state == "exited")
+            .unwrap_or(false)
+    );
+    let _ = dead;
+
+    // #2 兼容实例（managed=false）不允许安装资源（不发网络请求就会被拒绝）
+    let compat_game = std::env::temp_dir().join(format!("astral-compat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&compat_game);
+    let _ = std::fs::create_dir_all(compat_game.join("versions/1.20.1"));
+    let _ = std::fs::write(compat_game.join("versions/1.20.1/1.20.1.json"), "{}");
+    let compat = instance::discover(&compat_game, &play_stats);
+    let compat_id = compat.first().map(|i| i.id.clone()).unwrap_or_default();
+    let req = resources::ResourceInstallRequest {
+        instance_id: compat_id.clone(),
+        kind: "mod".into(),
+        project_id: "AANobbMI".into(),
+        version_id: "nonexistent".into(),
+        world_id: None,
+        overwrite: false,
+    };
+    let r = resources::prepare(&compat_game, req, &play_stats);
+    check!(
+        "resource rejects compat instance",
+        r.as_ref().err().map(|e| e.starts_with("UNSUPPORTED")).unwrap_or(false)
+    );
+    let _ = std::fs::remove_dir_all(&compat_game);
+
+    // #5 installer 生成的 version id 推导（多实例共享 / 重复安装复用）
+    check!(
+        "forge version id",
+        core::forge_version_id("forge", "1.20.1", "47.2.0") == "1.20.1-forge-47.2.0"
+            && core::forge_version_id("neoforge", "1.21.1", "21.1.72") == "neoforge-21.1.72"
+            && core::forge_version_id("neoforge", "1.20.1", "47.1.106") == "1.20.1-forge-47.1.106"
+    );
+    // 已装过时直接复用，不发网络请求
+    let forge_game = std::env::temp_dir().join(format!("astral-forge-reuse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&forge_game);
+    let vid = "1.20.1-forge-47.2.0";
+    let _ = std::fs::create_dir_all(forge_game.join("versions").join(vid));
+    let _ = std::fs::write(
+        forge_game.join("versions").join(vid).join(format!("{vid}.json")),
+        r#"{"id":"1.20.1-forge-47.2.0","inheritsFrom":"1.20.1"}"#,
+    );
+    let reused = core::install_forge_like("forge", "1.20.1", "47.2.0", &forge_game, |_| {});
+    check!(
+        "forge reuse installed",
+        reused.as_ref().map(|s| s == vid).unwrap_or(false)
+    );
+    let _ = std::fs::remove_dir_all(&forge_game);
+
+    // #3 取消：开始前就取消，不应发起下载
+    let cancel_dir = std::env::temp_dir().join(format!("astral-cancel-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&cancel_dir);
+    let stored = resources::StoredResourcePlan {
+        plan: resources::ResourcePlan {
+            plan_id: "rplan_test".into(),
+            instance_id: "inst_test".into(),
+            revision: 1,
+            expires_at: String::new(),
+            kind: "mod".into(),
+            project_id: "P".into(),
+            version_id: "V".into(),
+            file_name: "test.jar".into(),
+            target_dir: cancel_dir.to_string_lossy().to_string(),
+            download_bytes: 0,
+            replaces: None,
+            issues: Vec::new(),
+            dependencies: Vec::new(),
+        },
+        url: "https://cdn.modrinth.com/data/P/versions/V/test.jar".into(),
+        sha1: None,
+        sha512: None,
+        dep_urls: Vec::new(),
+        created_ms: 0,
+    };
+    let cancelled = resources::execute(&stored, || true, |_, _| {});
+    check!(
+        "resource cancel short-circuits",
+        cancelled
+            .as_ref()
+            .err()
+            .map(|e| e.starts_with("CANCELLED"))
+            .unwrap_or(false)
+    );
+    check!(
+        "resource cancel wrote nothing",
+        !cancel_dir.join("test.jar").exists()
+    );
+    let _ = std::fs::remove_dir_all(&cancel_dir);
+    // #7 安装计划里的光影组件：不可自动安装的组件必须给出阻塞原因
+    let comp_game = std::env::temp_dir().join(format!("astral-plan-comp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&comp_game);
+    let _ = std::fs::create_dir_all(comp_game.join("versions/1.20.1"));
+    let _ = std::fs::write(comp_game.join("versions/1.20.1/1.20.1.json"), "{}");
+    let _ = std::fs::write(comp_game.join("versions/1.20.1/1.20.1.jar"), "x");
+    let optifine_req = plan::GameInstallRequest {
+        name: "光影计划".into(),
+        game_version: "1.20.1".into(),
+        loader: Some(plan::LoaderSelection {
+            kind: "fabric".into(),
+            version: "0.16.9".into(),
+        }),
+        memory_mb: None,
+        shader_support: Some("optifine".into()),
+        shader_support_version: None,
+    };
+    let opti = plan::prepare(&comp_game, optifine_req);
+    let opti_blocking = opti
+        .as_ref()
+        .map(|p| p.issues.iter().any(|i| i.blocking))
+        .unwrap_or(false);
+    let opti_has_comp = opti
+        .as_ref()
+        .map(|p| !p.components.is_empty())
+        .unwrap_or(false);
+    check!(
+        "plan rejects optifine",
+        opti_blocking && !opti_has_comp
+    );
+    let _ = std::fs::remove_dir_all(&comp_game);
+    // 可选：真机验证安装计划的光影组件挑选
+    // ASTRAL_LIVE_PLAN="gameDir|mc|loaderKind|loaderVer|shader"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_PLAN") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 5 {
+            let game = std::path::PathBuf::from(parts[0]);
+            let req = plan::GameInstallRequest {
+                name: "组件计划".into(),
+                game_version: parts[1].to_string(),
+                loader: Some(plan::LoaderSelection {
+                    kind: parts[2].to_string(),
+                    version: parts[3].to_string(),
+                }),
+                memory_mb: None,
+                shader_support: Some(parts[4].to_string()),
+                shader_support_version: None,
+            };
+            match plan::prepare(&game, req) {
+                Ok(p) => {
+                    log.push_str(&format!(
+                        "LIVE plan components={} blocking={}\n",
+                        p.components.len(),
+                        p.issues.iter().filter(|i| i.blocking).count()
+                    ));
+                    for c in &p.components {
+                        log.push_str(&format!("  component {} {} {}\n", c.id, c.label, c.version_id));
+                    }
+                    for i in p.issues.iter().filter(|i| i.blocking) {
+                        log.push_str(&format!("  blocking {}: {}\n", i.code, i.message));
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE plan failed: {e}\n"));
+                }
+            }
+        }
+    }
+    // 可选：真机跑完整安装计划（含光影组件），ASTRAL_LIVE_PLAN_INSTALL="gameDir|mc|loader|ver|shader"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_PLAN_INSTALL") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 5 || parts.len() == 6 {
+            let game = std::path::PathBuf::from(parts[0]);
+            // 让 game_root() 指向测试目录
+            let mut cfg = core::load_config();
+            cfg.game_dir = game.to_string_lossy().to_string();
+            if let Err(e) = core::save_config(&cfg) {
+                fails += 1;
+                log.push_str(&format!("LIVE plan-install config failed: {e}\n"));
+            } else {
+                let req = plan::GameInstallRequest {
+                    name: format!("计划安装 {}", parts[1]),
+                    game_version: parts[1].to_string(),
+                    loader: Some(plan::LoaderSelection {
+                        kind: parts[2].to_string(),
+                        version: parts[3].to_string(),
+                    }),
+                    memory_mb: Some(2048),
+                    shader_support: Some(parts[4].to_string()),
+                    shader_support_version: parts.get(5).map(|s| s.to_string()),
+                };
+                match plan::prepare(&game, req) {
+                    Ok(p) => {
+                        log.push_str(&format!(
+                            "LIVE plan-install prepared components={} blocking={}\n",
+                            p.components.len(),
+                            p.issues.iter().filter(|i| i.blocking).count()
+                        ));
+                        let t = task::create(
+                            "game-install",
+                            None,
+                            Some(parts[1].to_string()),
+                            "计划安装（自检）",
+                        );
+                        let (res, _created) = run_game_install(&t.task_id, &p);
+                        match res {
+                            Ok(inst) => {
+                                let mods = std::path::Path::new(&inst.dir).join("mods");
+                                let jars: Vec<String> = std::fs::read_dir(&mods)
+                                    .map(|rd| {
+                                        rd.flatten()
+                                            .map(|e| e.file_name().to_string_lossy().to_string())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                log.push_str(&format!(
+                                    "LIVE plan-install ok: instance={} mods={:?}\n",
+                                    inst.id, jars
+                                ));
+                            }
+                            Err(e) => {
+                                fails += 1;
+                                log.push_str(&format!("LIVE plan-install failed: {e}\n"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        fails += 1;
+                        log.push_str(&format!("LIVE plan-install prepare failed: {e}\n"));
+                    }
+                }
+            }
+        }
+    }
+    // #6 加载器与游戏版本兼容性（装之前就挡掉明显不搭的组合）
+    check!(
+        "loader compat forge",
+        core::loader_compatible("forge", "1.20.1", "47.2.0").is_ok()
+            && core::loader_compatible("forge", "1.20.1", "1.20.1-47.2.0").is_err()
+    );
+    check!(
+        "loader compat neoforge",
+        core::loader_compatible("neoforge", "1.21.1", "21.1.72").is_ok()
+            && core::loader_compatible("neoforge", "1.20.1", "21.1.72").is_err()
+            && core::loader_compatible("neoforge", "1.20.1", "47.1.106").is_ok()
+    );
+    check!(
+        "neoforge mc hint",
+        core::neoforge_mc_hint("21.1.72") == Some("1.21.1")
+            && core::neoforge_mc_hint("20.4.237") == Some("1.20.4")
+            && core::neoforge_mc_hint("99.9.9") == None
+    );
+    // 版本不搭时在下载之前就失败，不会发出 404 请求
+    let bad_forge = std::env::temp_dir().join(format!("astral-bad-forge-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&bad_forge);
+    let r = core::install_forge_like("forge", "1.20.1", "1.20.1-47.2.0", &bad_forge, |_| {});
+    check!(
+        "forge mismatched rejected early",
+        r.as_ref()
+            .err()
+            .map(|e| e.starts_with("INVALID_VALUE") || e.starts_with("INCOMPATIBLE"))
+            .unwrap_or(false)
+    );
+    let _ = std::fs::remove_dir_all(&bad_forge);
+    // 可选：真机验证组件版本列表与越权版本拦截
+    // ASTRAL_LIVE_COMPONENT_VERSIONS="id|mc|loader"
+    if let Ok(spec) = std::env::var("ASTRAL_LIVE_COMPONENT_VERSIONS") {
+        let parts: Vec<&str> = spec.split('|').collect();
+        if parts.len() == 3 {
+            match components::versions(parts[0], parts[1], Some(parts[2])) {
+                Ok(list) => {
+                    log.push_str(&format!(
+                        "LIVE component versions={} first={} {} recommended={}\n",
+                        list.len(),
+                        list.first().map(|v| v.version_id.clone()).unwrap_or_default(),
+                        list.first().map(|v| v.version_number.clone()).unwrap_or_default(),
+                        list.first().map(|v| v.recommended).unwrap_or(false)
+                    ));
+                    // 用别的组件版本 id 去校验，必须被拒
+                    let foreign = components::validate_choice(parts[0], "NotARealVersionId", parts[1], Some(parts[2]));
+                    log.push_str(&format!(
+                        "LIVE foreign version rejected={}\n",
+                        foreign.is_err()
+                    ));
+                    if foreign.is_ok() {
+                        fails += 1;
+                    }
+                }
+                Err(e) => {
+                    fails += 1;
+                    log.push_str(&format!("LIVE component versions failed: {e}\n"));
+                }
+            }
+        }
+    }
+    // 旧下载接口的目录规则
+    check!(
+        "legacy dir rules",
+        legacy_sub_dir("mod") == "mods"
+            && legacy_sub_dir("shaderpack") == "shaderpacks"
+            && legacy_requires_instance("mod")
+            && legacy_requires_instance("datapack")
+            && !legacy_requires_instance("resourcepack")
+            && !legacy_requires_instance("shaderpack")
+    );
+    // Java 要求的主版本会沿 inheritsFrom 找（加载器版本自己通常不带 javaVersion）
+    let jgame = std::env::temp_dir().join(format!("astral-java-chain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&jgame);
+    let _ = std::fs::create_dir_all(jgame.join("versions/1.20.1"));
+    let _ = std::fs::create_dir_all(jgame.join("versions/1.20.1-forge-47.2.0"));
+    let _ = std::fs::write(
+        jgame.join("versions/1.20.1/1.20.1.json"),
+        r#"{"javaVersion":{"majorVersion":17}}"#,
+    );
+    let _ = std::fs::write(
+        jgame.join("versions/1.20.1-forge-47.2.0/1.20.1-forge-47.2.0.json"),
+        r#"{"inheritsFrom":"1.20.1"}"#,
+    );
+    check!(
+        "java required via inheritsFrom",
+        java::required_major(&jgame, "1.20.1-forge-47.2.0") == Some(17)
+            && java::required_major(&jgame, "1.20.1") == Some(17)
+    );
+    let _ = std::fs::remove_dir_all(&jgame);
+    // 修复计划：只补缺失，不乱动已有文件
+    let rgame = std::env::temp_dir().join(format!("astral-repair-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&rgame);
+    let _ = std::fs::create_dir_all(rgame.join("versions/1.20.1"));
+    let _ = std::fs::write(rgame.join("versions/1.20.1/1.20.1.json"), "{}");
+    let mut rmeta = instance::InstanceMeta {
+        id: "inst_repair".into(),
+        name: "修复测试".into(),
+        game_version: "1.20.1".into(),
+        loader_kind: Some("fabric".into()),
+        loader_version: Some("0.16.9".into()),
+        launch_version: None,
+        memory_mb: None,
+        jvm_args: vec![],
+        java_path: None,
+        cover: None,
+        created_at: time::now_iso(),
+    };
+    let steps = core::repair_steps(&rgame, &rmeta);
+    check!(
+        "repair plans base and loader",
+        steps.contains(&"base") && steps.contains(&"loader")
+    );
+    // 补齐后不该再有步骤
+    let _ = std::fs::write(rgame.join("versions/1.20.1/1.20.1.jar"), "x");
+    let _ = std::fs::create_dir_all(rgame.join("assets/indexes"));
+    let _ = std::fs::create_dir_all(rgame.join("versions/fabric-1.20.1-0.16.9"));
+    let _ = std::fs::write(
+        rgame.join("versions/fabric-1.20.1-0.16.9/fabric-1.20.1-0.16.9.json"),
+        r#"{"inheritsFrom":"1.20.1"}"#,
+    );
+    rmeta.launch_version = Some("fabric-1.20.1-0.16.9".into());
+    let fixed = core::repair_steps(&rgame, &rmeta);
+    check!("repair nothing left", fixed.is_empty());
+    let _ = std::fs::remove_dir_all(&rgame);
+    // 日志诊断：能认出常见崩溃原因
+    let dgame = std::env::temp_dir().join(format!("astral-diag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dgame);
+    let _ = std::fs::create_dir_all(dgame.join("logs"));
+    let _ = std::fs::write(
+        dgame.join("logs/latest.log"),
+        "java.lang.UnsupportedClassVersionError: 65.0\n\
+         java.lang.NoClassDefFoundError: net/minecraft/client/Minecraft\n\
+         java.lang.OutOfMemoryError: Java heap space\n",
+    );
+    match logs::diagnose(&dgame, None, 100) {
+        Ok(r) => {
+            let ids: Vec<&str> = r.findings.iter().map(|f| f.id).collect();
+            check!(
+                "diagnose finds root causes",
+                ids.contains(&"java-version")
+                    && ids.contains(&"missing-class")
+                    && ids.contains(&"out-of-memory")
+                    && !r.text.is_empty()
+            );
+        }
+        Err(_) => check!("diagnose finds root causes", false),
+    }
+    let _ = std::fs::remove_dir_all(&dgame);
     let cfg = core::Config::default();
     check!(
         "config defaults",
@@ -1009,8 +3223,21 @@ pub fn selftest() -> i32 {
 
     let _ = std::fs::remove_dir_all(&game);
 
-    let total = log.lines().count();
+    // 只统计 PASS/FAIL 行，避免把 LIVE 等诊断行算进断言数
+    let total = log
+        .lines()
+        .filter(|l| l.starts_with("PASS ") || l.starts_with("FAIL "))
+        .count();
     log.push_str(&format!("\n{total} checks, {fails} failed\n"));
+    let json = serde_json::json!({
+        "total": results.len(),
+        "failed": fails,
+        "checks": results.iter().map(|(n, ok)| serde_json::json!({"name": n, "ok": ok})).collect::<Vec<_>>(),
+    });
+    let _ = std::fs::write(
+        std::env::temp_dir().join("astral-selftest.json"),
+        serde_json::to_string_pretty(&json).unwrap_or_default(),
+    );
     let _ = std::fs::write(std::env::temp_dir().join("astral-selftest.log"), &log);
     fails
 }

@@ -214,12 +214,21 @@ fn forge_builds(mc: &str) -> Result<Vec<LoaderBuild>, String> {
 }
 
 /// MC 版本 → NeoForge 的版本前缀（1.20.2 → `20.2.`，1.21.1 → `21.1.`）
+/// NeoForge 的版本前缀：1.20.2 → "20.2."、1.21 → "21.0."、1.21.1 → "21.1."
+///
+/// 只对 NeoForge 实际支持的版本返回 Some；1.20.1 走 legacy 仓库，不在这里。
 fn neoforge_prefix(mc: &str) -> Option<String> {
-    let parts: Vec<&str> = mc.split('.').collect();
-    if parts.len() < 3 {
+    let rest = mc.strip_prefix("1.")?;
+    let parts: Vec<&str> = rest.split('.').collect();
+    let major: u32 = parts.first()?.parse().ok()?;
+    if major < 20 {
         return None;
     }
-    Some(format!("{}.{}.", parts[1], parts[2]))
+    let minor: u32 = parts.get(1).copied().unwrap_or("0").parse().ok()?;
+    if major == 20 && minor < 2 {
+        return None;
+    }
+    Some(format!("{major}.{minor}."))
 }
 
 fn neoforge_builds(mc: &str) -> Result<Vec<LoaderBuild>, String> {
@@ -327,7 +336,10 @@ mod tests {
     fn neoforge_prefix_map() {
         assert_eq!(neoforge_prefix("1.20.2").as_deref(), Some("20.2."));
         assert_eq!(neoforge_prefix("1.21.1").as_deref(), Some("21.1."));
+        assert_eq!(neoforge_prefix("1.21").as_deref(), Some("21.0."));
         assert_eq!(neoforge_prefix("1.8.9"), None);
+        assert_eq!(neoforge_prefix("1.20.1"), None);
+        assert_eq!(neoforge_prefix("1.19.2"), None);
     }
 
     #[test]

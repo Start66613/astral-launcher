@@ -18,6 +18,29 @@ use reqwest::{Client, StatusCode, header};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::fs::{self, File};
 use tokio::task::JoinSet;
+
+/// [Astral patch] 连接阶段重试：TLS 握手 EOF 这类抖动重试几次，
+/// 仍然失败再交给上层的缓存兜底逻辑。
+async fn send_with_retry(
+    mut req: reqwest::RequestBuilder,
+    template: Option<reqwest::RequestBuilder>,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut attempt: u64 = 0;
+    loop {
+        match req.send().await {
+            Ok(res) => return Ok(res),
+            Err(e) if attempt < 3 && (e.is_connect() || e.is_timeout()) => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(400 * attempt)).await;
+                match template.as_ref().and_then(|t| t.try_clone()) {
+                    Some(next) => req = next,
+                    None => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 use tokio::sync::mpsc;
 
 use crate::path::PathBufExt;
@@ -835,7 +858,8 @@ async fn download_entry(
     }
 
     // If it's a connection error just use the cached copy.
-    let mut res = match req.send().await {
+    let template = req.try_clone();
+    let mut res = match send_with_retry(req, template).await {
         Ok(res) => res,
         Err(e) if cache.is_some() && (e.is_timeout() || e.is_request() || e.is_connect()) => {
             // Using cache in case of network error.

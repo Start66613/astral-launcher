@@ -22,6 +22,9 @@ pub struct GameSession {
     pub exit_code: Option<i32>,
     pub ended_at: Option<String>,
     pub duration_ms: Option<u64>,
+    /// 启动器重启后按 pid 对账收尾的会话：退出码与时长都不精确
+    #[serde(default)]
+    pub reconciled: bool,
 }
 
 static STORE: OnceLock<Mutex<Vec<GameSession>>> = OnceLock::new();
@@ -32,6 +35,10 @@ fn store() -> &'static Mutex<Vec<GameSession>> {
 }
 
 fn file() -> PathBuf {
+    // 测试/隔离运行可覆盖数据目录
+    if let Some(dir) = std::env::var_os("ASTRAL_DATA_DIR") {
+        return PathBuf::from(dir).join("sessions.json");
+    }
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -62,6 +69,10 @@ pub fn load() {
 fn pid_alive(pid: u32) -> bool {
     let mut sys = sysinfo::System::new();
     let p = sysinfo::Pid::from_u32(pid);
+    // PID 0 是系统空闲进程，绝不是游戏进程
+    if pid == 0 {
+        return false;
+    }
     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[p]), true);
     sys.process(p).is_some()
 }
@@ -81,6 +92,7 @@ pub fn begin(instance_id: &str, task_id: &str, pid: u32) -> GameSession {
             exit_code: None,
             ended_at: None,
             duration_ms: None,
+            reconciled: false,
         }
     };
     let mut list = store().lock().unwrap();
@@ -116,22 +128,30 @@ pub fn mark_exited(session_id: &str, exit_code: Option<i32>) -> Option<GameSessi
 }
 
 pub fn emit_exit(app: &AppHandle, s: &GameSession) {
-    let crashed = s.exit_code.map(|c| c != 0).unwrap_or(true);
+    // 退出码未知 ≠ 崩溃：只有拿到非 0 退出码才判定崩溃
+    let exit_known = s.exit_code.is_some();
+    let crashed = matches!(s.exit_code, Some(c) if c != 0);
     let payload = serde_json::json!({
         "sessionId": s.session_id,
         "taskId": s.task_id,
         "instanceId": s.instance_id,
         "exitCode": s.exit_code,
+        "exitKnown": exit_known,
         "crashed": crashed,
+        "reconciled": s.reconciled,
         "durationMs": s.duration_ms.unwrap_or(0),
         "endedAt": s.ended_at,
     });
     let _ = app.emit(EVENT, payload);
 }
 
-/// 当前会话；期间做一次 pid 对账
+/// 当前**存活**会话；期间做一次 pid 对账
+///
+/// 进程已退出的会话会被就地收尾并跳过——不能把它当成"还在运行"返回，
+/// 否则 start_launch / delete_instance 会误报 INSTANCE_BUSY。
 pub fn active(instance_id: Option<&str>) -> Option<GameSession> {
     let mut list = store().lock().unwrap();
+    let mut changed = false;
     for s in list.iter_mut().rev() {
         if s.state == "exited" {
             continue;
@@ -142,14 +162,18 @@ pub fn active(instance_id: Option<&str>) -> Option<GameSession> {
             }
         }
         if !pid_alive(s.pid) {
+            // 进程已退出：收尾这条会话，但**不能**把它当作"还在运行"返回，
+            // 否则 start_launch / delete_instance 会误报 INSTANCE_BUSY
             s.state = "exited".into();
             s.ended_at = Some(crate::task::now_iso());
             s.duration_ms = Some(duration_ms(&s.started_at));
-            let snap = s.clone();
-            persist(&list);
-            return Some(snap);
+            changed = true;
+            continue;
         }
         return Some(s.clone());
+    }
+    if changed {
+        persist(&list);
     }
     None
 }
@@ -193,6 +217,8 @@ pub fn reconcile() {
     for s in list.iter_mut() {
         if s.state != "exited" && !pid_alive(s.pid) {
             s.state = "exited".into();
+            s.exit_code = None;
+            s.reconciled = true;
             s.ended_at = Some(crate::task::now_iso());
             s.duration_ms = Some(duration_ms(&s.started_at));
             changed = true;

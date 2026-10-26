@@ -35,7 +35,12 @@ fn read_entry<R: Read + std::io::Seek>(
     zip: &mut zip::ZipArchive<R>,
     name: &str,
 ) -> Option<String> {
+    const MAX_META: u64 = 1024 * 1024;
     let mut f = zip.by_name(name).ok()?;
+    // 元数据文件超过 1 MiB 视为异常，直接放弃解析，避免解压炸弹撑爆内存
+    if f.size() > MAX_META {
+        return None;
+    }
     let mut s = String::new();
     f.read_to_string(&mut s).ok()?;
     Some(s)
@@ -77,13 +82,28 @@ fn read_jar_meta(path: &Path) -> JarMeta {
         return meta;
     };
 
-    if let Some(text) = read_entry(&mut zip, "fabric.mod.json")
-        .or_else(|| read_entry(&mut zip, "quilt.mod.json"))
+    // fabric 与 quilt 分开判定，不能一律标成 fabric
+    let fabric_json = read_entry(&mut zip, "fabric.mod.json");
+    let quilt_json = read_entry(&mut zip, "quilt.mod.json");
+    if let Some((text, kind)) = fabric_json
+        .map(|t| (t, "fabric"))
+        .or_else(|| quilt_json.map(|t| (t, "quilt")))
     {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            meta.name = json_str(&v, "name");
-            meta.version = json_str(&v, "version");
-            meta.loader = Some("fabric".into());
+            meta.name = json_str(&v, "name").or_else(|| {
+                v.get("quilt_loader")
+                    .and_then(|q| q.get("metadata"))
+                    .and_then(|m| m.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            });
+            meta.version = json_str(&v, "version").or_else(|| {
+                v.get("quilt_loader")
+                    .and_then(|q| q.get("version"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            });
+            meta.loader = Some(kind.into());
             meta.project_id = v
                 .get("contact")
                 .and_then(|c| c.get("homepage"))

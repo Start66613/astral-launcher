@@ -28,6 +28,9 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "maven.neoforged.net",
     "meta.quiltmc.org",
     "maven.quiltmc.org",
+    // JDK 下载（Adoptium；下载后另有 SHA256 校验）
+    "api.adoptium.net",
+    "github.com",
     // 国内镜像
     "bmclapi2.bangbang93.com",
 ];
@@ -126,6 +129,19 @@ pub fn download_atomic(
     url: &str,
     dest: &Path,
     expected_sha1: Option<&str>,
+    on_progress: impl FnMut(u32, u32, u32, u32),
+) -> Result<u64, String> {
+    download_verified(url, dest, expected_sha1, None, on_progress)
+}
+
+/// 下载并校验（SHA1 + 可选 SHA512），**全部校验通过后才提交正式文件**。
+///
+/// 旧文件在提交前不会被改动；任何失败都只删除 `.part`，旧文件原样保留。
+pub fn download_verified(
+    url: &str,
+    dest: &Path,
+    expected_sha1: Option<&str>,
+    expected_sha512: Option<&str>,
     mut on_progress: impl FnMut(u32, u32, u32, u32),
 ) -> Result<u64, String> {
     check_url(url)?;
@@ -144,7 +160,16 @@ pub fn download_atomic(
         let got = sha1_file(&part)?;
         if !got.eq_ignore_ascii_case(want) {
             let _ = std::fs::remove_file(&part);
-            return Err(format!("HASH_MISMATCH|校验失败|期望 {want}，实际 {got}"));
+            return Err(format!("HASH_MISMATCH|SHA1 校验失败|期望 {want}，实际 {got}"));
+        }
+    }
+
+    // SHA512 必须在 rename 之前校验，否则旧文件已经被覆盖，回滚不回去
+    if let Some(want) = expected_sha512 {
+        let got = sha512_file(&part)?;
+        if !got.eq_ignore_ascii_case(want) {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("HASH_MISMATCH|SHA512 校验失败|期望 {want}"));
         }
     }
 
@@ -154,6 +179,61 @@ pub fn download_atomic(
         format!("PERMISSION|替换文件失败|{e}")
     })?;
     Ok(size)
+}
+
+/// 文件的 SHA512（小写十六进制）
+pub fn sha512_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha512};
+    let mut f = std::fs::File::open(path).map_err(|e| format!("INVALID_PATH|文件不可读|{e}"))?;
+    let mut hasher = Sha512::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("INVALID_PATH|读取失败|{e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+/// 文件的 SHA256（小写十六进制）
+pub fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(path).map_err(|e| format!("INVALID_PATH|文件不可读|{e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("INVALID_PATH|读取失败|{e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+/// 拉取 JSON（临时文件，不缓存），用于 Modrinth API
+pub fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
+    check_url(url)?;
+    let tmp = std::env::temp_dir().join(format!(
+        "astral-api-{:x}.json",
+        crate::time::now_unix_ms()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let mut single = portablemc::download::single(url, tmp.clone());
+    let res = single.download(());
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("NETWORK|请求失败|{e:?}"));
+    }
+    let text = std::fs::read_to_string(&tmp).map_err(|e| format!("INTERNAL|读取响应失败|{e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+    serde_json::from_str(&text).map_err(|e| format!("INTERNAL|响应不是合法 JSON|{e}"))
 }
 
 struct BridgeHandler<'a>(&'a mut dyn FnMut(u32, u32, u32, u32));

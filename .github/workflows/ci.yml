@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
   pull_request:
   workflow_dispatch:
 
@@ -34,3 +34,61 @@ jobs:
       - name: 前端构建
         working-directory: app
         run: pnpm exec vite build
+
+  rust:
+    name: Rust 构建 + 自检
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      # tauri::generate_context! 在编译期就要读 dist，所以先构建前端
+      - name: 构建前端
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec vite build
+
+      # 挡住"写了命令却忘了注册"这类错误（V2 开发中真实发生过 16 个）
+      - name: 校验命令注册
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-commands.ps1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: cargo check
+        working-directory: app/src-tauri
+        run: cargo check --release
+
+      - name: 构建
+        working-directory: app/src-tauri
+        run: cargo build --release
+
+      # 自检退出码 = 失败项数，非 0 即失败
+      # 单元测试：release 配置（debug 在本机 MSVC 上会因 /Z7 报 D8050）
+      - name: 单元测试
+        working-directory: app/src-tauri
+        run: cargo test --release --lib
+
+      - name: 运行 --selftest
+        working-directory: app/src-tauri
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".\target\release\astral.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if (Test-Path "$env:TEMP\astral-selftest.log") {
+            Get-Content "$env:TEMP\astral-selftest.log" | Select-Object -Last 5
+          }
+          if ($p.ExitCode -ne 0) { Write-Error "selftest failed: $($p.ExitCode)"; exit 1 }

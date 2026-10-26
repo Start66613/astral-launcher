@@ -45,6 +45,15 @@ pub struct Task {
     /// 已请求取消，等待 worker 停止
     #[serde(default)]
     pub cancelling: bool,
+    /// 发起该任务时的参数，用于失败后重试（不对外承诺稳定结构）
+    #[serde(default)]
+    pub retry_spec: Option<serde_json::Value>,
+    /// 稳定的启动阶段名，供启动动画使用（见 docs/v2/07 §20）
+    #[serde(default)]
+    pub phase: String,
+    /// 阶段的中文可读名（界面不必自己维护映射表）
+    #[serde(default)]
+    pub stage_label: String,
 }
 
 pub fn now_iso() -> String {
@@ -181,6 +190,9 @@ pub fn create(
         retry_of: None,
         boot_id: s.boot_id.clone(),
         cancelling: false,
+        retry_spec: None,
+        phase: "queued".into(),
+        stage_label: "排队中".into(),
     };
     s.tasks.insert(task.task_id.clone(), task.clone());
     s.tokens
@@ -248,6 +260,8 @@ pub fn progress(task_id: &str, stage: &str, label: impl Into<String>, done: u32,
         t.done = done;
         t.total = total;
         t.state = "running".into();
+        t.phase = phase_of(&t.stage).to_string();
+        t.stage_label = stage_label_of(&t.stage).to_string();
     });
 }
 
@@ -255,6 +269,8 @@ pub fn start(task_id: &str) {
     update(task_id, |t| {
         t.state = "running".into();
         t.stage = "resolve".into();
+        t.phase = "checking-files".into();
+        t.stage_label = stage_label_of(&t.stage).to_string();
         t.label = "开始".into();
     });
 }
@@ -263,6 +279,13 @@ pub fn finish(task_id: &str, result: serde_json::Value) {
     update(task_id, |t| {
         t.state = "done".into();
         t.stage = "done".into();
+        // 启动任务完成 = 进程已创建；其他任务完成 = 真的做完
+        t.phase = if t.kind == "launch" {
+            "process-created".into()
+        } else {
+            "done".into()
+        };
+        t.stage_label = stage_label_of(&t.stage).to_string();
         t.label = "完成".into();
         t.result = Some(result);
         t.ended_at = Some(now_iso());
@@ -275,6 +298,8 @@ pub fn fail(task_id: &str, encoded: String) {
     update(task_id, |t| {
         t.state = "error".into();
         t.stage = "error".into();
+        t.phase = "failed".into();
+        t.stage_label = "失败".into();
         t.label = err.message.clone();
         t.error = Some(err);
         t.ended_at = Some(now_iso());
@@ -353,6 +378,59 @@ pub fn check_cancel(task_id: &str) -> Result<(), String> {
     }
 }
 
+/// 把内部 stage 映射成稳定 phase（供前端动画使用）
+pub fn phase_of(stage: &str) -> &'static str {
+    match stage {
+        "validate" => "validating",
+        "resolve" | "assets" | "extract" => "checking-files",
+        "jvm" => "preparing-java",
+        "download" => "downloading",
+        "launch" => "launching",
+        "spawned" => "process-created",
+        "done" => "done",
+        "error" => "failed",
+        "cancelled" => "cancelled",
+        "queued" => "queued",
+        _ => "checking-files",
+    }
+}
+
+/// 阶段的中文名，供界面直接显示
+pub fn stage_label_of(stage: &str) -> &'static str {
+    match stage {
+        "queued" => "排队中",
+        "validate" => "检查实例与版本",
+        "resolve" => "解析版本",
+        "download" => "下载文件",
+        "assets" => "校验资源文件",
+        "jvm" => "准备 Java",
+        "extract" => "解包文件",
+        "launch" => "组装启动参数",
+        "spawned" => "进程已创建",
+        "done" => "完成",
+        "error" => "失败",
+        "cancelled" => "已取消",
+        _ => "处理中",
+    }
+}
+
+/// 任务创建出实例后，把实例 id 绑到任务上（删除/改名保护依赖它）
+pub fn bind_instance(task_id: &str, instance_id: &str) {
+    let mut s = store().lock().unwrap();
+    if let Some(t) = s.tasks.get_mut(task_id) {
+        t.instance_id = Some(instance_id.to_string());
+        persist(&s);
+    }
+}
+/// 记录发起参数，供 retry_task 复用
+pub fn set_retry_spec(task_id: &str, spec: serde_json::Value) {
+    let mut s = store().lock().unwrap();
+    if let Some(t) = s.tasks.get_mut(task_id) {
+        t.retry_spec = Some(spec);
+        persist(&s);
+    }
+}
+
 /// `CODE|msg|detail` → ApiError
 pub fn decode(encoded: &str) -> ApiError {
     let mut it = encoded.splitn(3, '|');
@@ -386,6 +464,23 @@ pub fn snapshot(state: Option<&str>, kind: Option<&str>, instance: Option<&str>)
         .collect();
     list.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     list
+}
+
+/// 是否已有同类的运行中任务（用于去重，避免重复下载）
+pub fn has_running_kind(
+    kind: &str,
+    instance_id: Option<&str>,
+    game_version: Option<&str>,
+) -> bool {
+    let s = store().lock().unwrap();
+    s.tasks.values().any(|t| {
+        t.kind == kind
+            && !is_terminal(&t.state)
+            && instance_id.map(|v| t.instance_id.as_deref() == Some(v)).unwrap_or(true)
+            && game_version
+                .map(|v| t.game_version.as_deref() == Some(v))
+                .unwrap_or(true)
+    })
 }
 
 pub fn has_running(instance_id: &str) -> bool {

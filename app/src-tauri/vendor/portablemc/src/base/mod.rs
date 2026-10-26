@@ -74,6 +74,8 @@ pub struct Installer {
     launcher_version: Option<String>,
     /// [Astral patch] 调用方追加的 JVM 参数（-Xmx、GC 等）
     extra_jvm_args: Vec<String>,
+    /// [Astral patch] 指定 java 可执行文件，跳过 JVM 解析/下载
+    jvm_override: Option<PathBuf>,
 }
 
 impl Installer {
@@ -101,6 +103,7 @@ impl Installer {
             launcher_name: None,
             launcher_version: None,
             extra_jvm_args: Vec::new(),
+            jvm_override: None,
         }
 
     }
@@ -312,6 +315,12 @@ impl Installer {
         self
     }
 
+    /// [Astral patch] 指定 java 可执行文件；设置后不再自动探测/下载 JVM。
+    pub fn set_jvm_override(&mut self, file: Option<PathBuf>) -> &mut Self {
+        self.jvm_override = file;
+        self
+    }
+
     /// Ensure that a the given version, from its id, is fully installed and return
     /// a game instance that can be used to run launch it.
     #[inline]
@@ -334,7 +343,14 @@ impl Installer {
         let mut lib_files = self.load_libraries(&mut *handler, &hierarchy, &features, &mut batch)?;
         let logger_config = self.load_logger(&mut *handler, &hierarchy, &mut batch)?;
         let assets = self.load_assets(&mut *handler, &hierarchy, &mut batch)?;
-        let jvm = self.load_jvm(&mut *handler, &hierarchy, &mut batch)?;
+        let jvm = match &self.jvm_override {
+            Some(file) => Jvm {
+                file: file.clone(),
+                version: None,
+                mojang: None,
+            },
+            None => self.load_jvm(&mut *handler, &hierarchy, &mut batch)?,
+        };
 
         // If we don't find the main class it is impossible to launch.
         let main_class = hierarchy.iter()
