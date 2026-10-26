@@ -1677,3 +1677,92 @@ showToast(`诊断包已生成：${result.path}（脱敏 ${result.redactions} 处
    这种信息比一个成功提示有用。
 4. 想要"发给别人"时，前端只负责把 `result.path` 交给系统（复制路径 / 打开资源管理器），
    不要自己做上传。
+
+---
+
+## 25. 启动前预检（V2.5 新增）
+
+点"启动"之前想知道"现在能不能跑、哪里会出问题"，原来要把体检、Java 检查、Mod 扫描
+挨个点一遍。`preflight_launch` 一次把该看的都看完，**只看不改、也不启动游戏**。
+
+### 25.1 命令
+
+```ts
+const pf = await invoke<Preflight>("preflight_launch", { instanceId: id });
+if (!pf.ready) {
+  showBlockers(pf.blockers);
+  return;
+}
+await invoke("start_launch", { instanceId: id }); // 原有的启动命令，行为不变
+```
+
+```ts
+interface PreflightCheck {
+  key: string;          // running | tasks | username | files | java | memory | mods
+  label: string;        // 给玩家看的中文名
+  ok: boolean;
+  blocking: boolean;    // 不通过时是否挡住启动
+  detail: string | null;
+}
+
+interface MemoryAdvice {
+  systemTotalMb: number;
+  systemFreeMb: number;
+  instanceMb: number | null;   // 实例当前设置，null = 用默认
+  recommendedMb: number;
+  minMb: number;
+  maxMb: number;
+  ok: boolean;
+  note: string;                // 为什么是这个数，可直接显示
+}
+
+interface Preflight {
+  instanceId: string;
+  instanceName: string;
+  gameVersion: string;
+  ready: boolean;              // 没有任何 blocking 项
+  checks: PreflightCheck[];
+  memory: MemoryAdvice;
+  blockers: string[];          // 挡住启动的项（中文，可直接列给玩家）
+  collectedAt: string;
+}
+```
+
+### 25.2 七项检查与是否拦启动
+
+| key | 查什么 | 拦启动 |
+|---|---|---|
+| `running` | 这个实例是不是已经在跑 | 是 |
+| `tasks` | 有没有安装/更新任务还没结束 | 是 |
+| `username` | 用户名是否合法（3–16 位字母数字下划线） | 是 |
+| `files` | 版本文件在不在、完不完整（复用 `verify::check`） | 是 |
+| `java` | Java 能不能用、版本对不对（复用 `java_audit::check_instance`） | 是 |
+| `memory` | 内存设置是否落在合理区间 | **否**，只提示 |
+| `mods` | `mods/` 里有没有会挡住启动的问题（复用 `modscan::scan`） | **否**，只提示 |
+
+后两项不拦，是因为它们只是"可能出问题"：内存偏小照样能进游戏，Mod 报 error
+也有玩家愿意自己扛。真正的硬条件（没装版本、Java 不对、实例在跑）才拦。
+
+### 25.3 内存建议是怎么算的
+
+不是拍一个 4096，而是按机器和内容推：
+
+- 原版起步 2048 MB；
+- 有加载器 +1024 MB；
+- 每 25 个 Mod +512 MB，最多 +2048 MB（100 个封顶）；
+- 上限 = min(系统内存 / 2, 系统内存 − 2048)，再夹一个 8192 MB 的绝对上限
+  —— 给 Java 太多，Windows 自己就没内存了；
+- 结果按 512 MB 取整，夹在 [1024, 上限] 之间。
+
+`note` 会把"为什么是这个数"直接写成人话，前端不用自己解释。
+
+### 25.4 前端接入建议
+
+1. 启动按钮点下去先调 `preflight_launch`；`ready === true` 就直接启动，
+   别让玩家多点一次。
+2. `ready === false` 时把 `blockers` 列出来，并在对应项旁边给一个跳转
+   （`files` → 检查修复页、`java` → 运行库页、`running` → 提示先关游戏）。
+3. `memory.ok === false` 但 `blocking === false` 时，用一条可关闭的提示条显示
+   `memory.note`，别做成弹窗打断启动。
+4. 预检**不写任何文件**（日志、缓存、诊断目录都不会多出来），可以放心在
+   鼠标悬停或页面切换时提前调一次。

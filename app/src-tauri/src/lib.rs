@@ -24,6 +24,7 @@ mod nbt;
 mod net;
 mod packs;
 mod plan;
+mod preflight;
 mod recycle;
 mod resources;
 mod save_manage;
@@ -613,6 +614,20 @@ fn get_world_info(instance_id: String, world_id: String) -> Result<worlds::World
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
     worlds::detail(std::path::Path::new(&inst.dirs.saves), &world_id)
+}
+
+/// 启动前预检：只读，把"能不能启动、卡在哪"一次问清楚。
+///
+/// `start_launch` 遇到第一个问题就返回，玩家得修一个试一次。
+/// 这里把全部检查跑完再一起返回，前端可以一次列出所有待办。
+#[tauri::command]
+async fn preflight_launch(instance_id: String) -> Result<preflight::Preflight, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game = game_root();
+        preflight::check(&game, &instance_id, &play_stats)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 存档备份与恢复 ──────────────────────────────────────────────
@@ -2999,6 +3014,7 @@ pub fn run() {
             repair_instance,
             list_target_worlds,
             get_world_info,
+            preflight_launch,
             scan_local_versions,
             plan_instance_copy,
             plan_version_import,
@@ -6807,6 +6823,58 @@ Caused by: java.lang.IllegalStateException: bad state\n";
                             .and_then(|s| s.note.clone())
                             .map(|n| n.contains("没有收集日志"))
                             .unwrap_or(false)
+                );
+                let _ = std::fs::remove_dir_all(&g);
+            }
+
+            // 28) 启动前预检：一次列出全部问题，不启动也不改文件
+            {
+                let g = dl.join("preflight-game");
+                let _ = std::fs::remove_dir_all(&g);
+                let _ = std::fs::create_dir_all(&g);
+                let meta = instance::InstanceMeta {
+                    id: instance::new_id(),
+                    name: "preflight".into(),
+                    game_version: "1.20.1".into(),
+                    loader_kind: Some("fabric".into()),
+                    loader_version: Some("0.16.9".into()),
+                    launch_version: None,
+                    memory_mb: Some(512),
+                    jvm_args: vec![],
+                    java_path: None,
+                    cover: None,
+                    created_at: time::now_iso(),
+                };
+                let inst = instance::create(&g, &meta).unwrap();
+                let pf = preflight::check(&g, &inst.id, &play_stats).unwrap();
+                let find = |k: &str| pf.checks.iter().find(|c| c.key == k).cloned();
+                check!(
+                    "preflight lists every check",
+                    pf.checks.len() == 7
+                        && !pf.ready
+                        && !pf.blockers.is_empty()
+                        && pf.instance_id == inst.id
+                );
+                check!(
+                    "preflight flags missing version files",
+                    find("files").map(|c| c.blocking && !c.ok).unwrap_or(false)
+                        && find("running").map(|c| c.ok).unwrap_or(false)
+                );
+                check!(
+                    "preflight suggests more memory without blocking",
+                    find("memory")
+                        .map(|c| !c.ok && !c.blocking && c.detail.is_some())
+                        .unwrap_or(false)
+                        && !pf.memory.ok
+                        && pf.memory.recommended_mb >= preflight::MIN_MEMORY_MB
+                        && pf.memory.max_mb >= pf.memory.min_mb
+                );
+                check!(
+                    "preflight is read only",
+                    std::fs::read_dir(std::path::Path::new(&inst.dir).join("logs"))
+                        .map(|d| d.count() == 0)
+                        .unwrap_or(false)
+                        && !std::path::Path::new(&inst.dir).join("diagnostics").exists()
                 );
                 let _ = std::fs::remove_dir_all(&g);
             }
