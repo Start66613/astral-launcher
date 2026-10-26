@@ -36,7 +36,12 @@ import {
   LiveMore,
   LiveDiagnostics,
 } from "./LiveRuntime";
-import { LiveDownload, LiveGameInstaller, LiveResource } from "./LiveDownload";
+import { LiveDownload } from "./LiveDownload";
+import {
+  IntegratedGameInstaller as LiveGameInstaller,
+  IntegratedResource as LiveResource,
+} from "./Installers";
+import { getAccount, getMsaStatus } from "./core-api";
 import { DownloadPage, GameInstaller, ResourceInstaller } from "./Download";
 
 function loadPreferences(storageKey: string): Preferences {
@@ -662,6 +667,29 @@ export default function App({ runtime }: { runtime?: LocalLauncher } = {}) {
 
 function Account({ close }: { close: () => void }) {
   const { scenario, runtime } = usePreview();
+  const [account, setAccount] = useState<Awaited<
+    ReturnType<typeof getAccount>
+  > | null>(null);
+  const [msa, setMsa] = useState<Awaited<
+    ReturnType<typeof getMsaStatus>
+  > | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (runtime?.mode === "core" && runtime.api?.features.includes("accounts"))
+      Promise.all([getAccount(), getMsaStatus()])
+        .then(([identity, status]) => {
+          if (alive) {
+            setAccount(identity);
+            setMsa(status);
+          }
+        })
+        .catch((cause) => {
+          if (alive) setProfileError(parseApiError(cause).message);
+        });
+    return () => {
+      alive = false;
+    };
+  }, [runtime?.mode]);
   const [tab, setTab] = useState("offline");
   const [username, setUsername] = useState(
     runtime?.config?.username ||
@@ -710,7 +738,9 @@ function Account({ close }: { close: () => void }) {
             </span>
             <h3>
               {runtime
-                ? runtime.config?.username || "尚未选择离线档案"
+                ? account?.name ||
+                  runtime.config?.username ||
+                  "尚未选择离线档案"
                 : scenario === "no-account"
                   ? "尚未选择离线档案"
                   : "ForestWalker"}
@@ -742,6 +772,13 @@ function Account({ close }: { close: () => void }) {
           <div className="account-detail">
             <Badge kind="user" large />
             <h3>Microsoft 未登录</h3>
+            {msa && (
+              <p>
+                {msa.configured
+                  ? "已配置授权应用；核心尚未实现登录流程。"
+                  : msa.reason}
+              </p>
+            )}
             <p>
               授权功能暂不可用。接入官方授权后，这里才能显示经过验证的正版账号。
             </p>

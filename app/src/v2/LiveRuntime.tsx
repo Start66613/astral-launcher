@@ -4,6 +4,13 @@ import { Badge, Icon } from "./icons";
 import { usePreview } from "./state";
 import { Empty, Modal, Toggle, Effect } from "./App";
 import {
+  JavaManager,
+  VersionMaintenance,
+  ModUpdates,
+  GameLogs,
+} from "./RuntimeTools";
+import { cancelledLate, retryTask, type TaskV2 } from "./core-api";
+import {
   hasCooperativeCancellation,
   requestTaskCancellation,
   waitForTask,
@@ -84,14 +91,16 @@ export function TaskView({ task }: { task: Task }) {
             : task.error?.code === "INTERRUPTED"
               ? "上次退出时未完成"
               : task.state === "done"
-                ? "完成"
+                ? cancelledLate(task)
+                  ? "已完成 · 取消请求到达时任务已经完成"
+                  : "完成"
                 : task.state === "error"
                   ? "失败"
                   : task.state === "queued"
                     ? "排队中"
                     : task.state === "cancelled"
                       ? "已取消"
-                      : `${task.stage} · ${task.label}`}
+                      : `${(task as TaskV2).stageLabel || task.stage} · ${task.label}`}
         </p>
         {["running", "queued"].includes(task.state) && (
           <progress
@@ -133,6 +142,29 @@ export function TaskView({ task }: { task: Task }) {
           <p className="error-text" role="alert">
             {cancelError}
           </p>
+        )}
+        {task.state === "error" && (task as TaskV2).retrySpec != null && (
+          <button
+            className="button secondary"
+            disabled={requesting}
+            onClick={async () => {
+              if (requestLock.current) return;
+              requestLock.current = true;
+              setRequesting(true);
+              setCancelError("");
+              try {
+                await retryTask(task.taskId);
+                await runtime?.core.refresh();
+              } catch (cause) {
+                setCancelError(parseApiError(cause).message);
+              } finally {
+                requestLock.current = false;
+                setRequesting(false);
+              }
+            }}
+          >
+            重试任务
+          </button>
         )}
       </div>
     </article>
@@ -630,11 +662,12 @@ export function LiveSettings() {
         <div className="setting-row">
           <div>
             <strong>下载并发、限速与重试</strong>
-            <p>核心尚未提供可持久化设置和协作取消。</p>
+            <p>并发与限速设置尚未提供；任务支持在文件边界请求取消。</p>
           </div>
           <span className="tag">待核心支持</span>
         </div>
       </section>
+      <JavaManager />
     </>
   );
 }
@@ -683,7 +716,7 @@ export function LiveVersions() {
     return () => {
       ++generation.current;
     };
-  }, [current?.id, tab, hasMods, hasSaves]);
+  }, [current, tab, hasMods, hasSaves]);
   async function action(run: () => Promise<unknown>) {
     if (pending) return;
     setError("");
@@ -918,6 +951,7 @@ export function LiveVersions() {
                       删除与数据保护
                     </button>
                   </div>
+                  <VersionMaintenance key={current.id} instance={current} />
                 </>
               )}
               {tab === "components" && (
@@ -957,6 +991,14 @@ export function LiveVersions() {
                   />
                 ) : (
                   <>
+                    <ModUpdates
+                      key={current.id}
+                      instance={current}
+                      onUpdated={async () => {
+                        setMods(await listMods(current.id));
+                        await core.refresh();
+                      }}
+                    />
                     <button
                       className="text-button"
                       onClick={() => navigate("download/mod")}
@@ -1087,6 +1129,7 @@ export function LiveVersions() {
               )}
               {tab === "logs" && (
                 <>
+                  <GameLogs key={current.id} instance={current} />
                   <p className="muted">
                     日志不会自动上传；先在本地查看，分享前检查个人信息。
                   </p>
@@ -1156,8 +1199,8 @@ export function LiveVersions() {
             if (!pending) setDeleting(false);
           }}
         >
-          <h3>{current.name}</h3>
-          <p className="body-copy break">{current.dir}</p>
+          <h3>{current?.name}</h3>
+          <p className="body-copy break">{current?.dir}</p>
           <p className="muted">
             mods、config、saves
             等随目录移入应用回收站；当前尚无恢复界面。其他独立版本不变。

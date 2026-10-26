@@ -12,3 +12,4 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 );
 
 import "./v2/motion.css";
+import "./v2/integration.css";
