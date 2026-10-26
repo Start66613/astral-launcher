@@ -371,16 +371,42 @@ pub fn extract_overrides(
     mut on: impl FnMut(u32, u32),
 ) -> Result<u32, String> {
     const MAX_TOTAL: u64 = 512 * 1024 * 1024;
+    /// 单个文件上限，防 zip 炸弹
+    const MAX_ENTRY: u64 = 256 * 1024 * 1024;
+    /// 条目数上限，防"几百万个小文件"拖死磁盘
+    const MAX_ENTRIES: usize = 20000;
+
     let file = std::fs::File::open(pack).map_err(|e| format!("PERMISSION|打不开整合包|{e}"))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("INTERNAL|不是有效 zip|{e}"))?;
+
+    if zip.len() > MAX_ENTRIES {
+        return Err(format!(
+            "INVALID_VALUE|整合包条目过多（{} 个），已拒绝",
+            zip.len()
+        ));
+    }
 
     let mut count = 0u32;
     let mut written = 0u64;
     let mut names: Vec<String> = Vec::new();
     for i in 0..zip.len() {
         if let Ok(entry) = zip.by_index(i) {
-            if let Ok(n) = entry.name().map(|c| c.to_string()) {
-                names.push(n);
+            let entry_name = entry.name().map(|c| c.to_string()).unwrap_or_default();
+            // 符号链接条目一律拒绝：否则解压出来可能指到实例目录外面
+            if let Some(mode) = entry.unix_mode() {
+                if mode & 0o170000 == 0o120000 {
+                    return Err(format!(
+                        "INVALID_PATH|整合包含符号链接条目，已拒绝：{entry_name}"
+                    ));
+                }
+            }
+            if entry.size() > MAX_ENTRY {
+                return Err(format!(
+                    "INVALID_VALUE|整合包内单个文件过大，已拒绝：{entry_name}"
+                ));
+            }
+            if !entry_name.is_empty() {
+                names.push(entry_name);
             }
         }
     }
@@ -403,25 +429,32 @@ pub fn extract_overrides(
             Ok(p) => p,
             Err(e) => return Err(e),
         };
-        let dest = instance_dir.join(&safe);
-        if !dest.starts_with(instance_dir) {
-            return Err(format!("INVALID_PATH|解压路径越界：{name}"));
-        }
+        // 真正的越界检查：父目录必须落在实例目录内，且目标不能是符号链接
+        let dest = crate::net::ensure_within(instance_dir, &instance_dir.join(&safe))?;
         let mut entry = zip
             .by_name(&name)
             .map_err(|e| format!("INTERNAL|读取条目失败|{e}"))?;
-        written += entry.size();
-        if written > MAX_TOTAL {
-            return Err("INTERNAL|解压体积异常，已中止".into());
-        }
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
         }
+        // 先写临时文件再改名，中途失败不会留下半个覆盖文件
+        let tmp = PathBuf::from(format!("{}.part", dest.to_string_lossy()));
         let mut out =
-            std::fs::File::create(&dest).map_err(|e| format!("PERMISSION|写入失败|{e}"))?;
-        std::io::copy(&mut entry, &mut out)
+            std::fs::File::create(&tmp).map_err(|e| format!("PERMISSION|写入失败|{e}"))?;
+        let copied = std::io::copy(&mut entry, &mut out)
             .map_err(|e| format!("PERMISSION|解压失败|{e}"))?;
+        drop(out);
+        // 按实际写出的字节算总量，不信压缩包自称的大小
+        written = written.saturating_add(copied);
+        if written > MAX_TOTAL {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("INVALID_VALUE|解压体积异常，已中止".into());
+        }
+        if std::fs::rename(&tmp, &dest).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("PERMISSION|写入文件失败|{}", dest.display()));
+        }
         count += 1;
         on(count, 0);
     }
@@ -552,6 +585,23 @@ mod tests {
         assert!(safe_rel_path("C:/win.jar").is_err());
         assert!(safe_rel_path("mods\\a.jar").is_err());
         assert!(safe_rel_path("./mods/../x").is_err());
+    }
+
+    #[test]
+    fn safe_rel_path_rejects_traversal() {
+        for bad in [
+            "",
+            "../evil.jar",
+            "./mods/../x.jar",
+            "C:/windows/x.jar",
+            "\\\\server\\share\\x.jar",
+            "/etc/passwd",
+            "a/../../b",
+        ] {
+            assert!(safe_rel_path(bad).is_err(), "{bad} 不该通过");
+        }
+        assert!(safe_rel_path("mods/sodium.jar").is_ok());
+        assert!(safe_rel_path("./config/x.json").is_ok());
     }
 
     #[test]

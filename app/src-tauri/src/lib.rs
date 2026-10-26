@@ -3653,7 +3653,86 @@ pub fn selftest() -> i32 {
                 rm >= 1 && keep.exists() && !stale.exists()
             );
 
-            // 18) 调度统计字段齐全，前端能直接用
+            // 18) 整合包解压拒绝路径穿越（真实 zip，不是纯函数测试）
+            {
+                use std::io::Write;
+                let zip_path = dl.join("evil.mrpack");
+                let f = std::fs::File::create(&zip_path).unwrap();
+                let mut zw = zip::ZipWriter::new(f);
+                let opts = zip::write::SimpleFileOptions::default();
+                // 正常文件
+                zw.start_file("overrides/config/ok.json", opts).unwrap();
+                zw.write_all(b"{}").unwrap();
+                // 穿越文件：写到实例目录外
+                zw.start_file("overrides/../../escaped.txt", opts).unwrap();
+                zw.write_all(b"bad").unwrap();
+                zw.finish().unwrap();
+
+                let inst = dl.join("evil-inst");
+                let _ = std::fs::create_dir_all(&inst);
+                let r = modpack::extract_overrides(
+                    &zip_path,
+                    &inst,
+                    &*net::never_cancel(),
+                    |_, _| {},
+                );
+                let escaped = dl.join("escaped.txt");
+                check!(
+                    "modpack rejects zip traversal",
+                    r.is_err() && !escaped.exists()
+                );
+            }
+
+            // 19) 整合包解压拒绝符号链接条目
+            {
+                let zip_path = dl.join("symlink.mrpack");
+                let f = std::fs::File::create(&zip_path).unwrap();
+                let mut zw = zip::ZipWriter::new(f);
+                let opts = zip::write::SimpleFileOptions::default();
+                zw.add_symlink("overrides/link", "/etc/passwd", opts).unwrap();
+                zw.finish().unwrap();
+
+                let inst = dl.join("symlink-inst");
+                let _ = std::fs::create_dir_all(&inst);
+                let r = modpack::extract_overrides(
+                    &zip_path,
+                    &inst,
+                    &*net::never_cancel(),
+                    |_, _| {},
+                );
+                check!("modpack rejects symlink entries", r.is_err());
+            }
+
+            // 20) 正常整合包仍然能解压
+            {
+                use std::io::Write;
+                let zip_path = dl.join("good.mrpack");
+                let f = std::fs::File::create(&zip_path).unwrap();
+                let mut zw = zip::ZipWriter::new(f);
+                let opts = zip::write::SimpleFileOptions::default();
+                zw.start_file("overrides/config/a.json", opts).unwrap();
+                zw.write_all(b"{\"a\":1}").unwrap();
+                zw.start_file("client-overrides/options.txt", opts).unwrap();
+                zw.write_all(b"lang:zh_cn").unwrap();
+                zw.finish().unwrap();
+
+                let inst = dl.join("good-inst");
+                let _ = std::fs::create_dir_all(&inst);
+                let r = modpack::extract_overrides(
+                    &zip_path,
+                    &inst,
+                    &*net::never_cancel(),
+                    |_, _| {},
+                );
+                check!(
+                    "modpack extracts normal overrides",
+                    r == Ok(2)
+                        && inst.join("config").join("a.json").exists()
+                        && inst.join("options.txt").exists()
+                );
+            }
+
+            // 21) 调度统计字段齐全，前端能直接用
             let s = net::scheduler_stats();
             check!(
                 "scheduler stats shape",
