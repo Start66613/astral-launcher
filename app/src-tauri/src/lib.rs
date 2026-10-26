@@ -2,6 +2,7 @@ mod account;
 mod cache;
 mod components;
 mod core;
+mod cover;
 mod deps;
 mod error;
 mod export;
@@ -242,7 +243,20 @@ fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String>
         meta.java_path = java;
     }
     if let Some(cover) = patch.cover {
-        meta.cover = cover;
+        // 只接受我们自己管理的文件名。以前这里什么字符串都收，等于让前端
+        // 往 instance.json 里写任意路径；现在要么是 `.astral-cover.<ext>`，
+        // 要么就明确用 set_instance_cover / clear_instance_cover。
+        match cover {
+            None => meta.cover = None,
+            Some(name) => {
+                if !cover::is_managed_name(&name) {
+                    return Err(
+                        "INVALID_VALUE|封面请用 set_instance_cover 设置，不能直接写路径".into(),
+                    );
+                }
+                meta.cover = Some(name);
+            }
+        }
     }
     instance::save_meta(&game, &meta)?;
     emit_instance_changed(&id, "updated");
@@ -829,6 +843,48 @@ fn set_game_options(
     let dir = inst_dir_of(&instance_id)?;
     let running = session::active(Some(&instance_id)).is_some();
     game_options::write(&dir, &changes, running)
+}
+
+// ── 实例封面 ───────────────────────────────────────────────────
+
+/// 给实例设置封面：把图片复制进实例目录，只存固定文件名
+#[tauri::command]
+fn set_instance_cover(instance_id: String, source_path: String) -> Result<Instance, String> {
+    let game = game_root();
+    let dir = inst_dir_of(&instance_id)?;
+    let name = cover::set(&dir, std::path::Path::new(&source_path))?;
+    let mut meta = instance::read_meta(&game, &instance_id)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在或不是托管实例".to_string())?;
+    meta.cover = Some(name);
+    instance::save_meta(&game, &meta)?;
+    emit_instance_changed(&instance_id, "updated");
+    instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INTERNAL|保存后读不到实例".to_string())
+}
+
+/// 清掉实例封面
+#[tauri::command]
+fn clear_instance_cover(instance_id: String) -> Result<Instance, String> {
+    let game = game_root();
+    let dir = inst_dir_of(&instance_id)?;
+    let _ = cover::clear(&dir);
+    let mut meta = instance::read_meta(&game, &instance_id)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在或不是托管实例".to_string())?;
+    meta.cover = None;
+    instance::save_meta(&game, &meta)?;
+    emit_instance_changed(&instance_id, "updated");
+    instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INTERNAL|保存后读不到实例".to_string())
+}
+
+/// 读实例封面（data URL）；没设置封面返回 null
+#[tauri::command]
+fn read_instance_cover(instance_id: String) -> Result<Option<cover::CoverInfo>, String> {
+    let game = game_root();
+    let dir = inst_dir_of(&instance_id)?;
+    let meta = instance::read_meta(&game, &instance_id)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在或不是托管实例".to_string())?;
+    cover::read(&dir, meta.cover.as_deref())
 }
 
 // ── 版本复制 / 导入 / 迁移 ──────────────────────────────────────
@@ -2927,6 +2983,9 @@ pub fn run() {
             delete_screenshot,
             get_game_options,
             set_game_options,
+            set_instance_cover,
+            clear_instance_cover,
+            read_instance_cover,
             get_resource_project,
             list_resource_files,
             search_resources,
@@ -4222,6 +4281,64 @@ pub fn selftest() -> i32 {
                 .err()
                 .map(|e| e.starts_with("INSTANCE_BUSY|"))
                 .unwrap_or(false)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // 实例封面：只认固定文件名，旧的可疑值当没有。
+    {
+        let base = std::env::temp_dir().join(format!("astral-cover-{}", time::now_nanos()));
+        let _ = std::fs::create_dir_all(&base);
+        let png = {
+            let mut v = vec![0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            v.extend_from_slice(&13u32.to_be_bytes());
+            v.extend_from_slice(b"IHDR");
+            v.extend_from_slice(&512u32.to_be_bytes());
+            v.extend_from_slice(&288u32.to_be_bytes());
+            v.extend_from_slice(&[8, 2, 0, 0, 0, 0, 0, 0, 0]);
+            v
+        };
+        let src = base.join("src.png");
+        let _ = std::fs::write(&src, &png);
+
+        let name = cover::set(&base, &src).unwrap_or_default();
+        let info = cover::read(&base, Some(&name));
+        check!(
+            "cover copied into the instance",
+            name == ".astral-cover.png"
+                && info
+                    .as_ref()
+                    .ok()
+                    .and_then(|o| o.as_ref())
+                    .map(|c| c.width == Some(512)
+                        && c.data_url.starts_with("data:image/png;base64,"))
+                    .unwrap_or(false)
+                && base.join(".astral-cover.png").is_file()
+        );
+
+        check!(
+            "cover rejects absolute paths",
+            !cover::is_managed_name("C:\\Users\\me\\a.png")
+                && !cover::is_managed_name("../a.png")
+                && cover::sanitize(Some("C:\\x.png".into())).is_none()
+                && cover::sanitize(Some(".astral-cover.png".into())).is_some()
+        );
+
+        check!("cover rejects non images", {
+            let t = base.join("a.txt");
+            let _ = std::fs::write(&t, b"hello");
+            cover::set(&base, &t).is_err() && cover::set(&base, &base.join("nope.png")).is_err()
+        });
+
+        let cleared = cover::clear(&base);
+        check!(
+            "cover can be cleared",
+            cleared
+                && !base.join(".astral-cover.png").exists()
+                && cover::read(&base, Some(&name))
+                    .map(|o| o.is_none())
+                    .unwrap_or(false)
         );
 
         let _ = std::fs::remove_dir_all(&base);

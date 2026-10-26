@@ -370,7 +370,7 @@ fn build(game: &Path, meta: InstanceMeta, stats: PlayStats, managed: bool) -> In
         dirs,
         mods_count,
         mods_disabled,
-        cover: meta.cover.clone(),
+        cover: crate::cover::sanitize(meta.cover.clone()),
         health: health_of(game, &meta.game_version),
         last_played: stats.last_played,
         total_playtime_ms: stats.total_playtime_ms,
