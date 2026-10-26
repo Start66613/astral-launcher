@@ -116,7 +116,7 @@ fn sanitize(name: &str) -> String {
     }
 }
 
-fn dir_stats(dir: &Path) -> (u64, u64) {
+pub(crate) fn dir_stats(dir: &Path) -> (u64, u64) {
     let mut bytes = 0u64;
     let mut files = 0u64;
     let mut stack = vec![dir.to_path_buf()];
@@ -139,7 +139,7 @@ fn dir_stats(dir: &Path) -> (u64, u64) {
     (bytes, files)
 }
 
-fn available_space(path: &Path) -> Option<u64> {
+pub(crate) fn available_space(path: &Path) -> Option<u64> {
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let canon = |p: &Path| -> PathBuf {
         let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());

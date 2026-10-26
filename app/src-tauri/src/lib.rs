@@ -15,6 +15,7 @@ mod mods;
 mod net;
 mod recycle;
 mod world_backup;
+mod migrate;
 mod testsrv;
 mod plan;
 mod resources;
@@ -655,6 +656,47 @@ fn delete_world_backup(
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
     world_backup::delete(&instance::instance_dir(&game, &inst.id), &backup_id, confirm)
+}
+
+// ── 版本复制 / 导入 / 迁移 ──────────────────────────────────────
+
+/// 列出 `versions/` 下可以导入的本地版本（只读）
+#[tauri::command]
+fn scan_local_versions() -> Vec<serde_json::Value> {
+    migrate::scan_importable(&game_root())
+}
+
+/// 计算复制计划（只读，不创建任何目录）
+#[tauri::command]
+fn plan_instance_copy(
+    instance_id: String,
+    name: String,
+    options: Option<migrate::CopyOptions>,
+) -> Result<migrate::CopyPlan, String> {
+    let game = game_root();
+    migrate::plan_copy(
+        &game,
+        &instance_id,
+        &name,
+        &options.unwrap_or_else(migrate::CopyOptions::settings_only),
+        &play_stats,
+    )
+}
+
+/// 计算导入计划（只读；导入不会移动或删除 versions 里的原文件）
+#[tauri::command]
+fn plan_version_import(version: String, name: Option<String>) -> Result<migrate::CopyPlan, String> {
+    let game = game_root();
+    migrate::plan_import(&game, &version, name.as_deref())
+}
+
+/// 执行复制/导入计划（两段式：必须先预览拿到 planId）
+#[tauri::command]
+fn apply_instance_copy(plan_id: String) -> Result<migrate::CopyResult, String> {
+    let game = game_root();
+    let r = migrate::execute(&game, &plan_id, &*net::never_cancel(), |_, _| {})?;
+    emit_instance_changed(&r.instance_id, "created");
+    Ok(r)
 }
 
 #[tauri::command]
@@ -2308,6 +2350,10 @@ pub fn run() {
             list_loader_builds,
             repair_instance,
             list_target_worlds,
+            scan_local_versions,
+            plan_instance_copy,
+            plan_version_import,
+            apply_instance_copy,
             list_world_backups,
             backup_world,
             preview_world_restore,
@@ -5127,6 +5173,125 @@ pub fn selftest() -> i32 {
                     "world restore rejects corrupted backup",
                     tampered.map(|p| !p.blockers.is_empty()).unwrap_or(false)
                 );
+            }
+
+            // 30) 实例复制：只复制勾选类别，新实例独立
+            {
+                let g = dl.join("copy-game");
+                let meta = instance::InstanceMeta {
+                    id: instance::new_id(),
+                    name: "源实例".into(),
+                    game_version: "1.20.1".into(),
+                    loader_kind: Some("fabric".into()),
+                    loader_version: Some("0.16.9".into()),
+                    launch_version: None,
+                    memory_mb: Some(4096),
+                    jvm_args: vec!["-XX:+UseG1GC".into()],
+                    java_path: None,
+                    cover: None,
+                    created_at: time::now_iso(),
+                };
+                let src_id = instance::create(&g, &meta).map(|i| i.id).unwrap_or_default();
+                let src_dir = instance::instance_dir(&g, &src_id);
+                let _ = std::fs::write(src_dir.join("mods").join("a.jar"), b"MOD");
+                let _ = std::fs::write(src_dir.join("config").join("c.json"), b"{}");
+                let _ = std::fs::create_dir_all(src_dir.join("saves").join("w1"));
+                let _ = std::fs::write(src_dir.join("saves").join("w1").join("level.dat"), b"L");
+                let _ = std::fs::write(src_dir.join("resourcepacks").join("r.zip"), b"R");
+
+                let stats_fn = |_: &str| instance::PlayStats::default();
+                let plan = migrate::plan_copy(
+                    &g,
+                    &src_id,
+                    "复制出来的",
+                    &migrate::CopyOptions::settings_only(),
+                    &stats_fn,
+                );
+                let plan_id = plan.as_ref().map(|p| p.plan_id.clone()).unwrap_or_default();
+                let planned = plan
+                    .as_ref()
+                    .map(|p| p.total_files == 2 && p.items.len() == 2 && p.kind == "copy")
+                    .unwrap_or(false);
+                let done = migrate::execute(&g, &plan_id, &*net::never_cancel(), |_, _| {});
+                let new_id = done.as_ref().map(|r| r.instance_id.clone()).unwrap_or_default();
+                let new_dir = instance::instance_dir(&g, &new_id);
+                let copied_mods = new_dir.join("mods").join("a.jar").is_file();
+                let copied_config = new_dir.join("config").join("c.json").is_file();
+                let no_worlds = !new_dir.join("saves").join("w1").join("level.dat").exists();
+                let no_packs = !new_dir.join("resourcepacks").join("r.zip").exists();
+                let meta_ok = instance::read_meta(&g, &new_id)
+                    .map(|m| m.memory_mb == Some(4096) && m.loader_kind.as_deref() == Some("fabric"))
+                    .unwrap_or(false);
+                check!(
+                    "instance copy respects categories",
+                    planned
+                        && copied_mods
+                        && copied_config
+                        && no_worlds
+                        && no_packs
+                        && meta_ok
+                        && src_dir.join("mods").join("a.jar").is_file()
+                );
+
+                let twice = migrate::execute(&g, &plan_id, &*net::never_cancel(), |_, _| {});
+                check!("instance copy plan is single use", twice.is_err());
+            }
+
+            // 31) 本地版本导入：只写实例记录，不移动原文件
+            {
+                let g = dl.join("import-game");
+                let vdir = g.join("versions").join("1.20.1-fabric0.16.9");
+                let _ = std::fs::create_dir_all(&vdir);
+                let _ = std::fs::write(
+                    vdir.join("1.20.1-fabric0.16.9.json"),
+                    br#"{"id":"fabric-loader-0.16.9-1.20.1","inheritsFrom":"1.20.1"}"#,
+                );
+                let _ = std::fs::write(vdir.join("1.20.1-fabric0.16.9.jar"), b"JAR");
+
+                let scanned = migrate::scan_importable(&g);
+                let plan = migrate::plan_import(&g, "1.20.1-fabric0.16.9", Some("导入实例"));
+                let plan_id = plan.as_ref().map(|p| p.plan_id.clone()).unwrap_or_default();
+                let planned = plan
+                    .as_ref()
+                    .map(|p| p.kind == "import" && p.total_files == 2)
+                    .unwrap_or(false);
+                let done = migrate::execute(&g, &plan_id, &*net::never_cancel(), |_, _| {});
+                let inst_id = done.as_ref().map(|r| r.instance_id.clone()).unwrap_or_default();
+                let meta = instance::read_meta(&g, &inst_id);
+                check!(
+                    "version import keeps original files",
+                    scanned.len() == 1
+                        && planned
+                        && vdir.join("1.20.1-fabric0.16.9.jar").is_file()
+                        && meta
+                            .map(|m| m.name == "导入实例"
+                                && m.game_version == "1.20.1-fabric0.16.9"
+                                && m.loader_kind.as_deref() == Some("fabric"))
+                            .unwrap_or(false)
+                );
+            }
+
+            // 32) 复制兼容实例必须被拒绝（不能把共享 .minecraft 整个复制走）
+            {
+                let g = dl.join("import-game");
+                let stats_fn = |_: &str| instance::PlayStats::default();
+                let compat = instance::discover(&g, &stats_fn)
+                    .into_iter()
+                    .find(|i| !i.managed)
+                    .map(|i| i.id);
+                let r = compat
+                    .map(|id| {
+                        migrate::plan_copy(
+                            &g,
+                            &id,
+                            "不该成功",
+                            &migrate::CopyOptions::settings_only(),
+                            &stats_fn,
+                        )
+                        .is_err()
+                    })
+                    .unwrap_or(false);
+                check!("instance copy rejects shared versions", r);
             }
         }
         Err(e) => {
