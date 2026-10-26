@@ -217,7 +217,6 @@
 .layout-b > .workspace {
   grid-column: 2;
   grid-row: 2;
-  animation: none !important;
 }
 .layout-b.is-home .ambient-art {
   opacity: 1;

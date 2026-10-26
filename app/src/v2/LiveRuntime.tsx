@@ -1,3 +1,4 @@
+import { ModalPresence, MotionRegion, MotionDetails } from "./motion";
 import { useEffect, useRef, useState } from "react";
 import { Badge, Icon } from "./icons";
 import { usePreview } from "./state";
@@ -100,12 +101,12 @@ export function TaskView({ task }: { task: Task }) {
           />
         )}
         {task.error && (
-          <details open>
+          <MotionDetails open>
             <summary>
               {task.error.code} · {task.error.message}
             </summary>
             <pre>{task.error.detail || "核心未提供更多详情"}</pre>
-          </details>
+          </MotionDetails>
         )}
         <small className="muted">
           任务 {task.taskId} · 修订 {task.revision}
@@ -165,12 +166,19 @@ export function LiveTasks({ close }: { close: () => void }) {
   );
 }
 export function LiveDiagnostics({ close }: { close: () => void }) {
+  const { runtime } = usePreview();
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   return (
     <Modal title="日志与诊断" close={close} wide>
       <div className="diagnostic-content">
+        {runtime?.core.launchError && (
+          <MotionDetails open>
+            <summary>当前启动错误</summary>
+            <p className="error-text">{runtime.core.launchError}</p>
+          </MotionDetails>
+        )}
         <p className="muted">
           选择你要检查的日志，在本地脱敏预览；不会上传。AI 分析服务尚未接入。
         </p>
@@ -243,7 +251,7 @@ export function LiveDiagnostics({ close }: { close: () => void }) {
   );
 }
 export function LiveMore() {
-  const { runtime, navigate, notify } = usePreview();
+  const { runtime, navigate, goBack, notify } = usePreview();
   const [diagnose, setDiagnose] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [name, setName] = useState("");
@@ -290,8 +298,10 @@ export function LiveMore() {
           <p>给每个世界，留一个位置。</p>
         </button>
       </div>
-      {diagnose && <LiveDiagnostics close={() => setDiagnose(false)} />}
-      {advanced && (
+      <ModalPresence present={diagnose}>
+        <LiveDiagnostics close={() => setDiagnose(false)} />
+      </ModalPresence>
+      <ModalPresence present={advanced}>
         <Modal
           title="手动创建版本配置"
           close={() => {
@@ -346,7 +356,7 @@ export function LiveMore() {
             创建配置
           </button>
         </Modal>
-      )}
+      </ModalPresence>
     </section>
   );
 }
@@ -357,12 +367,12 @@ export function Health({ instance }: { instance: Instance }) {
       <Icon name="warning" />
       <div>
         <strong>{instance.health.reasons[0] || "游戏文件需要检查"}</strong>
-        <details>
+        <MotionDetails>
           <summary>查看原因</summary>
           {instance.health.reasons.map((reason, index) => (
             <p key={index}>{reason}</p>
           ))}
-        </details>
+        </MotionDetails>
         <button
           className="text-button"
           onClick={() =>
@@ -377,7 +387,7 @@ export function Health({ instance }: { instance: Instance }) {
   ) : null;
 }
 export function LiveLaunch() {
-  const { runtime, prefs, notify } = usePreview();
+  const { runtime, prefs, notify, openDiagnostics } = usePreview();
   if (!runtime) return null;
   const { core } = runtime;
   const hasState =
@@ -467,15 +477,7 @@ export function LiveLaunch() {
                 >
                   复制错误
                 </button>
-                <button
-                  onClick={() =>
-                    notify(
-                      "请在更多 → 日志与诊断中选择日志，先预览脱敏结果再决定分享。",
-                    )
-                  }
-                >
-                  诊断
-                </button>
+                <button onClick={openDiagnostics}>诊断</button>
                 <button
                   disabled={!core.canLaunch}
                   onClick={() => void core.launch()}
@@ -637,7 +639,7 @@ export function LiveSettings() {
   );
 }
 export function LiveVersions() {
-  const { runtime, navigate, notify, setCurrentId } = usePreview();
+  const { runtime, navigate, goBack, notify, setCurrentId } = usePreview();
   const core = runtime!.core;
   const [selected, setSelected] = useState(core.activeId || "");
   const [tab, setTab] = useState("overview");
@@ -751,7 +753,7 @@ export function LiveVersions() {
     );
   return (
     <section className="content-page">
-      <button className="breadcrumb" onClick={() => navigate("home")}>
+      <button className="breadcrumb" onClick={() => goBack("home")}>
         <Icon name="back" />
         启动 / 我的版本
       </button>
@@ -851,256 +853,258 @@ export function LiveVersions() {
                 </button>
               ))}
             </div>
-            {!current.managed && (
-              <div className="banner warn">
-                共享游戏目录：为保护其他版本，不提供改名、删除或目录内写入。
-              </div>
-            )}
-            <Health instance={current} />
-            {error && !editing && !deleting && (
-              <p className="error-text" role="alert">
-                {error}
-              </p>
-            )}
-            {tab === "overview" && (
-              <>
-                <div className="detail-grid">
-                  <div>
-                    <span>游戏版本</span>
-                    <strong>{current.gameVersion}</strong>
-                  </div>
-                  <div>
-                    <span>已启用 Mod</span>
-                    <strong>{current.modsCount}</strong>
-                  </div>
-                  <div>
-                    <span>停用 Mod</span>
-                    <strong>{current.modsDisabled}</strong>
-                  </div>
-                  <div>
-                    <span>目录</span>
-                    <strong>
-                      {current.managed ? "独立保存" : "与其他版本共享"}
-                    </strong>
-                  </div>
+            <MotionRegion changeKey={tab}>
+              {!current.managed && (
+                <div className="banner warn">
+                  共享游戏目录：为保护其他版本，不提供改名、删除或目录内写入。
                 </div>
-                <div className="action-grid">
-                  <button
-                    className="button secondary"
-                    onClick={() =>
-                      void action(() => openPathChecked(current.dir))
-                    }
-                  >
-                    打开游戏目录
-                  </button>
-                  <button
-                    className="button secondary"
-                    disabled={!current.managed || pending}
-                    onClick={openEdit}
-                  >
-                    编辑名称与配置
-                  </button>
-                  <button className="button secondary" disabled>
-                    复制配置 · 待核心支持
-                  </button>
-                  <button
-                    className="button danger"
-                    disabled={!current.managed || pending}
-                    onClick={() => {
-                      setDeleting(true);
-                      setAck(false);
-                      setError("");
-                    }}
-                  >
-                    删除与数据保护
-                  </button>
-                </div>
-              </>
-            )}
-            {tab === "components" && (
-              <>
-                <div className="file-row">
-                  <Badge kind={current.loader?.kind || "game"} />
-                  <span>
-                    <strong>Minecraft {current.gameVersion}</strong>
-                    <small>
-                      {current.loader
-                        ? `${current.loader.kind} ${current.loader.version}`
-                        : "纯净原版"}
-                    </small>
-                  </span>
-                  <button
-                    className="button secondary"
-                    onClick={() =>
-                      navigate(
-                        `game/${encodeURIComponent(current.gameVersion)}`,
-                      )
-                    }
-                  >
-                    查看可用组件
-                  </button>
-                </div>
-                <p className="muted">
-                  更换已有游戏的 Loader
-                  需要独立兼容性检查；此入口创建新配置，不直接覆盖现有世界。
+              )}
+              <Health instance={current} />
+              {error && !editing && !deleting && (
+                <p className="error-text" role="alert">
+                  {error}
                 </p>
-              </>
-            )}
-            {tab === "mods" &&
-              (!hasMods || !current.managed ? (
-                <Empty
-                  title="当前版本不能管理 Mod"
-                  detail="需要独立游戏目录与核心 mods 能力。"
-                />
-              ) : (
+              )}
+              {tab === "overview" && (
                 <>
-                  <button
-                    className="text-button"
-                    onClick={() => navigate("download/mod")}
-                  >
-                    发现 Mod
-                    <Icon name="arrow" />
-                  </button>
-                  {mods.map((mod) => (
-                    <div className="file-row" key={mod.fileName}>
-                      <Badge kind="mod" />
-                      <span>
-                        <strong>{mod.name}</strong>
-                        <small>
-                          {mod.version || "版本未知"} · {mod.fileName}
-                        </small>
-                      </span>
-                      <Toggle
-                        disabled={pending}
-                        label={`启用 ${mod.name}`}
-                        checked={mod.enabled}
-                        onChange={() =>
-                          void action(async () => {
-                            await setModEnabled(
-                              current.id,
-                              mod.fileName,
-                              !mod.enabled,
-                            );
-                            setMods(await listMods(current.id));
-                            await core.refresh();
-                          })
-                        }
-                      />
-                      <button
-                        className="button danger"
-                        disabled={pending}
-                        onClick={() => {
-                          if (
-                            confirm(
-                              `永久删除 ${mod.fileName}？此操作没有回收站。`,
-                            )
-                          )
-                            void action(async () => {
-                              await deleteMod(current.id, mod.fileName);
-                              setMods(await listMods(current.id));
-                              await core.refresh();
-                            });
-                        }}
-                      >
-                        删除
-                      </button>
+                  <div className="detail-grid">
+                    <div>
+                      <span>游戏版本</span>
+                      <strong>{current.gameVersion}</strong>
                     </div>
-                  ))}
-                  {!mods.length && (
-                    <p className="muted">没有扫描到 Mod 文件。</p>
-                  )}
+                    <div>
+                      <span>已启用 Mod</span>
+                      <strong>{current.modsCount}</strong>
+                    </div>
+                    <div>
+                      <span>停用 Mod</span>
+                      <strong>{current.modsDisabled}</strong>
+                    </div>
+                    <div>
+                      <span>目录</span>
+                      <strong>
+                        {current.managed ? "独立保存" : "与其他版本共享"}
+                      </strong>
+                    </div>
+                  </div>
+                  <div className="action-grid">
+                    <button
+                      className="button secondary"
+                      onClick={() =>
+                        void action(() => openPathChecked(current.dir))
+                      }
+                    >
+                      打开游戏目录
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={!current.managed || pending}
+                      onClick={openEdit}
+                    >
+                      编辑名称与配置
+                    </button>
+                    <button className="button secondary" disabled>
+                      复制配置 · 待核心支持
+                    </button>
+                    <button
+                      className="button danger"
+                      disabled={!current.managed || pending}
+                      onClick={() => {
+                        setDeleting(true);
+                        setAck(false);
+                        setError("");
+                      }}
+                    >
+                      删除与数据保护
+                    </button>
+                  </div>
                 </>
-              ))}
-            {tab === "saves" && (
-              <>
-                {saves.map((save) => (
-                  <div className="file-row" key={save.dir}>
-                    <Badge kind="folder" />
+              )}
+              {tab === "components" && (
+                <>
+                  <div className="file-row">
+                    <Badge kind={current.loader?.kind || "game"} />
                     <span>
-                      <strong>{save.name}</strong>
+                      <strong>Minecraft {current.gameVersion}</strong>
                       <small>
-                        {save.gameVersion || "版本未知"} ·{" "}
-                        {save.lastModified.slice(0, 10)}
+                        {current.loader
+                          ? `${current.loader.kind} ${current.loader.version}`
+                          : "纯净原版"}
                       </small>
                     </span>
                     <button
                       className="button secondary"
                       onClick={() =>
-                        void action(() => openPathChecked(save.dir))
+                        navigate(
+                          `game/${encodeURIComponent(current.gameVersion)}`,
+                        )
                       }
                     >
-                      打开目录
+                      查看可用组件
                     </button>
                   </div>
-                ))}
-                <div className="action-grid">
-                  {(
-                    [
-                      "saves",
-                      "resourcepacks",
-                      "shaderpacks",
-                      "screenshots",
-                    ] as const
-                  ).map((key) => (
+                  <p className="muted">
+                    更换已有游戏的 Loader
+                    需要独立兼容性检查；此入口创建新配置，不直接覆盖现有世界。
+                  </p>
+                </>
+              )}
+              {tab === "mods" &&
+                (!hasMods || !current.managed ? (
+                  <Empty
+                    title="当前版本不能管理 Mod"
+                    detail="需要独立游戏目录与核心 mods 能力。"
+                  />
+                ) : (
+                  <>
                     <button
-                      className="button secondary"
-                      key={key}
-                      onClick={() =>
-                        void action(() => openPathChecked(current.dirs[key]))
-                      }
+                      className="text-button"
+                      onClick={() => navigate("download/mod")}
                     >
-                      打开
-                      {
-                        {
-                          saves: "存档",
-                          resourcepacks: "资源包",
-                          shaderpacks: "光影包",
-                          screenshots: "截图",
-                        }[key]
-                      }
-                      目录
+                      发现 Mod
+                      <Icon name="arrow" />
                     </button>
+                    {mods.map((mod) => (
+                      <div className="file-row" key={mod.fileName}>
+                        <Badge kind="mod" />
+                        <span>
+                          <strong>{mod.name}</strong>
+                          <small>
+                            {mod.version || "版本未知"} · {mod.fileName}
+                          </small>
+                        </span>
+                        <Toggle
+                          disabled={pending}
+                          label={`启用 ${mod.name}`}
+                          checked={mod.enabled}
+                          onChange={() =>
+                            void action(async () => {
+                              await setModEnabled(
+                                current.id,
+                                mod.fileName,
+                                !mod.enabled,
+                              );
+                              setMods(await listMods(current.id));
+                              await core.refresh();
+                            })
+                          }
+                        />
+                        <button
+                          className="button danger"
+                          disabled={pending}
+                          onClick={() => {
+                            if (
+                              confirm(
+                                `永久删除 ${mod.fileName}？此操作没有回收站。`,
+                              )
+                            )
+                              void action(async () => {
+                                await deleteMod(current.id, mod.fileName);
+                                setMods(await listMods(current.id));
+                                await core.refresh();
+                              });
+                          }}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                    {!mods.length && (
+                      <p className="muted">没有扫描到 Mod 文件。</p>
+                    )}
+                  </>
+                ))}
+              {tab === "saves" && (
+                <>
+                  {saves.map((save) => (
+                    <div className="file-row" key={save.dir}>
+                      <Badge kind="folder" />
+                      <span>
+                        <strong>{save.name}</strong>
+                        <small>
+                          {save.gameVersion || "版本未知"} ·{" "}
+                          {save.lastModified.slice(0, 10)}
+                        </small>
+                      </span>
+                      <button
+                        className="button secondary"
+                        onClick={() =>
+                          void action(() => openPathChecked(save.dir))
+                        }
+                      >
+                        打开目录
+                      </button>
+                    </div>
                   ))}
-                </div>
-              </>
-            )}
-            {tab === "runtime" && (
-              <>
-                <p className="muted">
-                  内存{" "}
-                  {current.memoryMb === null
-                    ? "自动"
-                    : `${current.memoryMb} MB`}
-                  ；JVM 参数按行保存。自定义 Java 尚未生效。
-                </p>
-                <button
-                  className="button secondary"
-                  disabled={!current.managed || pending}
-                  onClick={openEdit}
-                >
-                  编辑运行设置
-                </button>
-              </>
-            )}
-            {tab === "logs" && (
-              <>
-                <p className="muted">
-                  日志不会自动上传；先在本地查看，分享前检查个人信息。
-                </p>
-                <button
-                  className="button secondary"
-                  onClick={() =>
-                    void action(() => openPathChecked(current.dirs.logs))
-                  }
-                >
-                  打开日志目录
-                </button>
-              </>
-            )}
+                  <div className="action-grid">
+                    {(
+                      [
+                        "saves",
+                        "resourcepacks",
+                        "shaderpacks",
+                        "screenshots",
+                      ] as const
+                    ).map((key) => (
+                      <button
+                        className="button secondary"
+                        key={key}
+                        onClick={() =>
+                          void action(() => openPathChecked(current.dirs[key]))
+                        }
+                      >
+                        打开
+                        {
+                          {
+                            saves: "存档",
+                            resourcepacks: "资源包",
+                            shaderpacks: "光影包",
+                            screenshots: "截图",
+                          }[key]
+                        }
+                        目录
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              {tab === "runtime" && (
+                <>
+                  <p className="muted">
+                    内存{" "}
+                    {current.memoryMb === null
+                      ? "自动"
+                      : `${current.memoryMb} MB`}
+                    ；JVM 参数按行保存。自定义 Java 尚未生效。
+                  </p>
+                  <button
+                    className="button secondary"
+                    disabled={!current.managed || pending}
+                    onClick={openEdit}
+                  >
+                    编辑运行设置
+                  </button>
+                </>
+              )}
+              {tab === "logs" && (
+                <>
+                  <p className="muted">
+                    日志不会自动上传；先在本地查看，分享前检查个人信息。
+                  </p>
+                  <button
+                    className="button secondary"
+                    onClick={() =>
+                      void action(() => openPathChecked(current.dirs.logs))
+                    }
+                  >
+                    打开日志目录
+                  </button>
+                </>
+              )}
+            </MotionRegion>
           </div>
         </div>
       )}
-      {editing && (
+      <ModalPresence present={editing}>
         <Modal
           title="编辑版本配置"
           close={() => {
@@ -1144,8 +1148,8 @@ export function LiveVersions() {
             保存修改
           </button>
         </Modal>
-      )}
-      {deleting && (
+      </ModalPresence>
+      <ModalPresence present={deleting}>
         <Modal
           title="确认删除这个版本？"
           close={() => {
@@ -1184,7 +1188,7 @@ export function LiveVersions() {
             确认移入回收站
           </button>
         </Modal>
-      )}
+      </ModalPresence>
     </section>
   );
 }

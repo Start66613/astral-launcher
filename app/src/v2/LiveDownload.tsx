@@ -1,3 +1,4 @@
+import { MotionRegion, MotionDetails } from "./motion";
 import { useEffect, useRef, useState } from "react";
 import { Badge, Icon } from "./icons";
 import { CATEGORIES, catalog, date, size } from "./model";
@@ -141,6 +142,7 @@ function LiveSearch({ kind }: { kind: string }) {
   const [game, setGame] = useState("");
   const [loader, setLoader] = useState("");
   const [offset, setOffset] = useState(0);
+  const [refreshing, setRefreshing] = useState(true);
   const [result, setResult] = useState<{
     hits: (Project & { project_id: string; icon_url?: string })[];
     total_hits: number;
@@ -151,7 +153,7 @@ function LiveSearch({ kind }: { kind: string }) {
     let alive = true;
     const controller = new AbortController();
     setError("");
-    setResult(null);
+    setRefreshing(true);
     const timer = setTimeout(() => {
       const facets = [
         [`project_type:${kind === "shaderpack" ? "shader" : kind}`],
@@ -174,6 +176,9 @@ function LiveSearch({ kind }: { kind: string }) {
         })
         .catch((cause) => {
           if (alive) setError(String(cause));
+        })
+        .finally(() => {
+          if (alive) setRefreshing(false);
         });
     }, 280);
     return () => {
@@ -235,45 +240,61 @@ function LiveSearch({ kind }: { kind: string }) {
           detail="查询 Modrinth 公开资源，不自动安装。"
         />
       )}
-      <div className="resource-grid">
-        {result?.hits.map((project) => (
-          <button
-            className="project-card"
-            key={project.project_id}
-            onClick={() => navigate(`resource/${kind}:${project.project_id}`)}
-          >
-            <div className="project-cover">
-              <Badge kind={kind} large />
-              {project.icon_url && (
-                <img
-                  className="project-icon resource-card-icon"
-                  src={project.icon_url}
-                  alt=""
-                  loading="lazy"
-                  decoding="async"
-                  onError={(event) => {
-                    event.currentTarget.hidden = true;
-                  }}
-                />
-              )}
-              <span className="tag">Modrinth</span>
-            </div>
-            <div>
-              <h3>{project.title}</h3>
-              <p>{project.description}</p>
-              <footer>
-                <span>
-                  {new Intl.NumberFormat("zh", { notation: "compact" }).format(
-                    project.downloads,
-                  )}{" "}
-                  次下载
-                </span>
-                <Icon name="arrow" />
-              </footer>
-            </div>
-          </button>
-        ))}
-      </div>
+      <p className="loading-feedback" role="status">
+        {refreshing
+          ? result
+            ? "正在刷新，上次结果暂不可选择…"
+            : "正在读取搜索结果…"
+          : error
+            ? "网络未完成，保留上次结果"
+            : ""}
+      </p>
+      <MotionRegion
+        changeKey={
+          result?.hits.map((project) => project.project_id).join(",") || ""
+        }
+      >
+        <div className="resource-grid" aria-busy={refreshing}>
+          {result?.hits.map((project) => (
+            <button
+              className="project-card"
+              disabled={refreshing || !!error}
+              key={project.project_id}
+              onClick={() => navigate(`resource/${kind}:${project.project_id}`)}
+            >
+              <div className="project-cover">
+                <Badge kind={kind} large />
+                {project.icon_url && (
+                  <img
+                    className="project-icon resource-card-icon"
+                    src={project.icon_url}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    onError={(event) => {
+                      event.currentTarget.hidden = true;
+                    }}
+                  />
+                )}
+                <span className="tag">Modrinth</span>
+              </div>
+              <div>
+                <h3>{project.title}</h3>
+                <p>{project.description}</p>
+                <footer>
+                  <span>
+                    {new Intl.NumberFormat("zh", {
+                      notation: "compact",
+                    }).format(project.downloads)}{" "}
+                    次下载
+                  </span>
+                  <Icon name="arrow" />
+                </footer>
+              </div>
+            </button>
+          ))}
+        </div>
+      </MotionRegion>
       {result && !result.hits.length && (
         <Empty
           title="没有找到匹配资源"
@@ -303,7 +324,7 @@ function LiveSearch({ kind }: { kind: string }) {
   );
 }
 export function LiveGameInstaller({ version }: { version: string }) {
-  const { runtime, navigate, notify } = usePreview();
+  const { runtime, navigate, goBack, notify } = usePreview();
   const [loader, setLoader] = useState("vanilla");
   const [build, setBuild] = useState("");
   const [catalogs, setCatalogs] = useState<LoaderCatalog[]>([]);
@@ -383,7 +404,7 @@ export function LiveGameInstaller({ version }: { version: string }) {
     (loader === "vanilla" || !!build);
   return (
     <section className="content-page installer-page">
-      <button className="breadcrumb" onClick={() => navigate("download/game")}>
+      <button className="breadcrumb" onClick={() => goBack("download/game")}>
         <Icon name="back" />
         下载 / 原版游戏
       </button>
@@ -459,7 +480,8 @@ export function LiveGameInstaller({ version }: { version: string }) {
               })}
             </div>
             {loader !== "vanilla" && (
-              <div className="build-picker">
+              <MotionDetails open className="build-picker">
+                <summary>具体构建与其他兼容版本</summary>
                 <p className="muted">
                   推荐：
                   {catalogs.find((c) => c.kind === loader)?.recommended ||
@@ -482,7 +504,7 @@ export function LiveGameInstaller({ version }: { version: string }) {
                       ))}
                   </select>
                 </label>
-              </div>
+              </MotionDetails>
             )}
           </section>
           <section className="surface component-section">
@@ -596,7 +618,7 @@ export function LiveGameInstaller({ version }: { version: string }) {
   );
 }
 export function LiveResource({ argument }: { argument: string }) {
-  const { runtime, navigate } = usePreview();
+  const { runtime, navigate, goBack } = usePreview();
   const [kind, id] = argument.includes(":")
     ? argument.split(":")
     : ["mod", argument];
@@ -654,11 +676,14 @@ export function LiveResource({ argument }: { argument: string }) {
   useEffect(() => {
     let alive = true;
     const abort = new AbortController();
-    setFiles([]);
     setFileId("");
     setSaves([]);
     setWorld("");
-    if (!modpack && !target) return;
+    if (!modpack && !target) {
+      setFiles([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError("");
     const params = new URLSearchParams();
@@ -678,7 +703,10 @@ export function LiveResource({ argument }: { argument: string }) {
         if (alive) setFiles(rows);
       })
       .catch((cause) => {
-        if (alive) setError(String(cause));
+        if (alive) {
+          setError(String(cause));
+          setFiles([]);
+        }
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -715,35 +743,32 @@ export function LiveResource({ argument }: { argument: string }) {
             : target.dirs.shaderpacks;
   return (
     <section className="content-page installer-page">
-      <button
-        className="breadcrumb"
-        onClick={() => navigate(`download/${kind}`)}
-      >
+      <button className="breadcrumb" onClick={() => goBack(`download/${kind}`)}>
         <Icon name="back" />
         下载 / {CATEGORIES.find((c) => c.id === kind)?.name || "Mod"}
       </button>
-      {project ? (
-        <header className="project-heading">
-          {project.icon_url ? (
-            <span className="project-icon-wrap">
-              <Badge kind={kind} large />
-              <img
-                className="project-icon"
-                src={project.icon_url}
-                alt=""
-                decoding="async"
-                onError={(event) => {
-                  event.currentTarget.hidden = true;
-                }}
-              />
-            </span>
-          ) : (
+      <header className="project-heading">
+        {project?.icon_url ? (
+          <span className="project-icon-wrap">
             <Badge kind={kind} large />
-          )}
-          <div>
-            <span className="kicker">MODRINTH</span>
-            <h1 tabIndex={-1}>{project.title}</h1>
-            <p>{project.description}</p>
+            <img
+              className="project-icon"
+              src={project.icon_url}
+              alt=""
+              decoding="async"
+              onError={(event) => {
+                event.currentTarget.hidden = true;
+              }}
+            />
+          </span>
+        ) : (
+          <Badge kind={kind} large />
+        )}
+        <div>
+          <span className="kicker">MODRINTH</span>
+          <h1 tabIndex={-1}>{project?.title || "资源详情"}</h1>
+          <p>{project?.description || "正在读取公开项目信息…"}</p>
+          {project && (
             <div className="project-meta">
               <span>作者：{authors.join(" / ") || "见项目主页"}</span>
               <span>{project.downloads.toLocaleString()} 次下载</span>
@@ -757,11 +782,9 @@ export function LiveResource({ argument }: { argument: string }) {
                 <Icon name="arrow" />
               </a>
             </div>
-          </div>
-        </header>
-      ) : (
-        <PageTitle title="资源详情" subtitle="正在读取公开项目信息…" />
-      )}
+          )}
+        </div>
+      </header>
       {error && (
         <div className="banner error" role="alert">
           {error}
@@ -879,52 +902,66 @@ export function LiveResource({ argument }: { argument: string }) {
                 </button>
               ))}
             </div>
-            {loading ? (
-              <p className="muted">正在查询匹配文件…</p>
-            ) : (
-              <div className="file-list">
-                {files
-                  .filter(
-                    (file) =>
-                      channel === "all" || file.version_type === channel,
-                  )
-                  .map((file) => (
-                    <button
-                      key={file.id}
-                      className={`file-option ${fileId === file.id ? "selected" : ""}`}
-                      onClick={() => setFileId(file.id)}
-                    >
-                      <span className="radio-dot" />
-                      <div>
-                        <strong>{file.version_number}</strong>
-                        <p>
-                          {date(file.date_published)} ·{" "}
-                          {size(
-                            file.files.find((f) => f.primary)?.size ||
-                              file.files[0]?.size ||
-                              0,
-                          )}{" "}
-                          · {file.loaders.join(" / ")}
-                        </p>
-                        <small>
-                          Minecraft {file.game_versions.join(" / ")}
-                        </small>
+            <p className="loading-feedback" role="status">
+              {loading
+                ? files.length
+                  ? `正在为 ${target?.name || "所选版本"} 查询文件，下方为上次结果，请等待更新…`
+                  : "正在查询匹配文件…"
+                : ""}
+            </p>
+            <MotionDetails open className="resource-file-disclosure">
+              <summary>兼容的发行文件 · {files.length}</summary>{" "}
+              <MotionRegion
+                changeKey={`${channel}:${files.map((file) => file.id).join(",")}`}
+              >
+                <div className="file-list" aria-busy={loading}>
+                  {files
+                    .filter(
+                      (file) =>
+                        channel === "all" || file.version_type === channel,
+                    )
+                    .map((file) => (
+                      <button
+                        key={file.id}
+                        className={`file-option ${fileId === file.id ? "selected" : ""}`}
+                        disabled={loading}
+                        onClick={() => setFileId(file.id)}
+                      >
+                        <span className="radio-dot" />
+                        <div>
+                          <strong>{file.version_number}</strong>
+                          <p>
+                            {date(file.date_published)} ·{" "}
+                            {size(
+                              file.files.find((f) => f.primary)?.size ||
+                                file.files[0]?.size ||
+                                0,
+                            )}{" "}
+                            · {file.loaders.join(" / ")}
+                          </p>
+                          <small>
+                            Minecraft {file.game_versions.join(" / ")}
+                          </small>
+                        </div>
+                        <div>
+                          <span className="tag">{file.version_type}</span>
+                          {file.featured && (
+                            <span className="tag">项目方精选</span>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  {(target || modpack) &&
+                    !files.length &&
+                    !error &&
+                    !loading && (
+                      <div className="banner warn">
+                        没有匹配的发行文件，请更换目标游戏或加载器；不会自动选择错误目录。
                       </div>
-                      <div>
-                        <span className="tag">{file.version_type}</span>
-                        {file.featured && (
-                          <span className="tag">项目方精选</span>
-                        )}
-                      </div>
-                    </button>
-                  ))}
-                {(target || modpack) && !files.length && !error && (
-                  <div className="banner warn">
-                    没有匹配的发行文件，请更换目标游戏或加载器；不会自动选择错误目录。
-                  </div>
-                )}
-              </div>
-            )}
+                    )}
+                </div>
+              </MotionRegion>
+            </MotionDetails>
           </section>
           <section className="surface component-section">
             <header>

@@ -1,5 +1,7 @@
 # Astral V2：当前交付与验收记录
 
+本文记录截至`af6ae1a`的V2基线与收尾；后续全局动效修复及最新构建/验收数字见[动效审查记录](astral-v2-motion-audit.md)。以下旧构建数字不代表该轮修复后的最新产物。
+
 2026-10-24 收尾核验，`D:\软件开发\astral-ui`，`feature/astral-v2-ui`。DSH 已代为提交并推送原 V2 工作为 `70cc61f`；本轮 fetch 后确认本地 HEAD 与远端均为该提交、工作区干净，再开始收尾。没有 reset/clean、合并、修改 main/core 工作树、Rust、共享 bridge/types、包清单或锁文件。原 Forest Tale 三案保留。
 
 ## 直接查看

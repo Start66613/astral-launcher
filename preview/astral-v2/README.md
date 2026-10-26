@@ -47,3 +47,19 @@ node preview/astral-v2/verify-production.cjs
 - **尚未真机验收**：真实游戏启动/安装、新核心真实取消与重启对账、系统125%/150% DPI、读屏、高对比度及弱设备。125%/150%仅做浏览器模拟，不算原生系统DPI认证。
 
 源码唯一入口 `app/src/v2/`，`preview/astral-v2/src/`多数为重导出；原三张图统一从 `app/public/forest/`引用。研究、许可、API提案见相邻ASSETS与docs/ui文档。
+
+## 全局页面与交互动效修复
+
+正式5198与评审5202都已接入独立路由内容过渡、弹窗开闭、小型折叠和统一Motion Token；首次入场、导航、局部反馈和游戏启动效果分别控制。关闭首次入场不影响日常导航；系统减少动画优先。主内容过渡不重建页面，不丢草稿或重发任务。
+
+[开/关录像对照页](http://127.0.0.1:5202/motion-review.html)是**日常交互**对照；原`#motion`仍是三种**游戏启动**效果评审，两者不同。
+
+```powershell
+node preview/astral-v2/verify-motion.cjs
+# 隔离原生测试程序仍在CDP9224时：
+node preview/astral-v2/verify-native-motion.cjs
+```
+
+本轮：设计74/0、正式接口桩24/0、日常动效29/0、原生基础8/0、原生动效6/0（通过/失败）；tsc 0错误，build成功/70模块。两个本地视频与截图在忽略的screenshots/motion，verify-motion会生成录像。真机窗口1280×800 DPR1；125%/150%为浏览器模拟，CPU限速与减少动画媒体偏好也明确标记为模拟。
+
+旧的基线构建数字与当前完整差异、文件清单、内存/真机未验证项见 `docs/ui/astral-v2-motion-audit.md`，不能将旧68模块当作当前构建。
