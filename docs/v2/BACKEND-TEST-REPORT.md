@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 267 项全过，单元测试 212 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 270 项全过，单元测试 216 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（267 项）
+## 2. 自检覆盖（270 项）
 
 按前缀分组：
 
@@ -64,6 +64,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `ledger` | 3 | 账本让 Astral 装的进 known、玩家手放的仍 unknown、文件删掉后不再算已装 |
 | `cache` | 3 | 第二次走缓存、统计与淘汰、只清缓存不动文件 |
 | `diagnosis` | 3 | 结构化报告、干净日志保持安静、脱敏 |
+| `logs` | 3 | 归档 `.gz` 能列出并标记 compressed、解压后按行读取、实时跟随明确拒绝归档文件 |
 | `live` | 5 | 只给完整行、无新内容不重复、追加增量、重写后 reset、半行留到下次 |
 | `server` | 6 | 本地假 MC 服务器跑真实握手、颜色代码剥离、favicon 保留、host:port 写法、离线不报错、非法地址才 Err |
 | `servers` | 8 | 增删改查、重复与非法地址、选择性更新、重排、批量刷新各自独立、lastSeen 只记成功、id 过滤、删除只删记录 |
@@ -78,7 +79,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（218 个）
+## 3. 单元测试（222 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -87,7 +88,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `ledger` | 5 | 记录读回、升级替换旧条目、改名与删除跟随文件、文件丢失不算已装、空字段拒绝 |
 | `deps` | 9 | 嵌套顺序、环、双版本冲突、深度/节点上限、已装跳过、release 优先、缺失、via 链 |
 | `verify` | 5 | 相对路径、需要修复、干净不需、计划不碰玩家文件、空计划 |
-| `logs` | 6 | 脱敏（邮箱/IP/token/用户目录）、常见故障分类、cause/confidence、新规则、干净日志 |
+| `logs` | 9 | 脱敏（邮箱/IP/token/用户目录）、常见故障分类、cause/confidence、新规则、干净日志、`.gz` 解压读取与尾部截断 |
 | `live` | 6 | 只给完整行、按 offset 续读、文件变短 reset、上限与 pending、日志不存在报错、挑最新日志 |
 | `server` | 10 | VarInt 往返、字符串长度按字节、聊天组件拍平、颜色代码剥离、状态解析、坏 favicon、地址拆分、老协议解析、非法地址 |
 | `nbt` | 9 | 标量与数组往返、LevelInfo 解析、缺字段保持 null、截断数据被拒、荒谬长度被拒、非 compound 根被拒、未压缩文件可读 |
