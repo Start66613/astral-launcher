@@ -9,6 +9,7 @@ mod instance;
 mod java;
 mod java_audit;
 mod jdk;
+mod ledger;
 mod loader;
 mod logs;
 mod migrate;
@@ -2967,6 +2968,51 @@ pub fn selftest() -> i32 {
     let _ = std::fs::remove_dir_all(&scan_dir);
     let _ = std::fs::remove_dir_all(&clean_dir);
 
+    // 账本：Astral 装过的 Mod 能被依赖解析认出版本，玩家手放的仍算未知
+    {
+        let led_dir = std::env::temp_dir().join(format!("astral-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&led_dir);
+        let _ = std::fs::create_dir_all(&led_dir);
+        std::fs::write(led_dir.join("sodium-0.5.13.jar"), b"x").unwrap();
+        let _ = ledger::record(
+            &led_dir,
+            "sodium",
+            "ver-sodium",
+            "0.5.13",
+            "sodium-0.5.13.jar",
+        );
+        // 玩家手动丢进来的（没有账本条目）——必须是真 zip，否则读不出 project id
+        {
+            use std::io::Write as _;
+            let f = std::fs::File::create(led_dir.join("manual.jar")).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            zw.start_file("fabric.mod.json", opts).unwrap();
+            zw.write_all(
+                br#"{"id":"manualmod","version":"1.0","contact":{"homepage":"https://modrinth.com/mod/manualmod"}}"#,
+            )
+            .unwrap();
+            zw.finish().unwrap();
+        }
+        let (known, unknown) = deps::scan_installed(&led_dir);
+        check!(
+            "ledger marks astral-installed as known",
+            known.get("sodium").map(String::as_str) == Some("ver-sodium")
+        );
+        check!(
+            "ledger keeps manual jars unknown",
+            unknown.contains("manualmod") && !known.contains_key("manualmod")
+        );
+        // 文件被玩家删掉之后，账本不该再算它已装
+        let _ = std::fs::remove_file(led_dir.join("sodium-0.5.13.jar"));
+        let (known2, _) = deps::scan_installed(&led_dir);
+        check!(
+            "ledger forgets missing files",
+            !known2.contains_key("sodium")
+        );
+        let _ = std::fs::remove_dir_all(&led_dir);
+    }
+
     check!(
         "instance delete to trash",
         instance::delete(&game, &meta.id, true).is_ok()
@@ -3240,6 +3286,7 @@ pub fn selftest() -> i32 {
             created_at: crate::time::unix_ms_to_iso(crate::time::now_unix_ms()),
             files: std::collections::BTreeMap::new(),
             replaced: std::collections::BTreeMap::new(),
+            previous: std::collections::BTreeMap::new(),
             note: "自检".into(),
         };
         rec.files

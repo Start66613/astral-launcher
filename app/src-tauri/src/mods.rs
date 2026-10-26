@@ -263,6 +263,8 @@ pub fn set_enabled(dir: &Path, file_name: &str, enabled: bool) -> Result<ModFile
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| file_name.to_string());
+    // 启停是改文件名，账本跟着改，否则依赖解析会以为这个 Mod 被删了
+    crate::ledger::rename(dir, file_name, &new_name);
     Ok(build(dir, &new_name, enabled, read_jar_meta(&dest)))
 }
 
@@ -275,7 +277,9 @@ pub fn delete(dir: &Path, file_name: &str) -> Result<(), String> {
     if !p.is_file() {
         return Err("INVALID_NAME|模组文件不存在".into());
     }
-    std::fs::remove_file(&p).map_err(|e| format!("PERMISSION|删除失败|{e}"))
+    std::fs::remove_file(&p).map_err(|e| format!("PERMISSION|删除失败|{e}"))?;
+    crate::ledger::forget(dir, file_name);
+    Ok(())
 }
 
 #[cfg(test)]

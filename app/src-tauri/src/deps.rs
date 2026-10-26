@@ -657,13 +657,18 @@ impl DepSource for ModrinthSource {
 /// 只认 jar 里 `fabric.mod.json` / `mods.toml` / `quilt.mod.json` 声明的 Modrinth 项目 id。
 /// 认不出版本的项目放进 `unknown`，解析器会跳过它们并如实提示。
 pub fn scan_installed(dir: &std::path::Path) -> (HashMap<String, String>, HashSet<String>) {
-    // ModFile 只带人类可读的版本号，没有 Modrinth 版本 id，所以无法填 known。
-    // 全部进 unknown：解析器会跳过安装，但会如实提示"没检查它自己的依赖"。
-    let known: HashMap<String, String> = HashMap::new();
+    // 两路信息来源：
+    //   1) `mods/.astral-ledger.json` —— Astral 自己装的，知道 Modrinth 的 version id，
+    //      可以进 `known`，依赖解析就能判断"装的版本对不对"。
+    //   2) jar 里读出来的 project id —— 玩家手动丢进来的，只知道"装过这个项目"，
+    //      不知道版本，只能进 `unknown`（跳过安装，并如实提示没检查它的依赖）。
+    let known = crate::ledger::known_versions(dir);
     let mut unknown = HashSet::new();
     for m in crate::mods::list(dir) {
         if let Some(pid) = m.project_id {
-            unknown.insert(pid);
+            if !known.contains_key(&pid) {
+                unknown.insert(pid);
+            }
         }
     }
     (known, unknown)

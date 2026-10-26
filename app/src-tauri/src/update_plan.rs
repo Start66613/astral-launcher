@@ -27,6 +27,10 @@ pub struct BackupRecord {
     pub files: BTreeMap<String, String>,
     /// 这次更新把哪些文件换成了什么（用于展示与二次回滚）
     pub replaced: BTreeMap<String, String>,
+    /// 旧文件名 → 更新前的账本条目。回滚时靠它把账本还原成更新前的样子。
+    /// 老的历史记录没有这个字段，读出来是空的（不影响回滚文件本身）。
+    #[serde(default)]
+    pub previous: BTreeMap<String, crate::ledger::LedgerEntry>,
     pub note: String,
 }
 
@@ -253,6 +257,7 @@ pub fn execute(
         created_at: crate::time::unix_ms_to_iso(crate::time::now_unix_ms()),
         files: BTreeMap::new(),
         replaced: BTreeMap::new(),
+        previous: BTreeMap::new(),
         note: format!("批量更新 {} 个模组", todo.len()),
     };
 
@@ -271,6 +276,10 @@ pub fn execute(
         match backup_file(&mods_dir, &batch, &item.file_name) {
             Ok(stored) => {
                 record.files.insert(item.file_name.clone(), stored);
+                // 顺手记下更新前的账本条目，回滚时好还原
+                if let Some(prev) = crate::ledger::load(&mods_dir).files.get(&item.file_name) {
+                    record.previous.insert(item.file_name.clone(), prev.clone());
+                }
             }
             Err(e) => {
                 failed.push((item.file_name.clone(), e));
@@ -307,6 +316,15 @@ pub fn execute(
                         break;
                     }
                 }
+                // 4) 账本跟着更新：新文件名 + 新 version id
+                crate::ledger::forget(&mods_dir, &item.file_name);
+                let _ = crate::ledger::record(
+                    &mods_dir,
+                    &item.project_id,
+                    &item.target_version_id,
+                    &item.target_version,
+                    &item.target_file_name,
+                );
             }
             Err(e) => {
                 failed.push((item.file_name.clone(), e));
@@ -370,6 +388,22 @@ fn rollback_batch(mods_dir: &Path, record: &BackupRecord) -> Result<u32, String>
         let p = mods_dir.join(new_name);
         if p.is_file() {
             let _ = std::fs::remove_file(p);
+        }
+        crate::ledger::forget(mods_dir, new_name);
+    }
+    // 账本还原：能还原的按备份条目写回，没记过的就删掉（保持"只有 Astral 装过才有记录"）
+    for old_name in record.files.keys() {
+        match record.previous.get(old_name) {
+            Some(entry) => {
+                let _ = crate::ledger::record(
+                    mods_dir,
+                    &entry.project_id,
+                    &entry.version_id,
+                    &entry.version_number,
+                    old_name,
+                );
+            }
+            None => crate::ledger::forget(mods_dir, old_name),
         }
     }
     let _ = std::fs::remove_dir_all(&batch);
@@ -445,6 +479,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             files: BTreeMap::new(),
             replaced: BTreeMap::new(),
+            previous: BTreeMap::new(),
             note: "测试".into(),
         };
         save_history(&dir, std::slice::from_ref(&rec)).unwrap();

@@ -576,6 +576,16 @@ pub fn execute(
         },
     )?;
 
+    // 记账：只有 Astral 自己装下来的才写账本，玩家手动放的 jar 不碰。
+    // 依赖解析靠它区分"装的版本对不对"，写失败不算安装失败（只影响下次解析的精度）。
+    let _ = crate::ledger::record(
+        &dir,
+        &stored.plan.project_id,
+        &stored.plan.version_id,
+        "",
+        &stored.plan.file_name,
+    );
+
     Ok(dest)
 }
 

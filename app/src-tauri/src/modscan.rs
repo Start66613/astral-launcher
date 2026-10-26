@@ -441,12 +441,93 @@ pub fn compare_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     Some(Ordering::Equal)
 }
 
-/// 单个约束匹配。支持 `*`、`>=1.2`、`>1.2`、`<=1.2`、`<1.2`、`=1.2`、`1.2.x`、`1.2.*`。
+/// Maven 风格区间：`[1.0,2.0)` `(1.0,2.0]` `[1.0,)` `(,2.0]` `[1.0]`，
+/// 多段用逗号分隔（`[1.0,2.0),[3.0,4.0)`）。
+///
+/// Forge/NeoForge 的 `versionRange` 几乎都是这种写法，所以这一支必须支持，
+/// 否则 Forge 侧所有依赖版本都只能报"判断不了"。
+fn matches_maven_range(version: &str, spec: &str) -> Option<bool> {
+    use std::cmp::Ordering;
+    let spec = spec.trim();
+    let mut any = false;
+    let mut rest = spec;
+    loop {
+        if rest.trim().is_empty() {
+            break;
+        }
+        let start = rest.find('[').or_else(|| rest.find('('))?;
+        let bracket_open = rest.as_bytes()[start];
+        let after = &rest[start + 1..];
+        let end = after
+            .find(']')
+            .or_else(|| after.find(')'))
+            .or_else(|| after.find(','))?;
+        // 找到配对的右括号
+        let close_idx = after.find(']').or_else(|| after.find(')'))?;
+        let bracket_close = after.as_bytes()[close_idx];
+        let inner = &after[..close_idx];
+        rest = &after[close_idx + 1..];
+        let _ = end;
+
+        let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+        let (lo, hi) = match parts.len() {
+            1 => {
+                // [1.0] 精确匹配
+                let v = parts[0];
+                if v.is_empty() {
+                    return None;
+                }
+                let ok = compare_versions(version, v)? == Ordering::Equal;
+                if ok {
+                    any = true;
+                }
+                continue;
+            }
+            2 => (parts[0], parts[1]),
+            _ => return None,
+        };
+
+        let lo_ok = if lo.is_empty() {
+            true
+        } else {
+            let ord = compare_versions(version, lo)?;
+            if bracket_open == b'[' {
+                ord != Ordering::Less
+            } else {
+                ord == Ordering::Greater
+            }
+        };
+        let hi_ok = if hi.is_empty() {
+            true
+        } else {
+            let ord = compare_versions(version, hi)?;
+            if bracket_close == b']' {
+                ord != Ordering::Greater
+            } else {
+                ord == Ordering::Less
+            }
+        };
+        if lo_ok && hi_ok {
+            any = true;
+        }
+        if rest.trim().is_empty() {
+            break;
+        }
+    }
+    Some(any)
+}
+
+/// 单个约束匹配。支持 `*`、`>=1.2`、`>1.2`、`<=1.2`、`<1.2`、`=1.2`、`1.2.x`、`1.2.*`，
+/// 以及 Maven 区间 `[1.20,1.21)`。
 fn matches_one(version: &str, spec: &str) -> Option<bool> {
     use std::cmp::Ordering;
     let spec = spec.trim();
     if spec.is_empty() || spec == "*" {
         return Some(true);
+    }
+    // Maven 区间单独走一支：它以 [ 或 ( 开头
+    if spec.starts_with('[') || spec.starts_with('(') {
+        return matches_maven_range(version, spec);
     }
     let (op, rest) = if let Some(r) = spec.strip_prefix(">=") {
         (">=", r)
@@ -508,9 +589,50 @@ fn matches_one(version: &str, spec: &str) -> Option<bool> {
     })
 }
 
+/// 把一段约束切成若干个原子约束。
+///
+/// 空格是分隔符，逗号也是——**但 Maven 区间里的逗号不是**：`[1.18,1.19.3),[1.20,1.21)`
+/// 是一整个"版本范围集合"，段与段之间是**或**的关系，不能拆成两个 AND 条件。
+/// 所以整段以 `[` / `(` 开头时原样返回，交给 `matches_maven_range` 自己处理。
+fn split_terms(group: &str) -> Vec<String> {
+    let trimmed = group.trim();
+    if trimmed.starts_with('[') || trimmed.starts_with('(') {
+        return vec![trimmed.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for ch in trimmed.chars() {
+        match ch {
+            '[' | '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ']' | ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' | ' ' if depth <= 0 => {
+                let t = cur.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    out
+}
+
 /// 判断版本是否满足约束表达式。
 ///
-/// 支持 `||` 分组、空格分隔的 AND（如 `>=1.20 <1.21`）、以及 `x`/`*` 通配。
+/// 支持 `||` 分组、空格/逗号分隔的 AND（如 `>=1.20 <1.21`）、`x`/`*` 通配，
+/// 以及 Forge 常用的 Maven 区间 `[1.20,1.21)`。
 /// **任何一段解析不出来就返回 None**，调用方必须把它当成"无法判断"而不是"不满足"。
 pub fn satisfies(version: &str, range: &str) -> Option<bool> {
     if range.trim().is_empty() || range.trim() == "*" {
@@ -522,18 +644,13 @@ pub fn satisfies(version: &str, range: &str) -> Option<bool> {
         if group.is_empty() {
             continue;
         }
-        let mut all_ok = true;
-        let mut known = true;
-        // 逗号与空格都当分隔符；但 "<1.20 >=1.19" 这种要分开看
-        let parts: Vec<&str> = group
-            .split([',', ' '])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
+        let parts = split_terms(group);
         if parts.is_empty() {
             continue;
         }
-        for p in parts {
+        let mut all_ok = true;
+        let mut known = true;
+        for p in &parts {
             match matches_one(version, p) {
                 Some(true) => {}
                 Some(false) => {
@@ -834,6 +951,31 @@ mod tests {
         assert_eq!(satisfies("1.21", "1.20.x"), Some(false));
         assert_eq!(satisfies("0.5.13", ">=0.5.11"), Some(true));
         assert_eq!(satisfies("1.20.1", ">=1.20 || <1.19"), Some(true));
+    }
+
+    #[test]
+    fn satisfies_understands_maven_ranges() {
+        // Forge/NeoForge 的 versionRange 基本都是这种写法
+        assert_eq!(satisfies("1.20.1", "[1.20,1.21)"), Some(true));
+        assert_eq!(satisfies("1.21", "[1.20,1.21)"), Some(false));
+        assert_eq!(satisfies("1.19.9", "[1.20,1.21)"), Some(false));
+        // 开区间
+        assert_eq!(satisfies("1.20", "(1.20,1.21)"), Some(false));
+        assert_eq!(satisfies("1.20.5", "(1.20,1.21)"), Some(true));
+        // 单边
+        assert_eq!(satisfies("47.2.0", "[47,)"), Some(true));
+        assert_eq!(satisfies("46.0.0", "[47,)"), Some(false));
+        assert_eq!(satisfies("1.19.2", "(,1.20]"), Some(true));
+        // 精确
+        assert_eq!(satisfies("1.20.1", "[1.20.1]"), Some(true));
+        assert_eq!(satisfies("1.20.2", "[1.20.1]"), Some(false));
+        // 多段区间：任一段命中即可
+        assert_eq!(satisfies("1.19.2", "[1.18,1.19.3),[1.20,1.21)"), Some(true));
+        assert_eq!(satisfies("1.20.5", "[1.18,1.19.3),[1.20,1.21)"), Some(true));
+        assert_eq!(
+            satisfies("1.19.5", "[1.18,1.19.3),[1.20,1.21)"),
+            Some(false)
+        );
     }
 
     #[test]
