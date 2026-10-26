@@ -25,8 +25,18 @@ fn str_of(v: &serde_json::Value, key: &str) -> Option<String> {
 pub fn install(
     major: u32,
     game_dir: &Path,
-    should_cancel: impl Fn() -> bool,
+    should_cancel: impl Fn() -> bool + Send + Sync + 'static,
     mut on: impl FnMut(&str, u32, u32),
+) -> Result<JdkResult, String> {
+    let should_cancel = std::sync::Arc::new(should_cancel);
+    install_inner(major, game_dir, should_cancel, &mut on)
+}
+
+fn install_inner(
+    major: u32,
+    game_dir: &Path,
+    should_cancel: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    on: &mut dyn FnMut(&str, u32, u32),
 ) -> Result<JdkResult, String> {
     if !(8..=30).contains(&major) {
         return Err("INVALID_VALUE|Java 主版本超出范围".into());
@@ -67,9 +77,22 @@ pub fn install(
 
     if !zip_path.is_file() {
         on("download", 0, 1);
-        crate::net::download_atomic(&link, &zip_path, None, |c, t, _s, _ts| {
-            on("download", c, t);
-        })?;
+        let c = should_cancel.clone();
+        let cancel: crate::net::CancelRef<'_> = &*c;
+        crate::net::download_with_cancel(
+            &link,
+            &zip_path,
+            None,
+            None,
+            &cancel,
+            |done, total| {
+                on(
+                    "download",
+                    done.min(u32::MAX as u64) as u32,
+                    total.unwrap_or(0).min(u32::MAX as u64) as u32,
+                );
+            },
+        )?;
     }
 
     if let Some(want) = &checksum {
@@ -86,7 +109,8 @@ pub fn install(
 
     let dest = game_dir.join("jvm").join(format!("adoptium-{major}"));
     on("extract", 0, 1);
-    extract_zip(&zip_path, &dest, |done, total| on("extract", done, total))?;
+    let mut cb = |done, total| on("extract", done, total);
+    extract_zip(&zip_path, &dest, &mut cb)?;
 
     let java = find_java_exe(&dest)
         .ok_or_else(|| "INTERNAL|解压后找不到 java.exe".to_string())?;
@@ -104,7 +128,7 @@ pub fn install(
 fn extract_zip(
     zip_path: &Path,
     dest: &Path,
-    mut on: impl FnMut(u32, u32),
+    on: &mut dyn FnMut(u32, u32),
 ) -> Result<(), String> {
     const MAX_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
     let file = std::fs::File::open(zip_path).map_err(|e| format!("PERMISSION|打不开压缩包|{e}"))?;

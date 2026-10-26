@@ -162,6 +162,7 @@ pub fn apply_update(
     old_file: &str,
     project_id: &str,
     version_id: &str,
+    cancel: crate::net::CancelRef<'_>,
     mut on: impl FnMut(u32, u32, u32, u32),
 ) -> Result<(String, String), String> {
     let stats = |_: &str| crate::instance::PlayStats::default();
@@ -199,15 +200,21 @@ pub fn apply_update(
         .and_then(|h| str_of(h, "sha512"));
 
     let dest = dir.join(&new_name);
-    crate::net::download_atomic(&url, &dest, sha1.as_deref(), |c, t, s, ts| on(c, t, s, ts))?;
-
-    if let Some(want) = &sha512 {
-        let got = crate::net::sha512_file(&dest)?;
-        if !got.eq_ignore_ascii_case(want) {
-            let _ = std::fs::remove_file(&dest);
-            return Err("HASH_MISMATCH|新文件校验失败，已保留旧文件".into());
-        }
-    }
+    crate::net::download_with_cancel(
+        &url,
+        &dest,
+        sha1.as_deref(),
+        sha512.as_deref(),
+        cancel,
+        |done, total| {
+            on(
+                1,
+                1,
+                done.min(u32::MAX as u64) as u32,
+                total.unwrap_or(0).min(u32::MAX as u64) as u32,
+            );
+        },
+    )?;
 
     // 新文件到位后才删旧的；同名则说明是原地替换
     if new_name != old_file {

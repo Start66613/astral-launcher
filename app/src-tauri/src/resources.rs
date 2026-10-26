@@ -588,48 +588,58 @@ pub fn take(plan_id: &str, revision: u32) -> Result<StoredResourcePlan, String> 
     Ok(stored)
 }
 
-/// 真正下载并落盘（调用方已在任务线程里）
+/// 真正下载并落盘（调用方已在任务线程里）。
+///
+/// 下载过程中随时可以被取消：取消时保留 `.part`，下次可以接着下。
 pub fn execute(
     stored: &StoredResourcePlan,
-    should_cancel: impl Fn() -> bool,
+    cancel: crate::net::CancelRef<'_>,
     mut on: impl FnMut(u32, u32),
 ) -> Result<PathBuf, String> {
     let dir = PathBuf::from(&stored.plan.target_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
 
-    if should_cancel() {
+    if (cancel)() {
         return Err("CANCELLED|已取消".into());
     }
 
     // 先装必需依赖，再装本体；两者都在 .part 阶段完成 SHA1/SHA512 校验
     for (i, dep) in stored.plan.dependencies.iter().enumerate() {
-        if should_cancel() {
+        if (cancel)() {
             return Err("CANCELLED|已取消".into());
         }
         let (url, _name) = &stored.dep_urls[i];
         let dep_dest = dir.join(&dep.file_name);
-        crate::net::download_verified(
+        crate::net::download_with_cancel(
             url,
             &dep_dest,
             dep.sha1.as_deref(),
             dep.sha512.as_deref(),
-            |c, t, _s, _ts| {
-                on(c, t);
+            cancel,
+            |done, total| {
+                on(
+                    done.min(u32::MAX as u64) as u32,
+                    total.unwrap_or(0).min(u32::MAX as u64) as u32,
+                );
             },
         )?;
     }
 
-    if should_cancel() {
+    if (cancel)() {
         return Err("CANCELLED|已取消".into());
     }
     let dest = dir.join(&stored.plan.file_name);
-    crate::net::download_verified(
+    crate::net::download_with_cancel(
         &stored.url,
         &dest,
         stored.sha1.as_deref(),
         stored.sha512.as_deref(),
-        |c, t, _s, _ts| {
-            on(c, t);
+        cancel,
+        |done, total| {
+            on(
+                done.min(u32::MAX as u64) as u32,
+                total.unwrap_or(0).min(u32::MAX as u64) as u32,
+            );
         },
     )?;
 
@@ -677,7 +687,7 @@ pub fn live_probe(
         return Err(format!("{}|{}", b.code, b.message));
     }
     let stored = take(&plan.plan_id, 1)?;
-    let p = execute(&stored, || false, |_, _| {})?;
+    let p = execute(&stored, &*crate::net::never_cancel(), |_, _| {})?;
     Ok(p.to_string_lossy().to_string())
 }
 

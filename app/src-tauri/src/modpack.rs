@@ -367,7 +367,7 @@ pub fn take(plan_id: &str, revision: u32) -> Result<StoredModpackPlan, String> {
 pub fn extract_overrides(
     pack: &Path,
     instance_dir: &Path,
-    should_cancel: &dyn Fn() -> bool,
+    should_cancel: crate::net::CancelRef<'_>,
     mut on: impl FnMut(u32, u32),
 ) -> Result<u32, String> {
     const MAX_TOTAL: u64 = 512 * 1024 * 1024;
@@ -428,22 +428,23 @@ pub fn extract_overrides(
     Ok(count)
 }
 
-/// 下载 index 里的全部文件到实例目录
+/// 下载 index 里的全部文件到实例目录。
+///
+/// 每个文件下载期间都可以被取消；取消时保留 `.part` 以便续传。
 pub fn download_files(
     index: &ModpackIndex,
     instance_dir: &Path,
-    should_cancel: &dyn Fn() -> bool,
+    should_cancel: crate::net::CancelRef<'_>,
     mut on: impl FnMut(u32, u32),
 ) -> Result<u32, String> {
     let total = index.files.len() as u32;
+    let cancel = should_cancel;
     let mut done = 0u32;
     for f in &index.files {
         if should_cancel() {
             return Err("CANCELLED|已取消".into());
         }
-        if crate::net::check_url(&f.url).is_err() {
-            return Err(format!("BLOCKED_URL|不允许的来源：{}", f.url));
-        }
+        crate::net::validate_url(&f.url)?;
         let rel = safe_rel_path(&f.path)?;
         let dest = instance_dir.join(&rel);
         if !dest.starts_with(instance_dir) {
@@ -453,7 +454,14 @@ pub fn download_files(
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
         }
-        crate::net::download_verified(&f.url, &dest, f.sha1.as_deref(), f.sha512.as_deref(), |_, _, _, _| {})?;
+        crate::net::download_with_cancel(
+            &f.url,
+            &dest,
+            f.sha1.as_deref(),
+            f.sha512.as_deref(),
+            cancel,
+            |_, _| {},
+        )?;
         done += 1;
         on(done, total);
     }
@@ -465,7 +473,7 @@ pub fn install(
     stored: &StoredModpackPlan,
     game: &Path,
     username: &str,
-    should_cancel: impl Fn() -> bool,
+    should_cancel: impl Fn() -> bool + Send + Sync,
     mut on: impl FnMut(&str, &str, u32, u32),
 ) -> Result<String, String> {
     let index = read_index(&stored.pack_path)?;

@@ -13,6 +13,9 @@ pub mod msa;
 
 pub mod download;
 
+/// [Astral patch] 可取消 / 可续传的单文件流式下载
+pub mod stream;
+
 /// [Astral patch] 国内镜像地址映射
 pub mod mirror;
 

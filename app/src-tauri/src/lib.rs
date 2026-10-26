@@ -11,6 +11,7 @@ mod logs;
 mod modpack;
 mod mods;
 mod net;
+mod testsrv;
 mod plan;
 mod resources;
 mod worlds;
@@ -589,10 +590,13 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
         task::start(&tid);
         let t2 = tid.clone();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let tid_c = tid.clone();
+            let cancel = net::cancel_from({
+                let tid_c = tid.clone();
+                move || task::is_cancelled(&tid_c)
+            });
             resources::execute(
                 &stored,
-                move || task::is_cancelled(&tid_c),
+                &*cancel,
                 move |c, total| {
                     task::progress(&t2, "download", format!("下载 {c}/{total}"), c, total);
                 },
@@ -701,12 +705,17 @@ fn run_mod_update(tid: &str, instance_id: &str, file_name: &str, project_id: &st
     let game = game_root();
     let t2 = tid.to_string();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let cancel = net::cancel_from({
+            let tc = tid.to_string();
+            move || task::is_cancelled(&tc)
+        });
         updates::apply_update(
             &game,
             instance_id,
             file_name,
             project_id,
             version_id,
+            &*cancel,
             move |c, t, _s, _ts| {
                 task::progress(&t2, "download", format!("下载 {c}/{t}"), c, t);
             },
@@ -1292,9 +1301,10 @@ fn run_game_install(
                 let label = comp.label.clone();
                 let t2 = tid.to_string();
                 let t3 = tid.to_string();
+                let cancel = net::cancel_from(move || task::is_cancelled(&t3));
                 resources::execute(
                     &stored,
-                    move || task::is_cancelled(&t3),
+                    &*cancel,
                     move |done, total| {
                         task::progress(
                             &t2,
@@ -1635,13 +1645,12 @@ pub fn legacy_requires_instance(kind: &str) -> bool {
 
 /// ⚠️ 旧接口：新代码请用 prepare_resource_install + start_resource_install。
 ///
-/// 本轮安全加固：
+/// 安全加固：
 /// - Mod / 数据包必须给 instanceId，禁止写共享目录；
 /// - 目标已存在时默认拒绝覆盖（除非显式 overwrite=true）；
 /// - 可选传入 sha1 / sha512，下载后校验（校验通过才落正式文件）；
-/// - 目标路径同时校验落在实例目录（若给了实例）与游戏目录内。
-///
-/// 已知限制：重定向由底层下载器跟随，白名单只校验初始 URL。
+/// - 目标路径同时校验落在实例目录（若给了实例）与游戏目录内；
+/// - 重定向每一跳都会重新过白名单，DNS 解析到内网也会被拒绝。
 #[tauri::command]
 async fn download_to(
     app: AppHandle,
@@ -2298,7 +2307,7 @@ pub fn selftest() -> i32 {
                 return Err(format!("{}|{}", b.code, b.message));
             }
             let stored = resources::take(&rp.plan_id, 1)?;
-            let p = resources::execute(&stored, || false, |_, _| {})?;
+            let p = resources::execute(&stored, &*net::never_cancel(), |_, _| {})?;
             Ok(p.to_string_lossy().to_string())
         };
         match run() {
@@ -2603,6 +2612,7 @@ pub fn selftest() -> i32 {
                             &u.file_name,
                             &u.project_id,
                             &u.latest_version_id,
+                            &*net::never_cancel(),
                             |_, _, _, _| {},
                         ) {
                             Ok((new, removed)) => log.push_str(&format!(
@@ -2917,7 +2927,7 @@ pub fn selftest() -> i32 {
         dep_urls: Vec::new(),
         created_ms: 0,
     };
-    let cancelled = resources::execute(&stored, || true, |_, _| {});
+    let cancelled = resources::execute(&stored, &*net::cancel_from(|| true), |_, _| {});
     check!(
         "resource cancel short-circuits",
         cancelled
@@ -3220,6 +3230,205 @@ pub fn selftest() -> i32 {
         "config defaults",
         cfg.active_instance_id.is_none() && !cfg.game_dir.is_empty()
     );
+
+    // ── A1/A2/A4：本地 HTTP 服务器上的真实下载测试 ──────────────
+    let dl = std::env::temp_dir().join(format!("astral-dl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dl);
+    let _ = std::fs::create_dir_all(&dl);
+
+    match testsrv::TestServer::start() {
+        Ok(srv) => {
+            let local_opts = |sha1: Option<&str>| net::DownloadOptions {
+                expected_sha1: sha1.map(|s| s.to_string()),
+                allow_local_http: true,
+                ..Default::default()
+            };
+
+            // 1) 普通下载 + SHA1 校验
+            let size = 512u64 * 1024;
+            let want = testsrv::expected_sha1(size);
+            let dest = dl.join("plain.bin");
+            let ok = net::download(
+                &srv.data_url(size, 64 * 1024, 0),
+                &dest,
+                &local_opts(Some(&want)),
+                &*net::never_cancel(),
+                |_, _| {},
+            )
+            .map(|r| r.bytes == size && r.reused == false)
+            .unwrap_or(false);
+            check!("download plain + sha1", ok && net::sha1_file(&dest).ok().as_deref() == Some(want.as_str()));
+
+            // 2) 已存在且哈希正确时不联网
+            let srv_served_before = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+            let reused = net::download(
+                &srv.data_url(size, 64 * 1024, 0),
+                &dest,
+                &local_opts(Some(&want)),
+                &*net::never_cancel(),
+                |_, _| {},
+            )
+            .map(|r| r.reused)
+            .unwrap_or(false);
+            let srv_served_after = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+            check!(
+                "download reuses verified file",
+                reused && srv_served_after == srv_served_before
+            );
+
+            // 3) 哈希不匹配 → 报错且不留正式文件
+            let bad_dest = dl.join("bad.bin");
+            let bad = net::download(
+                &srv.data_url(size, 64 * 1024, 0),
+                &bad_dest,
+                &local_opts(Some("0000000000000000000000000000000000000000")),
+                &*net::never_cancel(),
+                |_, _| {},
+            );
+            check!(
+                "download rejects bad hash",
+                bad.is_err() && !bad_dest.exists()
+                    && bad.as_ref().map(|_| false).unwrap_or_else(|e| e.starts_with("HASH_MISMATCH"))
+            );
+
+            // 4) 取消：慢速传输中途取消，必须真的停下并保留 .part
+            let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag2 = cancel_flag.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                flag2.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            let slow_dest = dl.join("slow.bin");
+            let cancel = net::cancel_from({
+                let f = cancel_flag.clone();
+                move || f.load(std::sync::atomic::Ordering::SeqCst)
+            });
+            let cancel_size = 1024u64 * 1024;
+            let slow_url = srv.data_url(cancel_size, 32 * 1024, 20);
+            let started = std::time::Instant::now();
+            let cancelled = net::download(
+                &slow_url,
+                &slow_dest,
+                &local_opts(None),
+                &*cancel,
+                |_, _| {},
+            );
+            let elapsed = started.elapsed();
+            let part_kept = std::path::PathBuf::from(format!("{}.part", slow_dest.to_string_lossy()));
+            let part_len = std::fs::metadata(&part_kept).map(|m| m.len()).unwrap_or(0);
+            check!(
+                "download cancel stops early",
+                cancelled
+                    .as_ref()
+                    .map(|_| false)
+                    .unwrap_or_else(|e| e.starts_with("CANCELLED"))
+                    && !slow_dest.exists()
+                    && part_len > 0
+                    && part_len < cancel_size
+                    && elapsed < std::time::Duration::from_secs(3)
+            );
+
+            // 5) 续传：从刚才的 .part 接着下，最终文件必须完整且哈希正确
+            let want_slow = testsrv::expected_sha1(cancel_size);
+            let resumed = net::download(
+                &slow_url,
+                &slow_dest,
+                &local_opts(Some(&want_slow)),
+                &*net::never_cancel(),
+                |_, _| {},
+            );
+            check!(
+                "download resumes from .part",
+                resumed
+                    .map(|r| r.resumed && r.bytes == cancel_size)
+                    .unwrap_or(false)
+                    && net::sha1_file(&slow_dest).ok().as_deref() == Some(want_slow.as_str())
+            );
+
+            // 6) 503 会自动重试
+            let flaky_dest = dl.join("flaky.bin");
+            let flaky = net::download(
+                &srv.flaky_url(2, 128 * 1024),
+                &flaky_dest,
+                &local_opts(None),
+                &*net::never_cancel(),
+                |_, _| {},
+            );
+            check!(
+                "download retries 503",
+                flaky.map(|r| r.attempts == 3 && r.bytes == 128 * 1024).unwrap_or(false)
+            );
+
+            // 7) 重定向到白名单外必须被拦住
+            let redir_dest = dl.join("redir.bin");
+            let redir = net::download(
+                &srv.redirect_url("https://evil.example.com/x.bin"),
+                &redir_dest,
+                &local_opts(None),
+                &*net::never_cancel(),
+                |_, _| {},
+            );
+            check!("download blocks bad redirect", redir.is_err() && !redir_dest.exists());
+
+            // 8) 同一目标并发写：第二个任务必须等，不能互相覆盖
+            let same = dl.join("same.bin");
+            let same2 = same.clone();
+            let url1 = srv.data_url(256 * 1024, 16 * 1024, 5);
+            let h = std::thread::spawn(move || {
+                net::download(
+                    &url1,
+                    &same2,
+                    &net::DownloadOptions {
+                        allow_local_http: true,
+                        ..Default::default()
+                    },
+                    &*net::never_cancel(),
+                    |_, _| {},
+                )
+                .map(|r| r.bytes)
+            });
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let second = net::download(
+                &srv.data_url(256 * 1024, 16 * 1024, 5),
+                &same,
+                &net::DownloadOptions {
+                    allow_local_http: true,
+                    ..Default::default()
+                },
+                &*net::never_cancel(),
+                |_, _| {},
+            )
+            .map(|r| r.bytes);
+            let first = h.join().ok().and_then(|r| r.ok());
+            let ok_same = first == Some(256 * 1024) && second == Ok(256 * 1024);
+            if !ok_same {
+                log.push_str(&format!(
+                    "LIVE same-target: first={first:?} second={second:?}\n"
+                ));
+            }
+            check!("download same target serialized", ok_same);
+
+            // 9) 内网地址仍然被拒绝（自检开关只放行 127.0.0.1 的 http）
+            check!(
+                "download blocks private ip",
+                net::validate_url("https://192.168.1.1/a.jar").is_err()
+                    && net::validate_url("https://10.0.0.5/a.jar").is_err()
+                    && net::validate_url("http://127.0.0.1:1/a.jar").is_err()
+            );
+
+            // 10) .part 元数据在取消后写入，且 URL 变了不会误续传
+            let meta_path = std::path::PathBuf::from(format!(
+                "{}.part.json",
+                slow_dest.to_string_lossy()
+            ));
+            check!("part meta cleaned after commit", !meta_path.exists());
+        }
+        Err(e) => {
+            check!("download plain + sha1", false);
+            log.push_str(&format!("LIVE local test server unavailable: {e}\n"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dl);
 
     let _ = std::fs::remove_dir_all(&game);
 
