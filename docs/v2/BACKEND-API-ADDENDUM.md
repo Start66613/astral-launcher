@@ -2966,3 +2966,106 @@ if (preview.blockers.length > 0) {
 - 还原按钮做成危险色，且必须先走 `preview_instance_restore`；`blockers` 非空时禁用。
 - `replacedDir` 可以显示成"旧版本保存在 …"，配一个"打开文件夹"按钮（复用 `open_path`）。
 - 快照体积通常几百 MB，列表里显示 `bytes` 时要带单位换算。
+
+---
+
+## 38. 内存与 JVM 参数校验（V2.5 新增）
+
+以前 `update_instance` 对 `memoryMb` 和 `jvmArgs` **一个字符都不校验**：
+
+- 传 `memoryMb: 0` → 启动器生成 `-Xmx0M`，Java 直接起不来；
+- 传 `memoryMb: 999999` → 比机器内存还大，Java 报一堆英文；
+- 在 `jvmArgs` 里再写一个 `-Xmx8G` → 和启动器自己生成的那个打架，**后生效的那个说了算**，
+  玩家看到"我明明设了 4 GB 却吃了 8 GB"，根本查不出来；
+- 参数里带换行、引号没配对 → 拼出来的命令行是坏的。
+
+这些都要等到点启动、Java 报错才暴露。现在写配置时就挡掉。
+
+### 38.1 命令
+
+| 命令 | 参数 | 返回 |
+|---|---|---|
+| `check_instance_jvm` | `{ instanceId: string }` | `JvmCheck` |
+
+写配置仍然用已有的 `update_instance`，只是它会校验了。
+
+### 38.2 类型
+
+```ts
+export interface JvmIssue {
+  /** "memory" 或 "args" */
+  field: "memory" | "args";
+  /** "error" 挡住启动，"warn" 只提示 */
+  severity: "error" | "warn";
+  message: string;
+}
+
+export interface JvmCheck {
+  /** 实例里设置的值，null = 没设过 */
+  memoryMb: number | null;
+  /** 实际会传给 Java 的 -Xmx 值 */
+  effectiveMb: number | null;
+  /** 去掉空项与首尾空白后的参数 */
+  args: string[];
+  systemTotalMb: number;
+  /** 这台机器上说得通的内存上限 */
+  maxMb: number;
+  issues: JvmIssue[];
+  /** 没有 error 级问题 */
+  ok: boolean;
+}
+```
+
+### 38.3 规则
+
+**内存（`memoryMb`）**
+
+| 情况 | 结果 |
+|---|---|
+| `0` | `error`：内存不能是 0，Java 起不来 |
+| `< 512` | `error`：至少要 512 MB，建议 2048 MB 以上 |
+| `> 32768` | `error`：超过上限 32768 MB |
+| `> 物理内存` | `error`：比这台机器的物理内存还大，启动会失败 |
+| `> 物理内存 × 3/4`（按 512 取整） | `warn`：超过建议上限，系统会开始用虚拟内存，反而更卡 |
+| 其他 | 通过 |
+
+**自定义参数（`jvmArgs`）**
+
+| 情况 | 结果 |
+|---|---|
+| 超过 32 条 | `error` |
+| 单条超过 512 字符 | `error` |
+| 含换行 | `error` |
+| `-Xmx` / `-Xms` / `-Xss` 开头 | `error`：内存请在上面「内存」里设置 |
+| 引号数量是奇数 | `error`：引号没配对 |
+| `-javaagent:<路径>` 指的文件不存在 | `warn`：加上它游戏会启动失败 |
+
+**规范化**：所有参数会 `trim()`，空串直接丢掉 —— 玩家从论坛复制参数常常带多余空格和空行。
+
+### 38.4 错误码
+
+`update_instance` 校验失败时返回 `INVALID_VALUE`：
+
+```
+INVALID_VALUE|内存设置有问题：内存 0 MB ...
+INVALID_VALUE|JVM 参数设置有问题：内存请在上面「内存」里设置，不要写进 JVM 参数：-Xmx8G。...
+```
+
+### 38.5 启动前预检多一项
+
+`preflight_launch` 的 `checks` 里新增 `key: "jvm"`、`label: "JVM 参数可用"`，
+**`blocking: true`**（写错了真的起不来）。所以现在预检一共 8 项：
+
+```
+running / tasks / username / files / java / memory / jvm / mods
+```
+
+`memory` 那一项仍然只是提示（`blocking: false`），`jvm` 这一项会拦。
+
+### 38.6 前端接入建议
+
+- 实例设置页的内存输入框旁边直接显示 `maxMb` 作为上限提示，别让玩家自己猜。
+- `jvmArgs` 用一个"一行一条"的多行输入框，提交前先本地做一次 `trim` 过滤空行。
+- 保存时如果收到 `INVALID_VALUE`，按 `|` 切开把第二段直接显示在对应输入框下方。
+- 可以在实例卡片上显示一个警告角标：调一次 `check_instance_jvm`，`!ok` 就标红。
+- **不要**在内存输入框里也允许写 `-Xmx`；两个入口会互相打架。

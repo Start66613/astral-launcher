@@ -318,6 +318,32 @@ pub fn check(
         Some(advice.note.clone()),
     ));
 
+    // ── 6b. 自定义 JVM 参数（-Xmx 之类写错会直接起不来，挡启动） ──
+    let jvm = crate::jvm::check(inst.memory_mb, &inst.jvm_args, total_mb);
+    let jvm_errors: Vec<&str> = jvm
+        .issues
+        .iter()
+        .filter(|i| i.severity == "error")
+        .map(|i| i.message.as_str())
+        .collect();
+    let jvm_warns: Vec<&str> = jvm
+        .issues
+        .iter()
+        .filter(|i| i.severity == "warn")
+        .map(|i| i.message.as_str())
+        .collect();
+    let jvm_ok = jvm_errors.is_empty();
+    let jvm_detail = if !jvm_errors.is_empty() {
+        Some(jvm_errors.join("；"))
+    } else if !jvm_warns.is_empty() {
+        Some(jvm_warns.join("；"))
+    } else if jvm.args.is_empty() {
+        Some("没有自定义 JVM 参数".into())
+    } else {
+        Some(format!("{} 条自定义参数，看起来没问题", jvm.args.len()))
+    };
+    checks.push(item("jvm", "JVM 参数可用", true, jvm_ok, jvm_detail));
+
     // ── 7. Mod 冲突（只提示，不拦） ──
     let scan = crate::modscan::scan(mods_dir);
     let errors = scan.issues.iter().filter(|i| i.severity == "error").count();

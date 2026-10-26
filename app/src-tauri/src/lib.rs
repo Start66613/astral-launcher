@@ -16,6 +16,7 @@ mod instance;
 mod java;
 mod java_audit;
 mod jdk;
+mod jvm;
 mod ledger;
 mod live;
 mod loader;
@@ -262,7 +263,12 @@ fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String>
         meta.memory_mb = mem;
     }
     if let Some(args) = patch.jvm_args {
-        meta.jvm_args = args;
+        // 内存和自定义参数放在一起校验：-Xmx 写在参数里会和我们生成的那个打架。
+        let total = jvm::system_memory_mb();
+        meta.jvm_args = jvm::validate(meta.memory_mb, &args, total)?;
+    } else if patch.memory_mb.is_some() {
+        let total = jvm::system_memory_mb();
+        jvm::validate(meta.memory_mb, &meta.jvm_args, total)?;
     }
     if let Some(java) = patch.java_path {
         meta.java_path = java;
@@ -312,6 +318,7 @@ struct CreateInstanceRequest {
 #[tauri::command]
 async fn start_create_instance(request: CreateInstanceRequest) -> Result<Task, String> {
     instance::validate_name(&request.name)?;
+    jvm::validate(request.memory_mb, &[], jvm::system_memory_mb())?;
     if task::has_running_kind("create", None, Some(&request.game_version)) {
         return Err("BUSY|同类任务正在运行，请等待或取消".into());
     }
@@ -1717,6 +1724,23 @@ async fn check_instance_java(instance_id: String) -> Result<java_audit::JavaChec
     tauri::async_runtime::spawn_blocking(move || {
         let game = game_root();
         java_audit::check_instance(&game, &instance_id, &play_stats)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 看这个实例的内存与 JVM 参数有没有问题（只读，不改配置）
+#[tauri::command]
+async fn check_instance_jvm(instance_id: String) -> Result<jvm::JvmCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game = game_root();
+        let inst = instance::find(&game, &instance_id, &play_stats)
+            .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+        Ok(jvm::check(
+            inst.memory_mb,
+            &inst.jvm_args,
+            jvm::system_memory_mb(),
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3553,6 +3577,7 @@ pub fn run() {
             clear_meta_cache,
             java_audit,
             check_instance_java,
+            check_instance_jvm,
             remove_managed_java,
             java_cache_stats,
             clear_java_cache,
@@ -5354,6 +5379,40 @@ pub fn selftest() -> i32 {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // JVM 参数：写配置时就挡掉起不来的组合，而不是等 Java 报英文
+    {
+        check!(
+            "jvm accepts a sane memory",
+            jvm::check(Some(4096), &[], 16384).ok
+        );
+        check!(
+            "jvm rejects zero memory",
+            !jvm::check(Some(0), &[], 16384).ok
+        );
+        check!(
+            "jvm rejects memory above the machine",
+            !jvm::check(Some(20000), &[], 16384).ok
+        );
+        check!("jvm only warns above the ceiling", {
+            let c = jvm::check(Some(7168), &[], 8192);
+            c.ok && c.issues.iter().any(|i| i.severity == "warn")
+        });
+        check!("jvm rejects -Xmx in custom args", {
+            let args = vec!["-Xmx8G".to_string()];
+            !jvm::check(None, &args, 16384).ok
+                && jvm::validate(None, &args, 16384)
+                    .unwrap_err()
+                    .contains("JVM 参数设置有问题")
+        });
+        check!("jvm normalizes whitespace", {
+            let args = vec!["  -XX:+UseG1GC  ".to_string(), String::new()];
+            jvm::check(None, &args, 16384).args == vec!["-XX:+UseG1GC".to_string()]
+        });
+        check!("jvm ceiling tracks the machine", {
+            jvm::max_mb_for(8192) == 6144 && jvm::max_mb_for(16384) == 12288
+        });
     }
 
     // 整合包更新：查作者有没有发新版本、新旧差异、本地导入的包查不了
@@ -8081,7 +8140,7 @@ Caused by: java.lang.IllegalStateException: bad state\n";
                 let find = |k: &str| pf.checks.iter().find(|c| c.key == k).cloned();
                 check!(
                     "preflight lists every check",
-                    pf.checks.len() == 7
+                    pf.checks.len() == 8
                         && !pf.ready
                         && !pf.blockers.is_empty()
                         && pf.instance_id == inst.id
