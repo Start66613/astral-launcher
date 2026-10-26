@@ -42,9 +42,8 @@ fn install_inner(
         return Err("INVALID_VALUE|Java 主版本超出范围".into());
     }
 
-    let url = format!(
-        "{API}/{major}/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse"
-    );
+    let url =
+        format!("{API}/{major}/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse");
     let meta = crate::net::fetch_json(&url)?;
     let first = meta
         .as_array()
@@ -79,27 +78,22 @@ fn install_inner(
         on("download", 0, 1);
         let c = should_cancel.clone();
         let cancel: crate::net::CancelRef<'_> = &*c;
-        crate::net::download_with_cancel(
-            &link,
-            &zip_path,
-            None,
-            None,
-            &cancel,
-            |done, total| {
-                on(
-                    "download",
-                    done.min(u32::MAX as u64) as u32,
-                    total.unwrap_or(0).min(u32::MAX as u64) as u32,
-                );
-            },
-        )?;
+        crate::net::download_with_cancel(&link, &zip_path, None, None, &cancel, |done, total| {
+            on(
+                "download",
+                done.min(u32::MAX as u64) as u32,
+                total.unwrap_or(0).min(u32::MAX as u64) as u32,
+            );
+        })?;
     }
 
     if let Some(want) = &checksum {
         let got = crate::net::sha256_file(&zip_path)?;
         if !got.eq_ignore_ascii_case(want) {
             let _ = std::fs::remove_file(&zip_path);
-            return Err(format!("HASH_MISMATCH|JDK 校验失败|期望 {want}，实际 {got}"));
+            return Err(format!(
+                "HASH_MISMATCH|JDK 校验失败|期望 {want}，实际 {got}"
+            ));
         }
     }
 
@@ -112,8 +106,7 @@ fn install_inner(
     let mut cb = |done, total| on("extract", done, total);
     extract_zip(&zip_path, &dest, &mut cb)?;
 
-    let java = find_java_exe(&dest)
-        .ok_or_else(|| "INTERNAL|解压后找不到 java.exe".to_string())?;
+    let java = find_java_exe(&dest).ok_or_else(|| "INTERNAL|解压后找不到 java.exe".to_string())?;
 
     let bytes = std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
     Ok(JdkResult {
@@ -125,11 +118,7 @@ fn install_inner(
 }
 
 /// 解压到 `dest`，逐条校验路径（防 zip-slip），总量上限 2 GiB
-fn extract_zip(
-    zip_path: &Path,
-    dest: &Path,
-    on: &mut dyn FnMut(u32, u32),
-) -> Result<(), String> {
+fn extract_zip(zip_path: &Path, dest: &Path, on: &mut dyn FnMut(u32, u32)) -> Result<(), String> {
     const MAX_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
     let file = std::fs::File::open(zip_path).map_err(|e| format!("PERMISSION|打不开压缩包|{e}"))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("INTERNAL|不是有效 zip|{e}"))?;
@@ -166,13 +155,11 @@ fn extract_zip(
             return Err("INTERNAL|解压体积异常，已中止".into());
         }
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
         }
         let mut out =
             std::fs::File::create(&target).map_err(|e| format!("PERMISSION|写入失败|{e}"))?;
-        std::io::copy(&mut entry, &mut out)
-            .map_err(|e| format!("PERMISSION|解压失败|{e}"))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| format!("PERMISSION|解压失败|{e}"))?;
         done += 1;
         on(done, total);
     }
@@ -246,9 +233,7 @@ pub fn list_managed(game_dir: &Path) -> Vec<ManagedJdk> {
                 let path = e.path();
                 match e.file_type() {
                     Ok(t) if t.is_dir() => walk(&path, acc, depth + 1),
-                    Ok(t) if t.is_file() => {
-                        *acc += e.metadata().map(|m| m.len()).unwrap_or(0)
-                    }
+                    Ok(t) if t.is_file() => *acc += e.metadata().map(|m| m.len()).unwrap_or(0),
                     _ => {}
                 }
             }

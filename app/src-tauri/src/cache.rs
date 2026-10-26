@@ -245,7 +245,10 @@ pub fn clean_stale_partials(root: &Path, older_than_days: u64) -> (u64, u64) {
                 stack.push(p);
                 continue;
             }
-            let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             let is_part = name.ends_with(".part") || name.ends_with(".part.json");
             if !is_part {
                 continue;

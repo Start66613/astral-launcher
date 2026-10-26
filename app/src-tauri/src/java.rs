@@ -35,23 +35,24 @@ fn run_version(exe: &Path) -> Option<(String, String, Option<u32>)> {
         .output()
         .ok()?;
     // java -version 写到 stderr
-    let text = String::from_utf8_lossy(&out.stderr).to_string()
-        + &String::from_utf8_lossy(&out.stdout);
+    let text =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     if text.is_empty() {
         return None;
     }
     let first = text.lines().next().unwrap_or("");
     // 例：openjdk version "17.0.9" 2023-10-17
-    let version = first
-        .split('"')
-        .nth(1)
-        .map(|s| s.to_string())
-        .or_else(|| {
-            first
-                .split_whitespace()
-                .find(|w| w.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
-                .map(|s| s.to_string())
-        })?;
+    let version = first.split('"').nth(1).map(|s| s.to_string()).or_else(|| {
+        first
+            .split_whitespace()
+            .find(|w| {
+                w.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+            })
+            .map(|s| s.to_string())
+    })?;
     let vendor = if first.to_lowercase().contains("openjdk") {
         "OpenJDK"
     } else if first.to_lowercase().contains("java") {
@@ -97,13 +98,15 @@ fn probe(path: &Path, source: &str) -> Option<JavaRuntime> {
     })
 }
 
-
 /// 扫描本机可用的 Java
 pub fn scan(game_dir: &Path) -> Vec<JavaRuntime> {
     let mut cands: Vec<(PathBuf, &str)> = Vec::new();
 
     if let Some(home) = std::env::var_os("JAVA_HOME") {
-        cands.push((PathBuf::from(home).join("bin").join("java.exe"), "java_home"));
+        cands.push((
+            PathBuf::from(home).join("bin").join("java.exe"),
+            "java_home",
+        ));
     }
 
     // 启动器管理的 JVM：可能是 jvm/<name>/bin/java.exe，
@@ -143,7 +146,9 @@ pub fn scan(game_dir: &Path) -> Vec<JavaRuntime> {
         }
     }
     for root in roots {
-        let Ok(rd) = std::fs::read_dir(&root) else { continue };
+        let Ok(rd) = std::fs::read_dir(&root) else {
+            continue;
+        };
         for e in rd.flatten() {
             cands.push((e.path().join("bin").join("java.exe"), "common_dir"));
         }
@@ -212,7 +217,12 @@ pub fn pick_for(runtimes: &[JavaRuntime], required: u32) -> Option<JavaRuntime> 
     runtimes
         .iter()
         .find(|r| r.major == required)
-        .or_else(|| runtimes.iter().filter(|r| r.major > required).min_by_key(|r| r.major))
+        .or_else(|| {
+            runtimes
+                .iter()
+                .filter(|r| r.major > required)
+                .min_by_key(|r| r.major)
+        })
         .cloned()
 }
 

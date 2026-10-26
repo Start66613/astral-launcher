@@ -302,7 +302,12 @@ mod tests {
         let g = std::env::temp_dir().join("astral-recycle-test");
         let _ = std::fs::create_dir_all(&g);
         assert!(restore(&g, "../evil").is_err());
-        assert!(purge(&g, &["..".to_string()]).map(|r| r.failed.len()).unwrap_or(1) >= 1);
+        assert!(
+            purge(&g, &["..".to_string()])
+                .map(|r| r.failed.len())
+                .unwrap_or(1)
+                >= 1
+        );
         let _ = std::fs::remove_dir_all(&g);
     }
 }

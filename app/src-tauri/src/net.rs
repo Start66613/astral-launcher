@@ -509,7 +509,9 @@ fn acquire_slot(host: &str, cancel: CancelRef<'_>) -> Result<Slot, String> {
     loop {
         {
             let hosts = ACTIVE_HOSTS.get_or_init(|| Mutex::new(HashMap::new()));
-            let mut m = hosts.lock().map_err(|_| "INTERNAL|下载调度器不可用".to_string())?;
+            let mut m = hosts
+                .lock()
+                .map_err(|_| "INTERNAL|下载调度器不可用".to_string())?;
             let used = *m.get(host).unwrap_or(&0);
             let total = ACTIVE_TOTAL.load(std::sync::atomic::Ordering::SeqCst);
             if used < MAX_ACTIVE_PER_HOST && total < MAX_ACTIVE_TOTAL {
@@ -535,7 +537,10 @@ pub fn scheduler_stats() -> serde_json::Value {
         .lock()
         .map(|m| m.clone())
         .unwrap_or_default();
-    let c = counters().lock().map(|c| (c.downloads, c.bytes, c.resumed, c.retries)).unwrap_or((0, 0, 0, 0));
+    let c = counters()
+        .lock()
+        .map(|c| (c.downloads, c.bytes, c.resumed, c.retries))
+        .unwrap_or((0, 0, 0, 0));
     serde_json::json!({
         "active": active,
         "maxActive": MAX_ACTIVE_TOTAL,
@@ -702,7 +707,8 @@ pub fn download(
     ensure_safe_write_target(&part)?;
     ensure_safe_write_target(&meta_path(dest))?;
 
-    let max_attempts = opts.max_attempts.max(1);    let mut attempt = 0u32;
+    let max_attempts = opts.max_attempts.max(1);
+    let mut attempt = 0u32;
     let mut last_err = String::new();
 
     while attempt < max_attempts {
@@ -743,22 +749,20 @@ pub fn download(
 
         let mut last_save = std::time::Instant::now();
         let mut reported: u64 = 0;
-        let save_meta_now = |bytes: u64,
-                                 etag: &Option<String>,
-                                 lm: &Option<String>,
-                                 total: Option<u64>| {
-            save_meta(
-                dest,
-                &PartMeta {
-                    url: url.to_string(),
-                    etag: etag.clone(),
-                    last_modified: lm.clone(),
-                    total,
-                    bytes,
-                    updated_ms: crate::time::now_unix_ms() as u64,
-                },
-            );
-        };
+        let save_meta_now =
+            |bytes: u64, etag: &Option<String>, lm: &Option<String>, total: Option<u64>| {
+                save_meta(
+                    dest,
+                    &PartMeta {
+                        url: url.to_string(),
+                        etag: etag.clone(),
+                        last_modified: lm.clone(),
+                        total,
+                        bytes,
+                        updated_ms: crate::time::now_unix_ms() as u64,
+                    },
+                );
+            };
 
         let mut progress = |done: u64, total: Option<u64>| {
             on_progress(done, total);
@@ -789,8 +793,7 @@ pub fn download(
                     let got = sha1_file(&part)?;
                     if !got.eq_ignore_ascii_case(want) {
                         clear_partial(dest);
-                        last_err =
-                            format!("HASH_MISMATCH|SHA1 校验失败|期望 {want}，实际 {got}");
+                        last_err = format!("HASH_MISMATCH|SHA1 校验失败|期望 {want}，实际 {got}");
                         if attempt < max_attempts {
                             continue;
                         }
@@ -814,10 +817,10 @@ pub fn download(
                     save_meta_now(o.total_bytes, &o.etag, &o.last_modified, o.content_length);
                 }
 
-                let size = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(o.total_bytes);
-                std::fs::rename(&part, dest).map_err(|e| {
-                    format!("PERMISSION|替换文件失败|{e}")
-                })?;
+                let size = std::fs::metadata(&part)
+                    .map(|m| m.len())
+                    .unwrap_or(o.total_bytes);
+                std::fs::rename(&part, dest).map_err(|e| format!("PERMISSION|替换文件失败|{e}"))?;
                 let _ = std::fs::remove_file(meta_path(dest));
 
                 if opts.use_cache {
@@ -878,7 +881,6 @@ pub fn download(
     })
 }
 
-
 /// 原子下载：先写 `<dest>.part`，校验后替换。
 pub fn download_atomic(
     url: &str,
@@ -906,7 +908,12 @@ pub fn download_verified(
     };
     let cancel = never_cancel();
     let report = download(url, dest, &opts, &*cancel, |done, total| {
-        on_progress(1, 1, done.min(u32::MAX as u64) as u32, total.unwrap_or(0).min(u32::MAX as u64) as u32);
+        on_progress(
+            1,
+            1,
+            done.min(u32::MAX as u64) as u32,
+            total.unwrap_or(0).min(u32::MAX as u64) as u32,
+        );
     })?;
     Ok(report.bytes)
 }
@@ -965,7 +972,13 @@ fn meta_key(url: &str) -> String {
         .next()
         .unwrap_or("index")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(48)
         .collect();
     format!("{hex}-{tail}")
@@ -987,7 +1000,10 @@ pub struct MetaInfo {
 
 fn meta_info_path(url: &str) -> PathBuf {
     let mut p = meta_cache_path(url);
-    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     p.set_file_name(format!("{name}.meta.json"));
     p
 }
@@ -1086,7 +1102,10 @@ pub fn meta_prune(keep_days: u64) -> (u64, u64) {
                 removed += 1;
                 bytes += len;
             }
-            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             let _ = std::fs::remove_file(root.join(format!("{name}.meta.json")));
         }
     }
@@ -1187,12 +1206,15 @@ fn fetch_json_cached_inner(
         if age >= 0 && age <= ttl {
             if let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) {
                 if let Some(obj) = v.as_object_mut() {
-                    obj.insert("__cache".into(), serde_json::json!({
-                        "source": "cache",
-                        "ageMs": age,
-                        "stale": false,
-                        "fetchedAt": crate::time::unix_ms_to_iso(info.fetched_ms),
-                    }));
+                    obj.insert(
+                        "__cache".into(),
+                        serde_json::json!({
+                            "source": "cache",
+                            "ageMs": age,
+                            "stale": false,
+                            "fetchedAt": crate::time::unix_ms_to_iso(info.fetched_ms),
+                        }),
+                    );
                 }
                 return Ok(v);
             }
@@ -1210,12 +1232,15 @@ fn fetch_json_cached_inner(
                 meta_write(url, &text, None);
             }
             if let Some(obj) = v.as_object_mut() {
-                obj.insert("__cache".into(), serde_json::json!({
-                    "source": "network",
-                    "ageMs": 0,
-                    "stale": false,
-                    "fetchedAt": crate::time::unix_ms_to_iso(crate::time::now_unix_ms()),
-                }));
+                obj.insert(
+                    "__cache".into(),
+                    serde_json::json!({
+                        "source": "network",
+                        "ageMs": 0,
+                        "stale": false,
+                        "fetchedAt": crate::time::unix_ms_to_iso(crate::time::now_unix_ms()),
+                    }),
+                );
             }
             Ok(v)
         }
@@ -1225,13 +1250,16 @@ fn fetch_json_cached_inner(
                 match serde_json::from_slice::<serde_json::Value>(&body) {
                     Ok(mut v) => {
                         if let Some(obj) = v.as_object_mut() {
-                            obj.insert("__cache".into(), serde_json::json!({
-                                "source": "cache",
-                                "ageMs": age,
-                                "stale": age > ttl,
-                                "fetchedAt": crate::time::unix_ms_to_iso(info.fetched_ms),
-                                "networkError": e,
-                            }));
+                            obj.insert(
+                                "__cache".into(),
+                                serde_json::json!({
+                                    "source": "cache",
+                                    "ageMs": age,
+                                    "stale": age > ttl,
+                                    "fetchedAt": crate::time::unix_ms_to_iso(info.fetched_ms),
+                                    "networkError": e,
+                                }),
+                            );
                         }
                         Ok(v)
                     }

@@ -207,9 +207,7 @@ pub fn files(
         out.retain(|f| f.game_versions.iter().any(|g| g == gv));
     }
     if let Some(l) = loader {
-        out.retain(|f| {
-            f.loaders.is_empty() || f.loaders.iter().any(|x| x.eq_ignore_ascii_case(l))
-        });
+        out.retain(|f| f.loaders.is_empty() || f.loaders.iter().any(|x| x.eq_ignore_ascii_case(l)));
     }
     Ok(out)
 }
@@ -282,15 +280,16 @@ pub fn loader_conflict(
             if vanilla_ok {
                 None
             } else {
-                Some(format!(
-                    "原版实例不能安装需要 {} 的 Mod",
-                    wants.join(" / ")
-                ))
+                Some(format!("原版实例不能安装需要 {} 的 Mod", wants.join(" / ")))
             }
         }
     }
 }
-fn target_dir(instance: &crate::instance::Instance, kind: &str, world_id: Option<&str>) -> Result<PathBuf, String> {
+fn target_dir(
+    instance: &crate::instance::Instance,
+    kind: &str,
+    world_id: Option<&str>,
+) -> Result<PathBuf, String> {
     let base = PathBuf::from(&instance.dir);
     match kind {
         "mod" => Ok(PathBuf::from(&instance.dirs.mods)),
@@ -419,8 +418,7 @@ pub fn prepare(
             issues.push(issue(&c.code, c.message.clone(), c.blocking));
         }
         if resolved.truncated {
-            dep_notes
-                .push("依赖树超过解析上限，可能还有没列出的依赖，建议改用整合包".to_string());
+            dep_notes.push("依赖树超过解析上限，可能还有没列出的依赖，建议改用整合包".to_string());
         }
         for s in &resolved.skipped {
             if s.reason == "installed-unknown" || s.reason == "unresolved" {
@@ -583,7 +581,6 @@ pub fn execute(
     )?;
 
     Ok(dest)
-
 }
 
 /// 测试辅助：把某个项目的一个兼容版本装进实例，返回落地路径。

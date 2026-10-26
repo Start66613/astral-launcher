@@ -163,8 +163,8 @@ pub fn export(
         "dependencies": deps,
     });
 
-    let file = std::fs::File::create(&pack_path)
-        .map_err(|e| format!("PERMISSION|创建整合包失败|{e}"))?;
+    let file =
+        std::fs::File::create(&pack_path).map_err(|e| format!("PERMISSION|创建整合包失败|{e}"))?;
     let mut zip = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -207,8 +207,7 @@ pub fn export(
         }
     }
 
-    zip.finish()
-        .map_err(|e| format!("INTERNAL|收尾失败|{e}"))?;
+    zip.finish().map_err(|e| format!("INTERNAL|收尾失败|{e}"))?;
 
     let bytes = std::fs::metadata(&pack_path).map(|m| m.len()).unwrap_or(0);
     Ok(ExportResult {

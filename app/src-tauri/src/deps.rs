@@ -372,9 +372,7 @@ fn walk(
                 out.conflicts.push(Conflict {
                     code: "DEPENDENCY_CONFLICT".into(),
                     project_id: pid.clone(),
-                    message: format!(
-                        "{pid} 同时被要求版本 {existing} 与 {wanted}，需要手动选一个"
-                    ),
+                    message: format!("{pid} 同时被要求版本 {existing} 与 {wanted}，需要手动选一个"),
                     blocking: true,
                 });
             }
@@ -404,7 +402,17 @@ fn walk(
             if let Ok((c, _)) = src.version_by_id(installed_ver) {
                 stack.push(pid.clone());
                 walk(
-                    src, req, limits, &c, depth + 1, via, chosen, placed, stack, out, seen_pairs,
+                    src,
+                    req,
+                    limits,
+                    &c,
+                    depth + 1,
+                    via,
+                    chosen,
+                    placed,
+                    stack,
+                    out,
+                    seen_pairs,
                 );
                 stack.pop();
             }
@@ -572,7 +580,11 @@ fn compatible(c: &Candidate, game_version: &str, loader: Option<&str>) -> bool {
 }
 
 /// 从候选里挑最稳的：release > beta > alpha，同级取新发布的
-fn pick_best(mut list: Vec<Candidate>, game_version: &str, loader: Option<&str>) -> Option<Candidate> {
+fn pick_best(
+    mut list: Vec<Candidate>,
+    game_version: &str,
+    loader: Option<&str>,
+) -> Option<Candidate> {
     list.retain(|c| compatible(c, game_version, loader));
     list.sort_by(|a, b| {
         let rank = |c: &Candidate| match c.channel.as_str() {
@@ -661,12 +673,7 @@ pub fn scan_installed(dir: &std::path::Path) -> (HashMap<String, String>, HashSe
 mod tests {
     use super::*;
 
-    fn cand(
-        project: &str,
-        version: &str,
-        deps: Vec<Dep>,
-        channel: &str,
-    ) -> Candidate {
+    fn cand(project: &str, version: &str, deps: Vec<Dep>, channel: &str) -> Candidate {
         Candidate {
             project_id: project.into(),
             version_id: version.into(),
@@ -709,8 +716,10 @@ mod tests {
                 .entry(c.project_id.clone())
                 .or_default()
                 .push(c.clone());
-            self.by_id
-                .insert(c.version_id.clone(), (c.clone(), Some(c.project_id.clone())));
+            self.by_id.insert(
+                c.version_id.clone(),
+                (c.clone(), Some(c.project_id.clone())),
+            );
         }
     }
 
@@ -795,7 +804,11 @@ mod tests {
     fn respects_depth_limit() {
         let mut f = Fake::new();
         for i in 0..12 {
-            let next = if i == 11 { vec![] } else { vec![req_dep(&format!("p{}", i + 1))] };
+            let next = if i == 11 {
+                vec![]
+            } else {
+                vec![req_dep(&format!("p{}", i + 1))]
+            };
             f.add(cand(&format!("p{i}"), &format!("v{i}"), next, "release"));
         }
         let lim = Limits {

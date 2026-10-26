@@ -364,7 +364,10 @@ pub fn check(game: &Path, version: &str, opts: &CheckOptions) -> VersionReport {
         }
     }
     if let Some(id) = &asset_index_id {
-        let abs = game.join("assets").join("indexes").join(format!("{id}.json"));
+        let abs = game
+            .join("assets")
+            .join("indexes")
+            .join(format!("{id}.json"));
         let actual_size = size_of(&abs);
         files.push(FileState {
             path: format!("assets/indexes/{id}.json"),
@@ -385,7 +388,10 @@ pub fn check(game: &Path, version: &str, opts: &CheckOptions) -> VersionReport {
     // 全量校验上万个小文件太慢，这里按索引抽查一部分，并如实说明是抽查。
     let mut sampled = 0usize;
     if let Some(id) = &asset_index_id {
-        let idx_path = game.join("assets").join("indexes").join(format!("{id}.json"));
+        let idx_path = game
+            .join("assets")
+            .join("indexes")
+            .join(format!("{id}.json"));
         if let Ok(text) = std::fs::read_to_string(&idx_path) {
             if let Ok(idx) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(objects) = idx.get("objects").and_then(|o| o.as_object()) {
@@ -397,11 +403,7 @@ pub fn check(game: &Path, version: &str, opts: &CheckOptions) -> VersionReport {
                             continue;
                         };
                         let sub = &hash[0..2.min(hash.len())];
-                        let abs = game
-                            .join("assets")
-                            .join("objects")
-                            .join(sub)
-                            .join(hash);
+                        let abs = game.join("assets").join("objects").join(sub).join(hash);
                         let actual_size = size_of(&abs);
                         sampled += 1;
                         if actual_size != Some(size) {
@@ -450,7 +452,10 @@ pub fn check(game: &Path, version: &str, opts: &CheckOptions) -> VersionReport {
         .iter()
         .filter(|f| !f.exists && f.kind != "asset-object")
         .count() as u32;
-    let corrupt = files.iter().filter(|f| f.exists && f.complete == Some(false)).count() as u32;
+    let corrupt = files
+        .iter()
+        .filter(|f| f.exists && f.complete == Some(false))
+        .count() as u32;
     let ok = files
         .iter()
         .filter(|f| f.exists && f.complete != Some(false))
@@ -684,14 +689,11 @@ pub fn repair(
                 let ver = plan.loader_version.clone().unwrap_or_default();
                 let mc = plan.version.clone();
                 let r = match kind.as_str() {
-                    "fabric" | "quilt" => crate::core::install_loader(
-                        &mc,
-                        &kind,
-                        &ver,
-                        game,
-                        &cfg.username,
-                        |p| on(i as u32, total, &p.label),
-                    ),
+                    "fabric" | "quilt" => {
+                        crate::core::install_loader(&mc, &kind, &ver, game, &cfg.username, |p| {
+                            on(i as u32, total, &p.label)
+                        })
+                    }
                     "forge" | "neoforge" => {
                         crate::core::install_forge_like(&kind, &mc, &ver, game, |p| {
                             on(i as u32, total, &p.label)

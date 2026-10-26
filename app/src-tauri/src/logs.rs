@@ -56,7 +56,9 @@ fn mtime_iso(p: &Path) -> String {
 }
 
 fn collect(dir: &Path, kind: &str, rel_prefix: &str, out: &mut Vec<(LogFile, PathBuf)>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if !p.is_file() {
@@ -380,7 +382,11 @@ const RULES: &[Rule] = &[
         hint: "换用该版本要求的 Java（实例设置里可指定 javaPath）",
         confidence: "high",
         category: "java",
-        patterns: &["UnsupportedClassVersionError", "requires Java", "class file version"],
+        patterns: &[
+            "UnsupportedClassVersionError",
+            "requires Java",
+            "class file version",
+        ],
     },
     Rule {
         id: "missing-class",
@@ -598,7 +604,11 @@ pub fn classify_text(text: &str) -> Vec<Finding> {
     out
 }
 
-pub fn prepare(instance_dir: &Path, log_ids: &[String], max_lines: u32) -> Result<DiagnosisPreview, String> {
+pub fn prepare(
+    instance_dir: &Path,
+    log_ids: &[String],
+    max_lines: u32,
+) -> Result<DiagnosisPreview, String> {
     if log_ids.is_empty() {
         return Err("INVALID_VALUE|至少选择一个日志".into());
     }
@@ -608,7 +618,8 @@ pub fn prepare(instance_dir: &Path, log_ids: &[String], max_lines: u32) -> Resul
         merged.push_str(&format!("===== {} =====\n{}\n", t.name, t.text));
     }
     let (text, redactions) = redact(&merged);
-    let truncated = text.lines().count() as u32 >= max_lines.saturating_mul(log_ids.len().min(5) as u32);
+    let truncated =
+        text.lines().count() as u32 >= max_lines.saturating_mul(log_ids.len().min(5) as u32);
     let mut warnings = Vec::new();
     if redactions > 0 {
         warnings.push(format!("已在本机脱敏 {redactions} 处敏感信息"));

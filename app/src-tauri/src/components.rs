@@ -122,8 +122,7 @@ pub fn versions(
     game_version: &str,
     loader: Option<&str>,
 ) -> Result<Vec<ComponentVersion>, String> {
-    let spec = spec_info(id)
-        .ok_or_else(|| "INVALID_VALUE|不认识的光影组件".to_string())?;
+    let spec = spec_info(id).ok_or_else(|| "INVALID_VALUE|不认识的光影组件".to_string())?;
     if let Some(note) = spec.note {
         return Err(format!("UNSUPPORTED|{}|{note}", spec.label));
     }
@@ -170,8 +169,7 @@ pub fn validate_choice(
     game_version: &str,
     loader: Option<&str>,
 ) -> Result<(crate::resources::ResourceFile, String), String> {
-    let spec = spec_info(id)
-        .ok_or_else(|| "INVALID_VALUE|不认识的光影组件".to_string())?;
+    let spec = spec_info(id).ok_or_else(|| "INVALID_VALUE|不认识的光影组件".to_string())?;
     if let Some(note) = spec.note {
         return Err(format!("UNSUPPORTED|{}|{note}", spec.label));
     }

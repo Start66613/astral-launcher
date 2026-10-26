@@ -255,7 +255,10 @@ fn send_body(
     let mut start = 0u64;
     let mut partial = false;
     if let Some(r) = range {
-        if if_range.map(|v| v.trim_matches('"') == etag.trim_matches('"')).unwrap_or(false) {
+        if if_range
+            .map(|v| v.trim_matches('"') == etag.trim_matches('"'))
+            .unwrap_or(false)
+        {
             if let Some(rest) = r.trim().strip_prefix("bytes=") {
                 if let Some((a, _)) = rest.split_once('-') {
                     if let Ok(n) = a.trim().parse::<u64>() {

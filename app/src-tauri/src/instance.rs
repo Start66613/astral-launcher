@@ -186,10 +186,7 @@ fn health_of(game: &Path, version: &str) -> InstanceHealth {
             break;
         }
         chain.push(cur.clone());
-        let json_path = game
-            .join("versions")
-            .join(&cur)
-            .join(format!("{cur}.json"));
+        let json_path = game.join("versions").join(&cur).join(format!("{cur}.json"));
         let Ok(text) = std::fs::read_to_string(&json_path) else {
             if cur == version {
                 reasons.push(format!("缺少版本文件 {cur}.json"));
@@ -255,7 +252,10 @@ fn health_of(game: &Path, version: &str) -> InstanceHealth {
         missing_libs.len().to_string()
     };
     if !missing_libs.is_empty() {
-        reasons.push(format!("缺少 {missing_count} 个依赖库（如 {}）", missing_libs[0]));
+        reasons.push(format!(
+            "缺少 {missing_count} 个依赖库（如 {}）",
+            missing_libs[0]
+        ));
     }
 
     // 4) 资源索引：从链尾（根版本）取 assetIndex.id
@@ -316,9 +316,11 @@ pub fn create(game: &Path, meta: &InstanceMeta) -> Result<Instance, String> {
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建实例目录失败|{e}"))?;
     for sub in SUB_DIRS {
-        std::fs::create_dir_all(dir.join(sub)).map_err(|e| format!("PERMISSION|创建 {sub} 失败|{e}"))?;
+        std::fs::create_dir_all(dir.join(sub))
+            .map_err(|e| format!("PERMISSION|创建 {sub} 失败|{e}"))?;
     }
-    let text = serde_json::to_string_pretty(meta).map_err(|e| format!("INTERNAL|序列化失败|{e}"))?;
+    let text =
+        serde_json::to_string_pretty(meta).map_err(|e| format!("INTERNAL|序列化失败|{e}"))?;
     if let Err(e) = write_atomic(&dir.join("instance.json"), &text) {
         // 失败不留半成品目录
         let _ = std::fs::remove_dir_all(&dir);
@@ -339,7 +341,8 @@ fn write_atomic(path: &std::path::Path, text: &str) -> Result<(), String> {
 
 pub fn save_meta(game: &Path, meta: &InstanceMeta) -> Result<(), String> {
     let dir = instance_dir(game, &meta.id);
-    let text = serde_json::to_string_pretty(meta).map_err(|e| format!("INTERNAL|序列化失败|{e}"))?;
+    let text =
+        serde_json::to_string_pretty(meta).map_err(|e| format!("INTERNAL|序列化失败|{e}"))?;
     write_atomic(&dir.join("instance.json"), &text)
 }
 

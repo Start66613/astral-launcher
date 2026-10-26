@@ -31,10 +31,7 @@ struct JarMeta {
     project_id: Option<String>,
 }
 
-fn read_entry<R: Read + std::io::Seek>(
-    zip: &mut zip::ZipArchive<R>,
-    name: &str,
-) -> Option<String> {
+fn read_entry<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
     const MAX_META: u64 = 1024 * 1024;
     let mut f = zip.by_name(name).ok()?;
     // 元数据文件超过 1 MiB 视为异常，直接放弃解析，避免解压炸弹撑爆内存
@@ -154,7 +151,10 @@ fn modrinth_id(url: &str) -> Option<String> {
 fn split_name(file_name: &str) -> Option<(String, bool)> {
     let lower = file_name.to_lowercase();
     if lower.ends_with(".jar.disabled") {
-        Some((file_name[..file_name.len() - ".disabled".len()].to_string(), false))
+        Some((
+            file_name[..file_name.len() - ".disabled".len()].to_string(),
+            false,
+        ))
     } else if lower.ends_with(".jar") {
         Some((file_name.to_string(), true))
     } else {
@@ -238,7 +238,12 @@ pub fn set_enabled(dir: &Path, file_name: &str, enabled: bool) -> Result<ModFile
     let file_name = safe_name(file_name)?;
     let (jar_name, currently) = split_name(file_name).ok_or("INVALID_NAME|不是 .jar 文件")?;
     if currently == enabled {
-        return Ok(build(dir, file_name, enabled, read_jar_meta(&dir.join(file_name))));
+        return Ok(build(
+            dir,
+            file_name,
+            enabled,
+            read_jar_meta(&dir.join(file_name)),
+        ));
     }
 
     let src = dir.join(file_name);

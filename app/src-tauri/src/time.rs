@@ -62,7 +62,9 @@ pub fn now_nanos() -> u128 {
 /// 压缩时间戳，用于回收站目录名
 pub fn now_stamp() -> String {
     let iso = now_iso();
-    iso.replace(['-', ':'], "").replace('T', "-").replace('Z', "")
+    iso.replace(['-', ':'], "")
+        .replace('T', "-")
+        .replace('Z', "")
 }
 
 /// 只解析本模块产出的 `YYYY-MM-DDTHH:MM:SSZ`
@@ -116,6 +118,9 @@ mod tests {
 
     #[test]
     fn leap_year() {
-        assert_eq!(unix_ms_to_iso(iso_to_unix_ms("2024-02-29T12:00:00Z").unwrap()), "2024-02-29T12:00:00Z");
+        assert_eq!(
+            unix_ms_to_iso(iso_to_unix_ms("2024-02-29T12:00:00Z").unwrap()),
+            "2024-02-29T12:00:00Z"
+        );
     }
 }

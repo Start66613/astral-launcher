@@ -109,8 +109,8 @@ pub fn list_versions_cached(
     } else {
         VERSION_MANIFEST
     };
-    let json = crate::net::fetch_json_cached(url, None)
-        .map_err(|e| format!("拉取版本清单失败: {e}"))?;
+    let json =
+        crate::net::fetch_json_cached(url, None).map_err(|e| format!("拉取版本清单失败: {e}"))?;
     let arr = json["versions"].as_array().ok_or("版本清单格式不对")?;
     let cache = json
         .get("__cache")
@@ -251,7 +251,8 @@ pub fn install(
 ) -> Result<Game, String> {
     portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
     let mut inst = base_installer(version, dir, username);
-    inst.install(Fwd(on)).map_err(|e| format!("安装失败: {e:?}"))
+    inst.install(Fwd(on))
+        .map_err(|e| format!("安装失败: {e:?}"))
 }
 
 pub fn source_is_mirror(source: &str) -> bool {
@@ -435,7 +436,12 @@ pub fn loader_compatible(kind: &str, mc: &str, ver: &str) -> Result<(), String> 
                     "INVALID_VALUE|Forge 版本号不需要带游戏版本前缀，收到 {ver}"
                 ));
             }
-            if !ver.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if !ver
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
                 return Err(format!("INVALID_VALUE|Forge 版本号格式不对：{ver}"));
             }
             Ok(())
@@ -516,7 +522,10 @@ pub fn find_java(main_dir: &Path) -> Result<std::path::PathBuf, String> {
 fn proxy_from_env() -> Option<(String, String)> {
     for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
         if let Ok(raw) = std::env::var(key) {
-            let s = raw.trim().trim_start_matches("http://").trim_start_matches("https://");
+            let s = raw
+                .trim()
+                .trim_start_matches("http://")
+                .trim_start_matches("https://");
             let s = s.trim_end_matches('/');
             if let Some((host, port)) = s.rsplit_once(':') {
                 if !host.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
@@ -618,10 +627,7 @@ pub fn install_forge_like(
     // Forge/NeoForge 安装器要求目标目录里有 launcher_profiles.json，否则直接退出
     let profiles = main_dir.join("launcher_profiles.json");
     if !profiles.is_file() {
-        let _ = std::fs::write(
-            &profiles,
-            r#"{"profiles":{},"settings":{},"version":3}"#,
-        );
+        let _ = std::fs::write(&profiles, r#"{"profiles":{},"settings":{},"version":3}"#);
     }
 
     on(blank("install", &format!("运行 {kind} 安装器")));
@@ -810,7 +816,10 @@ mod tests {
     #[ignore]
     fn launch_b1_7_3() {
         let dir = std::env::temp_dir().join("astral-mc-test");
-        assert!(version_installed(&dir, "b1.7.3"), "先跑 install_old_version");
+        assert!(
+            version_installed(&dir, "b1.7.3"),
+            "先跑 install_old_version"
+        );
         let t = Instant::now();
         let pid = launch("b1.7.3", &dir, "Astral", |_| {}).expect("启动");
         println!("✓ 已启动 PID {pid}，准备用 {:?}", t.elapsed());

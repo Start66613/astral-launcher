@@ -116,11 +116,7 @@ pub fn satisfies(major: u32, required: u32) -> bool {
     }
 }
 
-fn check_one(
-    game: &Path,
-    inst: &Instance,
-    runtimes: &[JavaRuntime],
-) -> JavaCheck {
+fn check_one(game: &Path, inst: &Instance, runtimes: &[JavaRuntime]) -> JavaCheck {
     let required = crate::java::required_major(game, &inst.game_version)
         .or_else(|| expected_major(&inst.game_version));
 
@@ -150,9 +146,8 @@ fn check_one(
             out.exists = path.is_file();
             if !out.exists {
                 out.problem = Some("实例记录的 Java 路径已经不存在（可能被移动或删除）".into());
-                out.suggestion = Some(
-                    "可以改成自动选择，或在「运行库」里重新挑一个 Java".to_string(),
-                );
+                out.suggestion =
+                    Some("可以改成自动选择，或在「运行库」里重新挑一个 Java".to_string());
                 return out;
             }
             // 先看扫描结果里有没有同一个文件，避免重复执行 java -version
@@ -175,7 +170,8 @@ fn check_one(
                     }
                 }
                 None => {
-                    out.problem = Some("这个文件存在，但运行 `java -version` 没有得到版本号".into());
+                    out.problem =
+                        Some("这个文件存在，但运行 `java -version` 没有得到版本号".into());
                     out.suggestion = Some("它可能不是可用的 Java，建议重新选择".into());
                 }
             }
@@ -337,8 +333,7 @@ pub fn remove_managed(game: &Path, major: u32, confirm: bool) -> Result<serde_js
     }
     walk(&dir_canon, &mut bytes, 0);
 
-    std::fs::remove_dir_all(&dir_canon)
-        .map_err(|e| format!("PERMISSION|删除失败|{e}"))?;
+    std::fs::remove_dir_all(&dir_canon).map_err(|e| format!("PERMISSION|删除失败|{e}"))?;
 
     Ok(serde_json::json!({
         "removed": true,

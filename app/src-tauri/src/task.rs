@@ -134,7 +134,9 @@ pub fn boot() -> String {
                         t.revision += 1;
                     }
                     if let Some(n) = t.task_id.strip_prefix("task_") {
-                        if let Ok(v) = u64::from_str_radix(&n.chars().take(8).collect::<String>(), 16) {
+                        if let Ok(v) =
+                            u64::from_str_radix(&n.chars().take(8).collect::<String>(), 16)
+                        {
                             s.seq = s.seq.max(v);
                         }
                     }
@@ -401,11 +403,7 @@ fn release_token(task_id: &str) {
 /// 自检与诊断页用它确认没有泄漏。
 pub fn health() -> serde_json::Value {
     let s = store().lock().unwrap();
-    let running = s
-        .tasks
-        .values()
-        .filter(|t| !is_terminal(&t.state))
-        .count();
+    let running = s.tasks.values().filter(|t| !is_terminal(&t.state)).count();
     let cancelling = s.tasks.values().filter(|t| t.cancelling).count();
     serde_json::json!({
         "tasks": s.tasks.len(),
@@ -515,16 +513,14 @@ pub fn snapshot(state: Option<&str>, kind: Option<&str>, instance: Option<&str>)
 }
 
 /// 是否已有同类的运行中任务（用于去重，避免重复下载）
-pub fn has_running_kind(
-    kind: &str,
-    instance_id: Option<&str>,
-    game_version: Option<&str>,
-) -> bool {
+pub fn has_running_kind(kind: &str, instance_id: Option<&str>, game_version: Option<&str>) -> bool {
     let s = store().lock().unwrap();
     s.tasks.values().any(|t| {
         t.kind == kind
             && !is_terminal(&t.state)
-            && instance_id.map(|v| t.instance_id.as_deref() == Some(v)).unwrap_or(true)
+            && instance_id
+                .map(|v| t.instance_id.as_deref() == Some(v))
+                .unwrap_or(true)
             && game_version
                 .map(|v| t.game_version.as_deref() == Some(v))
                 .unwrap_or(true)
@@ -533,9 +529,9 @@ pub fn has_running_kind(
 
 pub fn has_running(instance_id: &str) -> bool {
     let s = store().lock().unwrap();
-    s.tasks.values().any(|t| {
-        t.instance_id.as_deref() == Some(instance_id) && !is_terminal(&t.state)
-    })
+    s.tasks
+        .values()
+        .any(|t| t.instance_id.as_deref() == Some(instance_id) && !is_terminal(&t.state))
 }
 
 #[cfg(test)]

@@ -89,10 +89,7 @@ pub fn check(
         // 该实例版本 + 加载器下的全部版本，取最新
         let mut url = format!("{API}/project/{project_id}/version");
         let mut query: Vec<String> = Vec::new();
-        query.push(format!(
-            "game_versions={}",
-            urlencoding(game_version)
-        ));
+        query.push(format!("game_versions={}", urlencoding(game_version)));
         if let Some(l) = loader {
             query.push(format!("loaders={}", urlencoding(l)));
         }
@@ -192,12 +189,8 @@ pub fn apply_update(
         .ok_or_else(|| "INTERNAL|版本没有可用文件".to_string())?;
     let url = str_of(f, "url").ok_or_else(|| "INTERNAL|缺少下载地址".to_string())?;
     let new_name = str_of(f, "filename").ok_or_else(|| "INTERNAL|缺少文件名".to_string())?;
-    let sha1 = f
-        .get("hashes")
-        .and_then(|h| str_of(h, "sha1"));
-    let sha512 = f
-        .get("hashes")
-        .and_then(|h| str_of(h, "sha512"));
+    let sha1 = f.get("hashes").and_then(|h| str_of(h, "sha1"));
+    let sha512 = f.get("hashes").and_then(|h| str_of(h, "sha512"));
 
     let dest = dir.join(&new_name);
     crate::net::download_with_cancel(
@@ -218,8 +211,7 @@ pub fn apply_update(
 
     // 新文件到位后才删旧的；同名则说明是原地替换
     if new_name != old_file {
-        std::fs::remove_file(&old_path)
-            .map_err(|e| format!("PERMISSION|删除旧文件失败|{e}"))?;
+        std::fs::remove_file(&old_path).map_err(|e| format!("PERMISSION|删除旧文件失败|{e}"))?;
     }
     Ok((new_name, old_file.to_string()))
 }

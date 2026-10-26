@@ -150,11 +150,11 @@ pub fn plan(
         }
         let loader_ok = match loader {
             Some(l) => file.loaders.iter().any(|x| x.eq_ignore_ascii_case(l)),
-            None => file
-                .loaders
-                .iter()
-                .all(|x| x.eq_ignore_ascii_case("vanilla") || x.eq_ignore_ascii_case("minecraft"))
-                || file.loaders.is_empty(),
+            None => {
+                file.loaders.iter().all(|x| {
+                    x.eq_ignore_ascii_case("vanilla") || x.eq_ignore_ascii_case("minecraft")
+                }) || file.loaders.is_empty()
+            }
         };
         if !loader_ok {
             blocked = Some(format!("目标版本不支持加载器 {}", loader.unwrap_or("原版")));
@@ -241,11 +241,7 @@ pub fn execute(
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
     let mods_dir = PathBuf::from(&inst.dirs.mods);
 
-    let todo: Vec<&UpdatePlanItem> = plan
-        .items
-        .iter()
-        .filter(|i| i.blocked.is_none())
-        .collect();
+    let todo: Vec<&UpdatePlanItem> = plan.items.iter().filter(|i| i.blocked.is_none()).collect();
     if todo.is_empty() {
         return Err("INVALID_VALUE|计划里没有可执行的更新".into());
     }
@@ -284,18 +280,17 @@ pub fn execute(
 
         // 2) 下载新文件（走统一下载引擎：校验哈希、原子提交、可取消）
         let dest = mods_dir.join(&item.target_file_name);
-        let dl = crate::resources::version_detail(&item.target_version_id)
-            .and_then(|(f, _)| {
-                crate::net::download_with_cancel(
-                    &f.url,
-                    &dest,
-                    f.sha1.as_deref(),
-                    f.sha512.as_deref(),
-                    cancel,
-                    |_, _| {},
-                )
-                .map(|_| f)
-            });
+        let dl = crate::resources::version_detail(&item.target_version_id).and_then(|(f, _)| {
+            crate::net::download_with_cancel(
+                &f.url,
+                &dest,
+                f.sha1.as_deref(),
+                f.sha512.as_deref(),
+                cancel,
+                |_, _| {},
+            )
+            .map(|_| f)
+        });
         match dl {
             Ok(_) => {
                 record
@@ -305,7 +300,10 @@ pub fn execute(
                 // 3) 新文件到位后才删旧的（同名说明是原地替换）
                 if item.target_file_name != item.file_name {
                     if let Err(e) = std::fs::remove_file(mods_dir.join(&item.file_name)) {
-                        failed.push((item.file_name.clone(), format!("PERMISSION|删除旧文件失败|{e}")));
+                        failed.push((
+                            item.file_name.clone(),
+                            format!("PERMISSION|删除旧文件失败|{e}"),
+                        ));
                         break;
                     }
                 }

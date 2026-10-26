@@ -312,8 +312,7 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
 /// 从 .mrpack 里读 index
 pub fn read_index(pack: &Path) -> Result<ModpackIndex, String> {
     let file = std::fs::File::open(pack).map_err(|e| format!("PERMISSION|打不开整合包|{e}"))?;
-    let mut zip =
-        zip::ZipArchive::new(file).map_err(|e| format!("INTERNAL|不是有效的 zip|{e}"))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("INTERNAL|不是有效的 zip|{e}"))?;
     let mut entry = zip
         .by_name("modrinth.index.json")
         .map_err(|_| "INTERNAL|整合包缺少 modrinth.index.json".to_string())?;
@@ -664,15 +663,14 @@ pub fn extract_overrides(
             .by_name(&name)
             .map_err(|e| format!("INTERNAL|读取条目失败|{e}"))?;
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
         }
         // 先写临时文件再改名，中途失败不会留下半个覆盖文件
         let tmp = PathBuf::from(format!("{}.part", dest.to_string_lossy()));
         let mut out =
             std::fs::File::create(&tmp).map_err(|e| format!("PERMISSION|写入失败|{e}"))?;
-        let copied = std::io::copy(&mut entry, &mut out)
-            .map_err(|e| format!("PERMISSION|解压失败|{e}"))?;
+        let copied =
+            std::io::copy(&mut entry, &mut out).map_err(|e| format!("PERMISSION|解压失败|{e}"))?;
         drop(out);
         // 按实际写出的字节算总量，不信压缩包自称的大小
         written = written.saturating_add(copied);
@@ -719,8 +717,7 @@ pub fn download_files(
             return Err(format!("INVALID_PATH|下载路径越界：{}", f.path));
         }
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
         }
         crate::net::download_with_cancel(
             &f.url,
@@ -873,9 +870,10 @@ pub fn install(
         }
         if let (Some(kind), Some(ver)) = (&index.loader_kind, &index.loader_version) {
             if kind == "forge" || kind == "neoforge" {
-                let generated = crate::core::install_forge_like(kind, &index.mc_version, ver, game, |p| {
-                    on(&p.stage, &p.label, p.done, p.total)
-                })?;
+                let generated =
+                    crate::core::install_forge_like(kind, &index.mc_version, ver, game, |p| {
+                        on(&p.stage, &p.label, p.done, p.total)
+                    })?;
                 let mut m = crate::instance::read_meta(game, &inst_id)
                     .ok_or_else(|| "INSTANCE_NOT_FOUND|元数据丢失".to_string())?;
                 m.launch_version = Some(generated);

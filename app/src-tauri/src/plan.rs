@@ -109,7 +109,10 @@ fn issue(code: &str, message: impl Into<String>, blocking: bool) -> PlanIssue {
 }
 
 /// 只做校验与规划，不产生任何副作用
-pub fn prepare(game: &std::path::Path, request: GameInstallRequest) -> Result<GameInstallPlan, String> {
+pub fn prepare(
+    game: &std::path::Path,
+    request: GameInstallRequest,
+) -> Result<GameInstallPlan, String> {
     let mut issues = Vec::new();
 
     if let Err(e) = crate::instance::validate_name(&request.name) {
@@ -174,12 +177,8 @@ pub fn prepare(game: &std::path::Path, request: GameInstallRequest) -> Result<Ga
         let loader_kind = request.loader.as_ref().map(|l| l.kind.as_str());
         // 玩家指定了具体版本：只认真实存在、属于该组件且兼容的版本
         if let Some(vid) = request.shader_support_version.as_deref() {
-            match crate::components::validate_choice(
-                want,
-                vid,
-                &request.game_version,
-                loader_kind,
-            ) {
+            match crate::components::validate_choice(want, vid, &request.game_version, loader_kind)
+            {
                 Ok((file, project_id)) => {
                     let label = crate::components::spec_info(want)
                         .map(|s| s.label.to_string())
@@ -273,7 +272,9 @@ pub fn prepare(game: &std::path::Path, request: GameInstallRequest) -> Result<Ga
 /// 取走计划并校验（一次性）
 pub fn take(plan_id: &str, revision: u32) -> Result<GameInstallPlan, String> {
     let mut s = store();
-    let map = s.as_mut().ok_or_else(|| "PLAN_EXPIRED|没有可用计划".to_string())?;
+    let map = s
+        .as_mut()
+        .ok_or_else(|| "PLAN_EXPIRED|没有可用计划".to_string())?;
     let stored = map
         .remove(plan_id)
         .ok_or_else(|| "PLAN_EXPIRED|计划不存在或已使用".to_string())?;

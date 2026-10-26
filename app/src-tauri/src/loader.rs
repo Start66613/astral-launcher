@@ -34,10 +34,14 @@ pub struct LoaderBuild {
 
 const FABRIC_META: &str = "https://meta.fabricmc.net/v2/versions/loader";
 const QUILT_META: &str = "https://meta.quiltmc.org/v3/versions/loader";
-const FORGE_META: &str = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
-const FORGE_PROMOS: &str = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
-const NEOFORGE_META: &str = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
-const NEOFORGE_LEGACY_META: &str = "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml";
+const FORGE_META: &str =
+    "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
+const FORGE_PROMOS: &str =
+    "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
+const NEOFORGE_META: &str =
+    "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
+const NEOFORGE_LEGACY_META: &str =
+    "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml";
 
 /// 所有下载都要过白名单（这些 URL 也会走 net 校验）
 /// 拉取清单：走带缓存的下载，断网时回落到上次成功的结果。
@@ -69,8 +73,7 @@ fn fetch(url: &str) -> Result<String, String> {
         }
         return Err(e);
     }
-    let text = std::fs::read_to_string(&dest)
-        .map_err(|e| format!("INTERNAL|读取清单失败|{e}"))?;
+    let text = std::fs::read_to_string(&dest).map_err(|e| format!("INTERNAL|读取清单失败|{e}"))?;
     let _ = std::fs::remove_file(&dest);
     let _ = crate::net::meta_write(url, text.as_bytes(), None);
     Ok(text)
@@ -144,7 +147,11 @@ fn fabric_builds(mc: &str) -> Result<Vec<LoaderBuild>, String> {
             kind: "fabric".into(),
             version: v,
             mc_version: mc.to_string(),
-            stability: if stable { "stable".into() } else { "unknown".into() },
+            stability: if stable {
+                "stable".into()
+            } else {
+                "unknown".into()
+            },
             recommended: false,
             published_at: None,
             available: true,

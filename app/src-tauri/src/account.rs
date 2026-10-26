@@ -12,7 +12,10 @@ use uuid::Uuid;
 
 /// 旧版（错误）算法，仅用于识别历史存档
 pub fn legacy_uuid(name: &str) -> Uuid {
-    Uuid::new_v3(&Uuid::NAMESPACE_OID, format!("OfflinePlayer:{name}").as_bytes())
+    Uuid::new_v3(
+        &Uuid::NAMESPACE_OID,
+        format!("OfflinePlayer:{name}").as_bytes(),
+    )
 }
 
 /// Minecraft 用户名规则：3–16 个 ASCII 字母/数字/下划线
@@ -21,10 +24,7 @@ pub fn validate_username(name: &str) -> Result<(), String> {
     if n.len() < 3 || n.len() > 16 {
         return Err("INVALID_NAME|用户名需为 3–16 个字符".into());
     }
-    if !n
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    if !n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err("INVALID_NAME|用户名只能包含字母、数字和下划线".into());
     }
     Ok(())
@@ -71,7 +71,10 @@ pub fn validate_client_id(id: &str) -> Result<(), String> {
     let s = id.trim();
     let parts: Vec<&str> = s.split('-').collect();
     let shape_ok = parts.len() == 5
-        && parts.iter().map(|p| p.len()).eq([8usize, 4, 4, 4, 12].iter().copied())
+        && parts
+            .iter()
+            .map(|p| p.len())
+            .eq([8usize, 4, 4, 4, 12].iter().copied())
         && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
     if shape_ok {
         Ok(())

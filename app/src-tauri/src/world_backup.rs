@@ -167,7 +167,11 @@ pub(crate) fn available_space(path: &Path) -> Option<u64> {
 pub fn list(instance_dir: &Path) -> Vec<WorldBackup> {
     let mut list = load_index(instance_dir);
     // 只保留备份文件还在的条目，避免"列表里有、恢复时找不到"
-    list.retain(|b| backup_root(instance_dir).join(format!("{}.zip", b.backup_id)).is_file());
+    list.retain(|b| {
+        backup_root(instance_dir)
+            .join(format!("{}.zip", b.backup_id))
+            .is_file()
+    });
     list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     list
 }
@@ -212,8 +216,8 @@ pub fn create(
     let zip_path = root.join(format!("{backup_id}.zip"));
     let tmp_zip = root.join(format!("{backup_id}.zip.part"));
 
-    let file = std::fs::File::create(&tmp_zip)
-        .map_err(|e| format!("PERMISSION|创建备份文件失败|{e}"))?;
+    let file =
+        std::fs::File::create(&tmp_zip).map_err(|e| format!("PERMISSION|创建备份文件失败|{e}"))?;
     let mut zip = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -414,20 +418,23 @@ pub fn restore(
     let mut replaced: Option<String> = None;
     if target.exists() {
         let stamp = crate::time::now_stamp();
-        let kept = root.join(format!("replaced-{stamp}-{}", sanitize(&preview.backup.world_name)));
+        let kept = root.join(format!(
+            "replaced-{stamp}-{}",
+            sanitize(&preview.backup.world_name)
+        ));
         std::fs::create_dir_all(&root).map_err(|e| format!("PERMISSION|创建备份目录失败|{e}"))?;
-        std::fs::rename(&target, &kept)
-            .map_err(|e| format!("PERMISSION|留底现有存档失败|{e}"))?;
+        std::fs::rename(&target, &kept).map_err(|e| format!("PERMISSION|留底现有存档失败|{e}"))?;
         replaced = Some(kept.to_string_lossy().to_string());
     }
 
     let staging = saves_dir.join(format!(".restore-{}", crate::time::now_nanos()));
     let outcome = (|| -> Result<(u64, u64), String> {
-        std::fs::create_dir_all(&staging).map_err(|e| format!("PERMISSION|创建临时目录失败|{e}"))?;
-        let file = std::fs::File::open(&zip_path)
-            .map_err(|e| format!("PERMISSION|打不开备份|{e}"))?;
-        let mut zip = zip::ZipArchive::new(file)
-            .map_err(|e| format!("INTERNAL|备份不是有效的 zip|{e}"))?;
+        std::fs::create_dir_all(&staging)
+            .map_err(|e| format!("PERMISSION|创建临时目录失败|{e}"))?;
+        let file =
+            std::fs::File::open(&zip_path).map_err(|e| format!("PERMISSION|打不开备份|{e}"))?;
+        let mut zip =
+            zip::ZipArchive::new(file).map_err(|e| format!("INTERNAL|备份不是有效的 zip|{e}"))?;
         if zip.len() > MAX_ENTRIES {
             return Err("INVALID_VALUE|备份条目过多，已拒绝".into());
         }
@@ -460,8 +467,8 @@ pub fn restore(
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("PERMISSION|创建目录失败|{e}"))?;
             }
-            let mut out = std::fs::File::create(&dest)
-                .map_err(|e| format!("PERMISSION|写入存档失败|{e}"))?;
+            let mut out =
+                std::fs::File::create(&dest).map_err(|e| format!("PERMISSION|写入存档失败|{e}"))?;
             let copied = std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("PERMISSION|解压失败|{e}"))?;
             drop(out);

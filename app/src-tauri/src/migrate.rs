@@ -100,7 +100,8 @@ pub struct StoredCopyPlan {
 
 const TTL_MS: i64 = 30 * 60 * 1000;
 
-fn store() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<String, StoredCopyPlan>>> {
+fn store(
+) -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<String, StoredCopyPlan>>> {
     PLANS.lock().unwrap()
 }
 
@@ -162,7 +163,6 @@ fn count_tree(dir: &Path) -> (u64, u64) {
     }
     (files, bytes)
 }
-
 
 /// 计算复制计划（只读，不创建任何目录）
 pub fn plan_copy(
@@ -557,7 +557,10 @@ fn copy_tree(
             }
             *files += 1;
             *bytes += m.len();
-            on((*files).min(u32::MAX as u64) as u32, total.min(u32::MAX as u64) as u32);
+            on(
+                (*files).min(u32::MAX as u64) as u32,
+                total.min(u32::MAX as u64) as u32,
+            );
         }
     }
     Ok(())

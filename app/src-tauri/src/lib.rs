@@ -1,33 +1,33 @@
+mod account;
 mod cache;
 mod components;
 mod core;
 mod deps;
 mod error;
 mod export;
-mod account;
 mod instance;
 mod java;
+mod java_audit;
 mod jdk;
 mod loader;
 mod logs;
+mod migrate;
 mod modpack;
 mod mods;
 mod net;
-mod recycle;
-mod world_backup;
-mod migrate;
-mod java_audit;
-mod testsrv;
 mod plan;
+mod recycle;
 mod resources;
-mod worlds;
 mod session;
 mod stats;
 mod task;
+mod testsrv;
 mod time;
 mod update_plan;
-mod verify;
 mod updates;
+mod verify;
+mod world_backup;
+mod worlds;
 
 use core::Config;
 use instance::Instance;
@@ -235,8 +235,7 @@ fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String>
     }
     instance::save_meta(&game, &meta)?;
     emit_instance_changed(&id, "updated");
-    instance::find(&game, &id, &play_stats)
-        .ok_or_else(|| "INTERNAL|保存后读不到实例".to_string())
+    instance::find(&game, &id, &play_stats).ok_or_else(|| "INTERNAL|保存后读不到实例".to_string())
 }
 
 #[derive(Deserialize, Default)]
@@ -387,10 +386,7 @@ fn cancel_task(task_id: String) -> serde_json::Value {
 }
 
 #[tauri::command]
-async fn start_install(
-    app: AppHandle,
-    game_version: String,
-) -> Result<Task, String> {
+async fn start_install(app: AppHandle, game_version: String) -> Result<Task, String> {
     if task::has_running_kind("install", None, Some(&game_version)) {
         return Err("BUSY|同类任务正在运行，请等待或取消".into());
     }
@@ -431,7 +427,10 @@ fn run_install(tid: &str, game_version: String) {
             tid,
             serde_json::json!({ "kind": "install", "gameVersion": v, "cancelledLate": true }),
         ),
-        Ok(_) => task::finish(tid, serde_json::json!({ "kind": "install", "gameVersion": v })),
+        Ok(_) => task::finish(
+            tid,
+            serde_json::json!({ "kind": "install", "gameVersion": v }),
+        ),
         Err(_) if task::is_cancelled(tid) => task::cancelled(tid),
         Err(e) => {
             task::fail(tid, e);
@@ -475,7 +474,10 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
         let t2 = tid.clone();
         let version = inst.game_version.clone();
         // Forge/NeoForge：启动 installer 生成的版本，不再走 fabric 装配
-        let is_installer_loader = matches!(inst.loader.as_ref().map(|l| l.kind.as_str()), Some("forge") | Some("neoforge"));
+        let is_installer_loader = matches!(
+            inst.loader.as_ref().map(|l| l.kind.as_str()),
+            Some("forge") | Some("neoforge")
+        );
         let version = if is_installer_loader {
             inst.launch_version.clone().unwrap_or(version)
         } else {
@@ -656,7 +658,11 @@ fn delete_world_backup(
     let game = game_root();
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
-    world_backup::delete(&instance::instance_dir(&game, &inst.id), &backup_id, confirm)
+    world_backup::delete(
+        &instance::instance_dir(&game, &inst.id),
+        &backup_id,
+        confirm,
+    )
 }
 
 // ── 版本复制 / 导入 / 迁移 ──────────────────────────────────────
@@ -766,13 +772,9 @@ async fn start_resource_install(plan_id: String, revision: u32) -> Result<Task, 
                 let tid_c = tid.clone();
                 move || task::is_cancelled(&tid_c)
             });
-            resources::execute(
-                &stored,
-                &*cancel,
-                move |c, total| {
-                    task::progress(&t2, "download", format!("下载 {c}/{total}"), c, total);
-                },
-            )
+            resources::execute(&stored, &*cancel, move |c, total| {
+                task::progress(&t2, "download", format!("下载 {c}/{total}"), c, total);
+            })
         }))
         .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|资源安装线程崩溃".to_string()));
 
@@ -818,9 +820,11 @@ async fn export_modpack(request: export::ExportRequest) -> Result<export::Export
 #[tauri::command]
 async fn modpack_installed_versions(project_id: String) -> Result<Vec<serde_json::Value>, String> {
     let game = game_root();
-    tauri::async_runtime::spawn_blocking(move || Ok(modpack::installed_versions(&game, &project_id)))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(modpack::installed_versions(&game, &project_id))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 导出回读校验：把导出的 .mrpack 重新解析一遍，确认 index 与 overrides 都能读
@@ -890,7 +894,13 @@ async fn start_mod_update(
 }
 
 /// 模组更新的 worker：命令与「重试」共用
-fn run_mod_update(tid: &str, instance_id: &str, file_name: &str, project_id: &str, version_id: &str) {
+fn run_mod_update(
+    tid: &str,
+    instance_id: &str,
+    file_name: &str,
+    project_id: &str,
+    version_id: &str,
+) {
     task::start(tid);
     let game = game_root();
     let t2 = tid.to_string();
@@ -1015,7 +1025,10 @@ async fn install_java(major: u32) -> Result<Task, String> {
         return Err("BUSY|已有 Java 下载任务在运行".into());
     }
     let t = task::create("jdk", None, None, format!("下载 Java {major}"));
-    task::set_retry_spec(&t.task_id, serde_json::json!({ "kind": "install-java", "major": major }));
+    task::set_retry_spec(
+        &t.task_id,
+        serde_json::json!({ "kind": "install-java", "major": major }),
+    );
     let tid = t.task_id.clone();
     std::thread::spawn(move || {
         task::start(&tid);
@@ -1028,7 +1041,13 @@ async fn install_java(major: u32) -> Result<Task, String> {
                 &game,
                 move || task::is_cancelled(&tc),
                 move |stage, done, total| {
-                    task::progress(&t2, stage, format!("Java {major} {done}/{total}"), done, total);
+                    task::progress(
+                        &t2,
+                        stage,
+                        format!("Java {major} {done}/{total}"),
+                        done,
+                        total,
+                    );
                 },
             )
         }))
@@ -1065,10 +1084,19 @@ struct MsaStatus {
 #[tauri::command]
 fn msa_status() -> MsaStatus {
     let cfg = core::load_config();
-    match cfg.msa_client_id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    match cfg
+        .msa_client_id
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         Some(id) => MsaStatus {
             configured: true,
-            client_id_masked: Some(format!("{}…{}", &id[..8.min(id.len())], &id[id.len().saturating_sub(4)..])),
+            client_id_masked: Some(format!(
+                "{}…{}",
+                &id[..8.min(id.len())],
+                &id[id.len().saturating_sub(4)..]
+            )),
             reason: None,
             steps: vec![],
         },
@@ -1314,7 +1342,13 @@ async fn start_modpack_install(
                 if !core::version_installed(&game, &index.mc_version) {
                     let t2 = tid.clone();
                     core::install(&index.mc_version, &game, &cfg.username, move |p| {
-                        task::progress(&t2, &p.stage, format!("游戏本体 {}", p.label), p.done, p.total);
+                        task::progress(
+                            &t2,
+                            &p.stage,
+                            format!("游戏本体 {}", p.label),
+                            p.done,
+                            p.total,
+                        );
                     })?;
                 }
                 task::check_cancel(&tid)?;
@@ -1369,7 +1403,13 @@ async fn start_modpack_install(
                     include_optional,
                     &move || task::is_cancelled(&tc),
                     move |d, total| {
-                        task::progress(&t2, "download", format!("整合包文件 {d}/{total}"), d, total);
+                        task::progress(
+                            &t2,
+                            "download",
+                            format!("整合包文件 {d}/{total}"),
+                            d,
+                            total,
+                        );
                     },
                 )?;
 
@@ -1538,8 +1578,8 @@ fn run_game_install(
     let v = p.request.game_version.clone();
     let mut created: Option<String> = None;
 
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Instance, String> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<Instance, String> {
             if !core::version_installed(&game, &v) {
                 let t2 = tid.to_string();
                 core::install(&v, &game, &cfg.username, move |pr| {
@@ -1571,17 +1611,25 @@ fn run_game_install(
                 let t2 = tid.to_string();
                 if l.kind == "forge" || l.kind == "neoforge" {
                     // installer 会生成 {mc}-forge-{ver} 之类的版本，记下来供启动使用
-                    let generated = core::install_forge_like(&l.kind, &v, &l.version, &game, move |pr| {
-                        task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
-                    })?;
+                    let generated =
+                        core::install_forge_like(&l.kind, &v, &l.version, &game, move |pr| {
+                            task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                        })?;
                     let mut meta = instance::read_meta(&game, &inst.id)
                         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例元数据丢失".to_string())?;
                     meta.launch_version = Some(generated);
                     instance::save_meta(&game, &meta)?;
                 } else {
-                    core::install_loader(&v, &l.kind, &l.version, &game, &cfg.username, move |pr| {
-                        task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
-                    })?;
+                    core::install_loader(
+                        &v,
+                        &l.kind,
+                        &l.version,
+                        &game,
+                        &cfg.username,
+                        move |pr| {
+                            task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                        },
+                    )?;
                 }
             }
             task::check_cancel(&tid)?;
@@ -1609,19 +1657,15 @@ fn run_game_install(
                 let t2 = tid.to_string();
                 let t3 = tid.to_string();
                 let cancel = net::cancel_from(move || task::is_cancelled(&t3));
-                resources::execute(
-                    &stored,
-                    &*cancel,
-                    move |done, total| {
-                        task::progress(
-                            &t2,
-                            "component",
-                            format!("安装 {label} {done}/{total}"),
-                            done,
-                            total,
-                        );
-                    },
-                )?;
+                resources::execute(&stored, &*cancel, move |done, total| {
+                    task::progress(
+                        &t2,
+                        "component",
+                        format!("安装 {label} {done}/{total}"),
+                        done,
+                        total,
+                    );
+                })?;
             }
             task::check_cancel(&tid)?;
 
@@ -1634,12 +1678,15 @@ fn run_game_install(
                 ));
             }
             Ok(fresh)
-        }));
-
+        },
+    ));
 
     match result {
         Ok(r) => (r, created),
-        Err(_) => (Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()), created),
+        Err(_) => (
+            Err("INTERNAL|后台任务异常|安装线程崩溃".to_string()),
+            created,
+        ),
     }
 }
 
@@ -1672,39 +1719,59 @@ async fn repair_instance(instance_id: String) -> Result<Task, String> {
             }
         };
         let steps = core::repair_steps(&game, &meta);
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
-            for step in &steps {
-                task::check_cancel(&tid)?;
-                match *step {
-                    "base" => {
-                        let t2 = tid.to_string();
-                        core::install(&meta.game_version, &game, &cfg.username, move |pr| {
-                            task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
-                        })?;
-                    }
-                    "loader" => {
-                        if let (Some(kind), Some(ver)) = (&meta.loader_kind, &meta.loader_version) {
+        let res =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+                for step in &steps {
+                    task::check_cancel(&tid)?;
+                    match *step {
+                        "base" => {
                             let t2 = tid.to_string();
-                            if kind == "forge" || kind == "neoforge" {
-                                let generated = core::install_forge_like(kind, &meta.game_version, ver, &game, move |pr| {
-                                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
-                                })?;
-                                let mut m = meta.clone();
-                                m.launch_version = Some(generated);
-                                instance::save_meta(&game, &m)?;
-                            } else {
-                                core::install_loader(&meta.game_version, kind, ver, &game, &cfg.username, move |pr| {
-                                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
-                                })?;
+                            core::install(&meta.game_version, &game, &cfg.username, move |pr| {
+                                task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                            })?;
+                        }
+                        "loader" => {
+                            if let (Some(kind), Some(ver)) =
+                                (&meta.loader_kind, &meta.loader_version)
+                            {
+                                let t2 = tid.to_string();
+                                if kind == "forge" || kind == "neoforge" {
+                                    let generated = core::install_forge_like(
+                                        kind,
+                                        &meta.game_version,
+                                        ver,
+                                        &game,
+                                        move |pr| {
+                                            task::progress(
+                                                &t2, &pr.stage, pr.label, pr.done, pr.total,
+                                            );
+                                        },
+                                    )?;
+                                    let mut m = meta.clone();
+                                    m.launch_version = Some(generated);
+                                    instance::save_meta(&game, &m)?;
+                                } else {
+                                    core::install_loader(
+                                        &meta.game_version,
+                                        kind,
+                                        ver,
+                                        &game,
+                                        &cfg.username,
+                                        move |pr| {
+                                            task::progress(
+                                                &t2, &pr.stage, pr.label, pr.done, pr.total,
+                                            );
+                                        },
+                                    )?;
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            Ok(())
-        }))
-        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|修复线程崩溃".to_string()));
+                Ok(())
+            }))
+            .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|修复线程崩溃".to_string()));
 
         match res {
             Ok(()) => {
@@ -1782,7 +1849,11 @@ async fn start_install_loader(
         return Err(format!(
             "INCOMPATIBLE|{kind} {version} 没有适用于 Minecraft {} 的构建|可用示例：{}",
             inst.game_version,
-            if sample.is_empty() { "无".to_string() } else { sample.join(", ") }
+            if sample.is_empty() {
+                "无".to_string()
+            } else {
+                sample.join(", ")
+            }
         ));
     }
     let t = task::create(
@@ -1797,25 +1868,33 @@ async fn start_install_loader(
         let cfg = core::load_config();
         let main_dir = PathBuf::from(&cfg.game_dir);
         let t2 = tid.clone();
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Option<String>, String> {
-            if kind == "forge" || kind == "neoforge" {
-                // installer 产出的 version id 要记进实例，启动时用它
-                core::install_forge_like(&kind, &inst.game_version, &version, &main_dir, move |p| {
-                    task::progress(&t2, &p.stage, p.label, p.done, p.total);
-                })
-                .map(Some)
-            } else {
-                core::install_loader(
-                    &inst.game_version,
-                    &kind,
-                    &version,
-                    &main_dir,
-                    &cfg.username,
-                    move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
-                )
-                .map(|_| None)
-            }
-        }))
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<Option<String>, String> {
+                if kind == "forge" || kind == "neoforge" {
+                    // installer 产出的 version id 要记进实例，启动时用它
+                    core::install_forge_like(
+                        &kind,
+                        &inst.game_version,
+                        &version,
+                        &main_dir,
+                        move |p| {
+                            task::progress(&t2, &p.stage, p.label, p.done, p.total);
+                        },
+                    )
+                    .map(Some)
+                } else {
+                    core::install_loader(
+                        &inst.game_version,
+                        &kind,
+                        &version,
+                        &main_dir,
+                        &cfg.username,
+                        move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
+                    )
+                    .map(|_| None)
+                }
+            },
+        ))
         .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|加载器线程崩溃".to_string()));
         let late = task::is_cancelled(&tid);
         match res {
@@ -2002,10 +2081,7 @@ fn apply_mod_updates(
                     "astral://mod-update",
                     serde_json::json!({ "instanceId": instance_id, "result": res }),
                 );
-                task::fail(
-                    &tid,
-                    format!("NETWORK|批量更新失败，已回滚|{msg}"),
-                );
+                task::fail(&tid, format!("NETWORK|批量更新失败，已回滚|{msg}"));
             }
             Err(e) => task::fail(&tid, e),
         }
@@ -2037,7 +2113,10 @@ fn rollback_mod_updates(instance_id: String, batch_id: String) -> Result<u32, St
 
 /// 清理过期备份（只动 .astral-backup）
 #[tauri::command]
-fn prune_mod_update_backups(instance_id: String, keep_days: Option<u64>) -> Result<(u64, u64), String> {
+fn prune_mod_update_backups(
+    instance_id: String,
+    keep_days: Option<u64>,
+) -> Result<(u64, u64), String> {
     let inst = managed_instance(&instance_id)?;
     update_plan::prune(
         std::path::Path::new(&inst.dirs.mods),
@@ -2365,7 +2444,6 @@ async fn download_to(
     .map_err(|e| e.to_string())?
 }
 
-
 // ── 启动 ────────────────────────────────────────────────────────
 
 static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
@@ -2528,7 +2606,10 @@ pub fn selftest() -> i32 {
     let iso = "2026-10-23T00:00:00Z";
     check!(
         "time roundtrip",
-        time::iso_to_unix_ms(iso).map(time::unix_ms_to_iso).as_deref() == Some(iso)
+        time::iso_to_unix_ms(iso)
+            .map(time::unix_ms_to_iso)
+            .as_deref()
+            == Some(iso)
     );
     check!(
         "time leap",
@@ -2610,7 +2691,10 @@ pub fn selftest() -> i32 {
             .unwrap_or(false)
     );
     check!("mod delete", mods::delete(&mod_dir, "a.jar").is_ok());
-    check!("mod path guard", mods::delete(&mod_dir, "../a.jar").is_err());
+    check!(
+        "mod path guard",
+        mods::delete(&mod_dir, "../a.jar").is_err()
+    );
     let _ = std::fs::remove_dir_all(&mod_dir);
 
     check!(
@@ -2644,7 +2728,10 @@ pub fn selftest() -> i32 {
                 .map(|x| x.state == "done" && x.result.is_some())
                 .unwrap_or(false)
     );
-    check!("task snapshot", !task::snapshot(None, None, None).is_empty());
+    check!(
+        "task snapshot",
+        !task::snapshot(None, None, None).is_empty()
+    );
 
     // 取消：受理 → worker 确认 → 终态粘滞
     let t3 = task::create("install", None, Some("1.20.1".into()), "取消测试");
@@ -2677,7 +2764,8 @@ pub fn selftest() -> i32 {
     // 取消令牌不能泄漏：任务进终态后 tokens 里不该还留着它
     check!(
         "task token released",
-        task::health()["tokens"].as_u64().unwrap_or(99) < task::health()["tasks"].as_u64().unwrap_or(0)
+        task::health()["tokens"].as_u64().unwrap_or(99)
+            < task::health()["tasks"].as_u64().unwrap_or(0)
             || task::health()["tokens"].as_u64() == Some(0)
     );
 
@@ -2884,8 +2972,10 @@ pub fn selftest() -> i32 {
             replaced: std::collections::BTreeMap::new(),
             note: "自检".into(),
         };
-        rec.files.insert("alpha-1.0.jar".into(), "alpha-1.0.jar.bak".into());
-        rec.replaced.insert("alpha-1.0.jar".into(), "alpha-2.0.jar".into());
+        rec.files
+            .insert("alpha-1.0.jar".into(), "alpha-1.0.jar.bak".into());
+        rec.replaced
+            .insert("alpha-1.0.jar".into(), "alpha-2.0.jar".into());
         update_plan::save_history_for_test(&mods_dir, std::slice::from_ref(&rec));
         check!(
             "update history lists batch",
@@ -2947,199 +3037,197 @@ pub fn selftest() -> i32 {
         // 清理
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
-    // ── B3 完整文件检查与修复计划 ──
-    {
-        let g = game.join("verify-game");
-        let ver = "1.20.1";
-        let vdir = g.join("versions").join(ver);
-        std::fs::create_dir_all(&vdir).unwrap();
-        std::fs::create_dir_all(g.join("libraries")).unwrap();
-        std::fs::create_dir_all(g.join("assets").join("indexes")).unwrap();
+        // ── B3 完整文件检查与修复计划 ──
+        {
+            let g = game.join("verify-game");
+            let ver = "1.20.1";
+            let vdir = g.join("versions").join(ver);
+            std::fs::create_dir_all(&vdir).unwrap();
+            std::fs::create_dir_all(g.join("libraries")).unwrap();
+            std::fs::create_dir_all(g.join("assets").join("indexes")).unwrap();
 
-        // 造一个"半残"的版本：json 有、jar 缺、库缺一个、资源索引缺
-        let jar_bytes = b"fake-client-jar-bytes";
-        let version_json = serde_json::json!({
-            "id": ver,
-            "javaVersion": { "majorVersion": 17 },
-            "downloads": {
-                "client": {
-                    "size": jar_bytes.len(),
-                    "sha1": "0000000000000000000000000000000000000000"
-                }
-            },
-            "assetIndex": { "id": "5" },
-            "libraries": [
-                {
-                    "name": "org.example:present:1.0",
-                    "downloads": {
-                        "artifact": {
-                            "path": "org/example/present/1.0/present-1.0.jar",
-                            "size": 3,
-                            "sha1": "1111111111111111111111111111111111111111"
-                        }
+            // 造一个"半残"的版本：json 有、jar 缺、库缺一个、资源索引缺
+            let jar_bytes = b"fake-client-jar-bytes";
+            let version_json = serde_json::json!({
+                "id": ver,
+                "javaVersion": { "majorVersion": 17 },
+                "downloads": {
+                    "client": {
+                        "size": jar_bytes.len(),
+                        "sha1": "0000000000000000000000000000000000000000"
                     }
                 },
-                {
-                    "name": "org.example:missing:1.0",
-                    "downloads": {
-                        "artifact": {
-                            "path": "org/example/missing/1.0/missing-1.0.jar",
-                            "size": 4,
-                            "sha1": "2222222222222222222222222222222222222222"
+                "assetIndex": { "id": "5" },
+                "libraries": [
+                    {
+                        "name": "org.example:present:1.0",
+                        "downloads": {
+                            "artifact": {
+                                "path": "org/example/present/1.0/present-1.0.jar",
+                                "size": 3,
+                                "sha1": "1111111111111111111111111111111111111111"
+                            }
+                        }
+                    },
+                    {
+                        "name": "org.example:missing:1.0",
+                        "downloads": {
+                            "artifact": {
+                                "path": "org/example/missing/1.0/missing-1.0.jar",
+                                "size": 4,
+                                "sha1": "2222222222222222222222222222222222222222"
+                            }
                         }
                     }
-                }
-            ]
-        });
-        std::fs::write(
-            vdir.join(format!("{ver}.json")),
-            serde_json::to_string_pretty(&version_json).unwrap(),
-        )
-        .unwrap();
-        let present = g
-            .join("libraries")
-            .join("org/example/present/1.0/present-1.0.jar");
-        std::fs::create_dir_all(present.parent().unwrap()).unwrap();
-        std::fs::write(&present, b"abc").unwrap();
+                ]
+            });
+            std::fs::write(
+                vdir.join(format!("{ver}.json")),
+                serde_json::to_string_pretty(&version_json).unwrap(),
+            )
+            .unwrap();
+            let present = g
+                .join("libraries")
+                .join("org/example/present/1.0/present-1.0.jar");
+            std::fs::create_dir_all(present.parent().unwrap()).unwrap();
+            std::fs::write(&present, b"abc").unwrap();
 
-        let report = verify::check(&g, ver, &verify::CheckOptions::default());
-        check!(
-            "verify finds missing jar",
-            report.missing >= 1
-                && report
+            let report = verify::check(&g, ver, &verify::CheckOptions::default());
+            check!(
+                "verify finds missing jar",
+                report.missing >= 1
+                    && report
+                        .files
+                        .iter()
+                        .any(|f| f.kind == "client-jar" && !f.exists)
+            );
+            check!(
+                "verify counts missing library",
+                report
                     .files
                     .iter()
-                    .any(|f| f.kind == "client-jar" && !f.exists)
-        );
-        check!(
-            "verify counts missing library",
-            report
-                .files
-                .iter()
-                .any(|f| f.kind == "library" && !f.exists && f.path.contains("missing"))
-        );
-        check!(
-            "verify accepts present library by size",
-            report
-                .files
-                .iter()
-                .any(|f| f.path.contains("present") && f.exists && f.complete == Some(true))
-        );
-        check!(
-            "verify reports missing asset index",
-            report
-                .files
-                .iter()
-                .any(|f| f.kind == "asset-index" && !f.exists)
-        );
-        check!("verify report not complete", !report.complete && report.needs_repair());
+                    .any(|f| f.kind == "library" && !f.exists && f.path.contains("missing"))
+            );
+            check!(
+                "verify accepts present library by size",
+                report
+                    .files
+                    .iter()
+                    .any(|f| f.path.contains("present") && f.exists && f.complete == Some(true))
+            );
+            check!(
+                "verify reports missing asset index",
+                report
+                    .files
+                    .iter()
+                    .any(|f| f.kind == "asset-index" && !f.exists)
+            );
+            check!(
+                "verify report not complete",
+                !report.complete && report.needs_repair()
+            );
 
-        // 修复计划：只读、不碰用户文件、给出 untouched 清单
-        let plan = verify::plan(&g, Some("inst_v"), ver, &report, None, None);
-        check!(
-            "verify plan targets base reinstall",
-            plan.actions.iter().any(|a| a.kind == "reinstall-base")
-        );
-        check!(
-            "verify plan lists untouched user dirs",
-            plan.untouched.iter().any(|s| s.contains("saves"))
-                && plan.untouched.iter().any(|s| s.contains("mods"))
-        );
-        check!(
-            "verify plan never overwrites user files",
-            plan.actions.iter().all(|a| !a.overwrites_user_file)
-        );
+            // 修复计划：只读、不碰用户文件、给出 untouched 清单
+            let plan = verify::plan(&g, Some("inst_v"), ver, &report, None, None);
+            check!(
+                "verify plan targets base reinstall",
+                plan.actions.iter().any(|a| a.kind == "reinstall-base")
+            );
+            check!(
+                "verify plan lists untouched user dirs",
+                plan.untouched.iter().any(|s| s.contains("saves"))
+                    && plan.untouched.iter().any(|s| s.contains("mods"))
+            );
+            check!(
+                "verify plan never overwrites user files",
+                plan.actions.iter().all(|a| !a.overwrites_user_file)
+            );
 
-        // 深度模式：大小对但内容错 → 必须被 sha1 抓出来
-        let libs_json_path = vdir.join(format!("{ver}.json"));
-        let mut v2: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&libs_json_path).unwrap()).unwrap();
-        // 把 present 的 sha1 改成"正确内容 abc 的 sha1"
-        let correct = crate::net::sha1_file(&present).unwrap();
-        v2["libraries"][0]["downloads"]["artifact"]["sha1"] =
-            serde_json::Value::String(correct.clone());
-        std::fs::write(
-            &libs_json_path,
-            serde_json::to_string_pretty(&v2).unwrap(),
-        )
-        .unwrap();
-        let shallow = verify::check(&g, ver, &verify::CheckOptions::default());
-        check!(
-            "verify shallow trusts size",
-            shallow
-                .files
-                .iter()
-                .any(|f| f.path.contains("present") && f.complete == Some(true))
-        );
-        // 改内容但保持同样长度 → 浅检通过、深检必须失败
-        std::fs::write(&present, b"abd").unwrap();
-        let deep = verify::check(
-            &g,
-            ver,
-            &verify::CheckOptions {
-                deep: true,
-                ..Default::default()
-            },
-        );
-        check!(
-            "verify deep detects corrupt content",
-            deep.files
-                .iter()
-                .any(|f| f.path.contains("present") && f.complete == Some(false))
-                && deep.corrupt >= 1
-        );
+            // 深度模式：大小对但内容错 → 必须被 sha1 抓出来
+            let libs_json_path = vdir.join(format!("{ver}.json"));
+            let mut v2: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&libs_json_path).unwrap()).unwrap();
+            // 把 present 的 sha1 改成"正确内容 abc 的 sha1"
+            let correct = crate::net::sha1_file(&present).unwrap();
+            v2["libraries"][0]["downloads"]["artifact"]["sha1"] =
+                serde_json::Value::String(correct.clone());
+            std::fs::write(&libs_json_path, serde_json::to_string_pretty(&v2).unwrap()).unwrap();
+            let shallow = verify::check(&g, ver, &verify::CheckOptions::default());
+            check!(
+                "verify shallow trusts size",
+                shallow
+                    .files
+                    .iter()
+                    .any(|f| f.path.contains("present") && f.complete == Some(true))
+            );
+            // 改内容但保持同样长度 → 浅检通过、深检必须失败
+            std::fs::write(&present, b"abd").unwrap();
+            let deep = verify::check(
+                &g,
+                ver,
+                &verify::CheckOptions {
+                    deep: true,
+                    ..Default::default()
+                },
+            );
+            check!(
+                "verify deep detects corrupt content",
+                deep.files
+                    .iter()
+                    .any(|f| f.path.contains("present") && f.complete == Some(false))
+                    && deep.corrupt >= 1
+            );
 
-        // 修好一个文件后报告要跟着变（幂等，不缓存旧结论）
-        std::fs::write(&present, b"abc").unwrap();
-        let fixed = verify::check(
-            &g,
-            ver,
-            &verify::CheckOptions {
-                deep: true,
-                ..Default::default()
-            },
-        );
-        check!(
-            "verify recheck reflects fix",
-            fixed
-                .files
-                .iter()
-                .any(|f| f.path.contains("present") && f.complete == Some(true))
-        );
+            // 修好一个文件后报告要跟着变（幂等，不缓存旧结论）
+            std::fs::write(&present, b"abc").unwrap();
+            let fixed = verify::check(
+                &g,
+                ver,
+                &verify::CheckOptions {
+                    deep: true,
+                    ..Default::default()
+                },
+            );
+            check!(
+                "verify recheck reflects fix",
+                fixed
+                    .files
+                    .iter()
+                    .any(|f| f.path.contains("present") && f.complete == Some(true))
+            );
 
-        // 完整版本：不报任何修复动作
-        let ok_dir = g.join("versions").join("2.0");
-        std::fs::create_dir_all(&ok_dir).unwrap();
-        std::fs::write(ok_dir.join("2.0.jar"), b"x").unwrap();
-        std::fs::write(
-            ok_dir.join("2.0.json"),
-            serde_json::json!({ "id": "2.0" }).to_string(),
-        )
-        .unwrap();
-        let ok_report = verify::check(&g, "2.0", &verify::CheckOptions::default());
-        check!(
-            "verify clean version has no actions",
-            verify::plan(&g, None, "2.0", &ok_report, None, None)
-                .actions
-                .is_empty()
-        );
+            // 完整版本：不报任何修复动作
+            let ok_dir = g.join("versions").join("2.0");
+            std::fs::create_dir_all(&ok_dir).unwrap();
+            std::fs::write(ok_dir.join("2.0.jar"), b"x").unwrap();
+            std::fs::write(
+                ok_dir.join("2.0.json"),
+                serde_json::json!({ "id": "2.0" }).to_string(),
+            )
+            .unwrap();
+            let ok_report = verify::check(&g, "2.0", &verify::CheckOptions::default());
+            check!(
+                "verify clean version has no actions",
+                verify::plan(&g, None, "2.0", &ok_report, None, None)
+                    .actions
+                    .is_empty()
+            );
 
-        // 备份目录：覆盖前备份能落盘
-        std::fs::write(g.join("probe.txt"), b"keep-me").unwrap();
-        let bdir = g.join(verify::BACKUP_DIR).join("rep_test");
-        std::fs::create_dir_all(&bdir).unwrap();
-        std::fs::copy(g.join("probe.txt"), bdir.join("probe.txt")).unwrap();
-        check!(
-            "verify backups listed",
-            verify::backups(&g).iter().any(|b| b == "rep_test")
-        );
+            // 备份目录：覆盖前备份能落盘
+            std::fs::write(g.join("probe.txt"), b"keep-me").unwrap();
+            let bdir = g.join(verify::BACKUP_DIR).join("rep_test");
+            std::fs::create_dir_all(&bdir).unwrap();
+            std::fs::copy(g.join("probe.txt"), bdir.join("probe.txt")).unwrap();
+            check!(
+                "verify backups listed",
+                verify::backups(&g).iter().any(|b| b == "rep_test")
+            );
 
-        let _ = std::fs::remove_dir_all(&g);
-    }
+            let _ = std::fs::remove_dir_all(&g);
+        }
 
         let _ = std::fs::remove_dir_all(mods_dir.join(update_plan::BACKUP_DIR));
     }
-
 
     check!(
         "task health shape",
@@ -3339,7 +3427,10 @@ pub fn selftest() -> i32 {
     let p_bad = plan::prepare(&plan_game, bad_name).expect("prepare bad");
     check!(
         "plan rejects bad name",
-        p_bad.issues.iter().any(|i| i.blocking && i.code == "INVALID_NAME")
+        p_bad
+            .issues
+            .iter()
+            .any(|i| i.blocking && i.code == "INVALID_NAME")
     );
 
     let mut forge_req = req.clone();
@@ -3373,7 +3464,10 @@ pub fn selftest() -> i32 {
     );
 
     let p_rev = plan::prepare(&plan_game, req.clone()).expect("prepare rev");
-    check!("plan revision guard", plan::take(&p_rev.plan_id, 2).is_err());
+    check!(
+        "plan revision guard",
+        plan::take(&p_rev.plan_id, 2).is_err()
+    );
     let _ = std::fs::remove_dir_all(&plan_game);
 
     // 可选的真实安装验证：ASTRAL_LIVE_FORGE="mc|ver|dir" 或 "kind|mc|ver|dir"
@@ -3536,12 +3630,17 @@ pub fn selftest() -> i32 {
             "diagnosis report is structured",
             r.worst == "error"
                 && r.local_only
-                && r.summary.as_deref().map(|s| s.contains("可疑")).unwrap_or(false)
+                && r.summary
+                    .as_deref()
+                    .map(|s| s.contains("可疑"))
+                    .unwrap_or(false)
                 && !r.next_steps.is_empty()
                 && r.next_steps.len() <= 4
                 && r.basis.contains("本地规则")
-                && r.findings.iter().all(|f| !f.cause.is_empty()
-                    && matches!(f.confidence, "high" | "medium" | "low"))
+                && r.findings
+                    .iter()
+                    .all(|f| !f.cause.is_empty()
+                        && matches!(f.confidence, "high" | "medium" | "low"))
                 && r.findings
                     .iter()
                     .any(|f| f.id == "java-version" && f.category == "java")
@@ -3708,7 +3807,9 @@ pub fn selftest() -> i32 {
             cover: None,
             created_at: time::now_iso(),
         };
-        let made = instance::create(&g, &meta).map(|i| i.id).unwrap_or_default();
+        let made = instance::create(&g, &meta)
+            .map(|i| i.id)
+            .unwrap_or_default();
         let stats_fn = |_: &str| instance::PlayStats::default();
         let one = java_audit::check_instance(&g, &made, &stats_fn);
         check!(
@@ -3716,7 +3817,10 @@ pub fn selftest() -> i32 {
             one.as_ref()
                 .map(|c| !c.exists && c.problem.is_some() && c.suggestion.is_some())
                 .unwrap_or(false)
-                && one.as_ref().map(|c| c.source == "instance").unwrap_or(false)
+                && one
+                    .as_ref()
+                    .map(|c| c.source == "instance")
+                    .unwrap_or(false)
         );
         let full = java_audit::audit(&g, &stats_fn);
         check!(
@@ -3842,10 +3946,11 @@ pub fn selftest() -> i32 {
             };
             let inst = instance::create(&game, &meta)?;
             let saves = std::path::Path::new(&inst.dirs.saves);
-            std::fs::create_dir_all(saves.join("TestWorld"))
-                .map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(saves.join("TestWorld")).map_err(|e| e.to_string())?;
             std::fs::write(saves.join("TestWorld/level.dat"), b"x").map_err(|e| e.to_string())?;
-            let world = worlds::list(saves).into_iter().next()
+            let world = worlds::list(saves)
+                .into_iter()
+                .next()
                 .ok_or_else(|| "INTERNAL|测试存档没被识别".to_string())?;
 
             let mut out = Vec::new();
@@ -3854,7 +3959,15 @@ pub fn selftest() -> i32 {
                 ("shaderpack", "HVnmMxH1", None),
                 ("datapack", "8oi3bsk5", Some(world.world_id.as_str())),
             ] {
-                match resources::live_probe(&game, &inst.id, kind, pid, wid, "1.20.1", Some("fabric")) {
+                match resources::live_probe(
+                    &game,
+                    &inst.id,
+                    kind,
+                    pid,
+                    wid,
+                    "1.20.1",
+                    Some("fabric"),
+                ) {
                     Ok(p) => out.push(format!("{kind} ok: {p}")),
                     Err(e) => out.push(format!("{kind} failed: {e}")),
                 }
@@ -3943,9 +4056,9 @@ pub fn selftest() -> i32 {
                             &*net::never_cancel(),
                             |_, _, _, _| {},
                         ) {
-                            Ok((new, removed)) => log.push_str(&format!(
-                                "LIVE update-apply ok: {removed} -> {new}\n"
-                            )),
+                            Ok((new, removed)) => {
+                                log.push_str(&format!("LIVE update-apply ok: {removed} -> {new}\n"))
+                            }
                             Err(e) => {
                                 fails += 1;
                                 log.push_str(&format!("LIVE update-apply failed: {e}\n"));
@@ -4021,7 +4134,10 @@ pub fn selftest() -> i32 {
     let rt = task::create("retry-demo", None, None, "重试演示");
     check!("retry rejects running", retry_spec_of(&rt.task_id).is_err());
     task::fail(&rt.task_id, "NETWORK|演示失败".into());
-    check!("retry rejects missing spec", retry_spec_of(&rt.task_id).is_err());
+    check!(
+        "retry rejects missing spec",
+        retry_spec_of(&rt.task_id).is_err()
+    );
     task::set_retry_spec(&rt.task_id, serde_json::json!({"kind":"unknown-kind"}));
     check!(
         "retry rejects unknown kind",
@@ -4029,10 +4145,15 @@ pub fn selftest() -> i32 {
     );
     let ok_spec = task::create("retry-demo-2", None, None, "重试演示2");
     task::fail(&ok_spec.task_id, "NETWORK|x".into());
-    task::set_retry_spec(&ok_spec.task_id, serde_json::json!({"kind":"install","gameVersion":"1.2.3"}));
+    task::set_retry_spec(
+        &ok_spec.task_id,
+        serde_json::json!({"kind":"install","gameVersion":"1.2.3"}),
+    );
     check!(
         "retry accepts known kind",
-        retry_spec_of(&ok_spec.task_id).map(|(k, _)| k == "install").unwrap_or(false)
+        retry_spec_of(&ok_spec.task_id)
+            .map(|(k, _)| k == "install")
+            .unwrap_or(false)
     );
 
     // 可选的真实 JDK 下载：ASTRAL_LIVE_JDK="major|gameDir"
@@ -4091,7 +4212,9 @@ pub fn selftest() -> i32 {
     task::finish(&pt.task_id, serde_json::json!({"ok": true}));
     check!(
         "phase set on finish",
-        task::get(&pt.task_id).map(|x| x.phase == "done").unwrap_or(false)
+        task::get(&pt.task_id)
+            .map(|x| x.phase == "done")
+            .unwrap_or(false)
     );
 
     // 健康检查：跟着 inheritsFrom 看 jar / 依赖库 / 资源索引
@@ -4117,9 +4240,15 @@ pub fn selftest() -> i32 {
     let _ = std::fs::create_dir_all(hgame.join("versions/1.20.1"));
     let _ = std::fs::write(hgame.join("versions/1.20.1/1.20.1.jar"), b"x");
     let _ = std::fs::create_dir_all(hgame.join("libraries/org/ow2/asm/asm/9.5"));
-    let _ = std::fs::write(hgame.join("libraries/org/ow2/asm/asm/9.5/asm-9.5.jar"), b"x");
+    let _ = std::fs::write(
+        hgame.join("libraries/org/ow2/asm/asm/9.5/asm-9.5.jar"),
+        b"x",
+    );
     let _ = std::fs::create_dir_all(hgame.join("libraries/net/forge/fmlloader/1.0"));
-    let _ = std::fs::write(hgame.join("libraries/net/forge/fmlloader/1.0/fmlloader-1.0.jar"), b"x");
+    let _ = std::fs::write(
+        hgame.join("libraries/net/forge/fmlloader/1.0/fmlloader-1.0.jar"),
+        b"x",
+    );
     let _ = std::fs::create_dir_all(hgame.join("assets/indexes"));
     let _ = std::fs::write(hgame.join("assets/indexes/5.json"), b"{}");
     let healthy = instance::health_for_test(&hgame, "1.20.1-forge-47.2.0");
@@ -4175,7 +4304,10 @@ pub fn selftest() -> i32 {
 
     // #8 已失效 PID 的会话不能被当成"还在运行"
     let dead = session::begin("inst_dead", "task_dead", 0);
-    check!("session dead not active", session::active(Some("inst_dead")).is_none());
+    check!(
+        "session dead not active",
+        session::active(Some("inst_dead")).is_none()
+    );
     check!(
         "session dead reconciled",
         session::list(Some("inst_dead"), 1)
@@ -4203,7 +4335,10 @@ pub fn selftest() -> i32 {
     let r = resources::prepare(&compat_game, req, &play_stats);
     check!(
         "resource rejects compat instance",
-        r.as_ref().err().map(|e| e.starts_with("UNSUPPORTED")).unwrap_or(false)
+        r.as_ref()
+            .err()
+            .map(|e| e.starts_with("UNSUPPORTED"))
+            .unwrap_or(false)
     );
     let _ = std::fs::remove_dir_all(&compat_game);
 
@@ -4215,12 +4350,16 @@ pub fn selftest() -> i32 {
             && core::forge_version_id("neoforge", "1.20.1", "47.1.106") == "1.20.1-forge-47.1.106"
     );
     // 已装过时直接复用，不发网络请求
-    let forge_game = std::env::temp_dir().join(format!("astral-forge-reuse-{}", std::process::id()));
+    let forge_game =
+        std::env::temp_dir().join(format!("astral-forge-reuse-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&forge_game);
     let vid = "1.20.1-forge-47.2.0";
     let _ = std::fs::create_dir_all(forge_game.join("versions").join(vid));
     let _ = std::fs::write(
-        forge_game.join("versions").join(vid).join(format!("{vid}.json")),
+        forge_game
+            .join("versions")
+            .join(vid)
+            .join(format!("{vid}.json")),
         r#"{"id":"1.20.1-forge-47.2.0","inheritsFrom":"1.20.1"}"#,
     );
     let reused = core::install_forge_like("forge", "1.20.1", "47.2.0", &forge_game, |_| {});
@@ -4295,10 +4434,7 @@ pub fn selftest() -> i32 {
         .as_ref()
         .map(|p| !p.components.is_empty())
         .unwrap_or(false);
-    check!(
-        "plan rejects optifine",
-        opti_blocking && !opti_has_comp
-    );
+    check!("plan rejects optifine", opti_blocking && !opti_has_comp);
     let _ = std::fs::remove_dir_all(&comp_game);
     // 可选：真机验证安装计划的光影组件挑选
     // ASTRAL_LIVE_PLAN="gameDir|mc|loaderKind|loaderVer|shader"
@@ -4325,7 +4461,10 @@ pub fn selftest() -> i32 {
                         p.issues.iter().filter(|i| i.blocking).count()
                     ));
                     for c in &p.components {
-                        log.push_str(&format!("  component {} {} {}\n", c.id, c.label, c.version_id));
+                        log.push_str(&format!(
+                            "  component {} {} {}\n",
+                            c.id, c.label, c.version_id
+                        ));
                     }
                     for i in p.issues.iter().filter(|i| i.blocking) {
                         log.push_str(&format!("  blocking {}: {}\n", i.code, i.message));
@@ -4444,12 +4583,21 @@ pub fn selftest() -> i32 {
                     log.push_str(&format!(
                         "LIVE component versions={} first={} {} recommended={}\n",
                         list.len(),
-                        list.first().map(|v| v.version_id.clone()).unwrap_or_default(),
-                        list.first().map(|v| v.version_number.clone()).unwrap_or_default(),
+                        list.first()
+                            .map(|v| v.version_id.clone())
+                            .unwrap_or_default(),
+                        list.first()
+                            .map(|v| v.version_number.clone())
+                            .unwrap_or_default(),
                         list.first().map(|v| v.recommended).unwrap_or(false)
                     ));
                     // 用别的组件版本 id 去校验，必须被拒
-                    let foreign = components::validate_choice(parts[0], "NotARealVersionId", parts[1], Some(parts[2]));
+                    let foreign = components::validate_choice(
+                        parts[0],
+                        "NotARealVersionId",
+                        parts[1],
+                        Some(parts[2]),
+                    );
                     log.push_str(&format!(
                         "LIVE foreign version rejected={}\n",
                         foreign.is_err()
@@ -4585,7 +4733,10 @@ pub fn selftest() -> i32 {
             )
             .map(|r| r.bytes == size && r.reused == false)
             .unwrap_or(false);
-            check!("download plain + sha1", ok && net::sha1_file(&dest).ok().as_deref() == Some(want.as_str()));
+            check!(
+                "download plain + sha1",
+                ok && net::sha1_file(&dest).ok().as_deref() == Some(want.as_str())
+            );
 
             // 2) 已存在且哈希正确时不联网
             let srv_served_before = srv.served.load(std::sync::atomic::Ordering::SeqCst);
@@ -4615,8 +4766,12 @@ pub fn selftest() -> i32 {
             );
             check!(
                 "download rejects bad hash",
-                bad.is_err() && !bad_dest.exists()
-                    && bad.as_ref().map(|_| false).unwrap_or_else(|e| e.starts_with("HASH_MISMATCH"))
+                bad.is_err()
+                    && !bad_dest.exists()
+                    && bad
+                        .as_ref()
+                        .map(|_| false)
+                        .unwrap_or_else(|e| e.starts_with("HASH_MISMATCH"))
             );
 
             // 4) 取消：慢速传输中途取消，必须真的停下并保留 .part
@@ -4642,7 +4797,8 @@ pub fn selftest() -> i32 {
                 |_, _| {},
             );
             let elapsed = started.elapsed();
-            let part_kept = std::path::PathBuf::from(format!("{}.part", slow_dest.to_string_lossy()));
+            let part_kept =
+                std::path::PathBuf::from(format!("{}.part", slow_dest.to_string_lossy()));
             let part_len = std::fs::metadata(&part_kept).map(|m| m.len()).unwrap_or(0);
             check!(
                 "download cancel stops early",
@@ -4684,7 +4840,9 @@ pub fn selftest() -> i32 {
             );
             check!(
                 "download retries 503",
-                flaky.map(|r| r.attempts == 3 && r.bytes == 128 * 1024).unwrap_or(false)
+                flaky
+                    .map(|r| r.attempts == 3 && r.bytes == 128 * 1024)
+                    .unwrap_or(false)
             );
 
             // 7) 重定向到白名单外必须被拦住
@@ -4696,7 +4854,10 @@ pub fn selftest() -> i32 {
                 &*net::never_cancel(),
                 |_, _| {},
             );
-            check!("download blocks bad redirect", redir.is_err() && !redir_dest.exists());
+            check!(
+                "download blocks bad redirect",
+                redir.is_err() && !redir_dest.exists()
+            );
 
             // 8) 同一目标并发写：第二个任务必须等，不能互相覆盖
             let same = dl.join("same.bin");
@@ -4745,10 +4906,8 @@ pub fn selftest() -> i32 {
             );
 
             // 10) .part 元数据在取消后写入，且 URL 变了不会误续传
-            let meta_path = std::path::PathBuf::from(format!(
-                "{}.part.json",
-                slow_dest.to_string_lossy()
-            ));
+            let meta_path =
+                std::path::PathBuf::from(format!("{}.part.json", slow_dest.to_string_lossy()));
             check!("part meta cleaned after commit", !meta_path.exists());
 
             // 11) 并发上限：12 个文件同时下，活跃数不能超过配置上限
@@ -4767,9 +4926,7 @@ pub fn selftest() -> i32 {
                     };
                     let mut max_seen = 0usize;
                     let r = net::download(&url, &dest, &opts, &*net::never_cancel(), |_, _| {
-                        let a = net::scheduler_stats()["active"]
-                            .as_u64()
-                            .unwrap_or(0) as usize;
+                        let a = net::scheduler_stats()["active"].as_u64().unwrap_or(0) as usize;
                         if a > max_seen {
                             max_seen = a;
                         }
@@ -4874,7 +5031,9 @@ pub fn selftest() -> i32 {
                 "cache serves second copy offline",
                 after_first > before_hits
                     && after_second == after_first
-                    && second.map(|r| r.reused && r.bytes == 200 * 1024).unwrap_or(false)
+                    && second
+                        .map(|r| r.reused && r.bytes == 200 * 1024)
+                        .unwrap_or(false)
                     && net::sha1_file(&c2).ok().as_deref() == Some(csha.as_str())
             );
 
@@ -4935,12 +5094,8 @@ pub fn selftest() -> i32 {
 
                 let inst = dl.join("evil-inst");
                 let _ = std::fs::create_dir_all(&inst);
-                let r = modpack::extract_overrides(
-                    &zip_path,
-                    &inst,
-                    &*net::never_cancel(),
-                    |_, _| {},
-                );
+                let r =
+                    modpack::extract_overrides(&zip_path, &inst, &*net::never_cancel(), |_, _| {});
                 let escaped = dl.join("escaped.txt");
                 check!(
                     "modpack rejects zip traversal",
@@ -4954,17 +5109,14 @@ pub fn selftest() -> i32 {
                 let f = std::fs::File::create(&zip_path).unwrap();
                 let mut zw = zip::ZipWriter::new(f);
                 let opts = zip::write::SimpleFileOptions::default();
-                zw.add_symlink("overrides/link", "/etc/passwd", opts).unwrap();
+                zw.add_symlink("overrides/link", "/etc/passwd", opts)
+                    .unwrap();
                 zw.finish().unwrap();
 
                 let inst = dl.join("symlink-inst");
                 let _ = std::fs::create_dir_all(&inst);
-                let r = modpack::extract_overrides(
-                    &zip_path,
-                    &inst,
-                    &*net::never_cancel(),
-                    |_, _| {},
-                );
+                let r =
+                    modpack::extract_overrides(&zip_path, &inst, &*net::never_cancel(), |_, _| {});
                 check!("modpack rejects symlink entries", r.is_err());
             }
 
@@ -4983,12 +5135,8 @@ pub fn selftest() -> i32 {
 
                 let inst = dl.join("good-inst");
                 let _ = std::fs::create_dir_all(&inst);
-                let r = modpack::extract_overrides(
-                    &zip_path,
-                    &inst,
-                    &*net::never_cancel(),
-                    |_, _| {},
-                );
+                let r =
+                    modpack::extract_overrides(&zip_path, &inst, &*net::never_cancel(), |_, _| {});
                 check!(
                     "modpack extracts normal overrides",
                     r == Ok(2)
@@ -5074,7 +5222,8 @@ pub fn selftest() -> i32 {
                     zw.write_all(b"{}").unwrap();
                     zw.finish().unwrap();
                 }
-                match modpack::prepare_local(&g, &pack.to_string_lossy(), Some("我的包".into())) {
+                match modpack::prepare_local(&g, &pack.to_string_lossy(), Some("我的包".into()))
+                {
                     Ok(plan) => check!(
                         "modpack local import parses",
                         plan.info.source == "local"
@@ -5130,7 +5279,10 @@ pub fn selftest() -> i32 {
                 )
                 .unwrap();
                 let (need, avail) = modpack::disk_precheck(&idx, &g);
-                log.push_str(&format!("LIVE disk precheck: need={need} avail={avail:?} dir={}\n", g.display()));
+                log.push_str(&format!(
+                    "LIVE disk precheck: need={need} avail={avail:?} dir={}\n",
+                    g.display()
+                ));
                 check!(
                     "modpack disk precheck reports space",
                     need == 2048 && avail.map(|a| a > 0).unwrap_or(false)
@@ -5350,12 +5502,17 @@ pub fn selftest() -> i32 {
 
                 // 永久删除：必须显式确认
                 let del2 = instance::delete(&g, &new_id, true);
-                let names: Vec<String> = recycle::list(&g).iter().map(|e| e.trash_name.clone()).collect();
+                let names: Vec<String> = recycle::list(&g)
+                    .iter()
+                    .map(|e| e.trash_name.clone())
+                    .collect();
                 let purged = recycle::purge(&g, &names);
                 check!(
                     "trash purge removes only listed",
                     del2.is_ok()
-                        && purged.map(|p| p.removed == 1 && p.failed.is_empty()).unwrap_or(false)
+                        && purged
+                            .map(|p| p.removed == 1 && p.failed.is_empty())
+                            .unwrap_or(false)
                         && recycle::list(&g).is_empty()
                         && instance::read_meta(&g, &orig_id).is_some()
                 );
@@ -5365,7 +5522,10 @@ pub fn selftest() -> i32 {
             {
                 let g = dl.join("trash-game");
                 let bad = recycle::restore(&g, "../escape");
-                let names: Vec<String> = recycle::list(&g).iter().map(|e| e.trash_name.clone()).collect();
+                let names: Vec<String> = recycle::list(&g)
+                    .iter()
+                    .map(|e| e.trash_name.clone())
+                    .collect();
                 let _ = names;
                 check!("trash rejects traversal", bad.is_err());
             }
@@ -5391,7 +5551,10 @@ pub fn selftest() -> i32 {
                     &*net::never_cancel(),
                     |_, _| {},
                 );
-                let bid = made.as_ref().map(|b| b.backup_id.clone()).unwrap_or_default();
+                let bid = made
+                    .as_ref()
+                    .map(|b| b.backup_id.clone())
+                    .unwrap_or_default();
                 let ok_make = made
                     .as_ref()
                     .map(|b| b.file_count == 2 && b.bytes > 0 && !b.sha256.is_empty())
@@ -5444,7 +5607,9 @@ pub fn selftest() -> i32 {
                     .unwrap_or(false);
                 check!(
                     "world restore needs overwrite then restores",
-                    preview.map(|p| p.target_exists && p.blockers.is_empty()).unwrap_or(false)
+                    preview
+                        .map(|p| p.target_exists && p.blockers.is_empty())
+                        .unwrap_or(false)
                         && blocked_without.is_err()
                         && restored.map(|r| r.restored_files == 2).unwrap_or(false)
                         && level == "LEVELDATA"
@@ -5484,7 +5649,9 @@ pub fn selftest() -> i32 {
                     cover: None,
                     created_at: time::now_iso(),
                 };
-                let src_id = instance::create(&g, &meta).map(|i| i.id).unwrap_or_default();
+                let src_id = instance::create(&g, &meta)
+                    .map(|i| i.id)
+                    .unwrap_or_default();
                 let src_dir = instance::instance_dir(&g, &src_id);
                 let _ = std::fs::write(src_dir.join("mods").join("a.jar"), b"MOD");
                 let _ = std::fs::write(src_dir.join("config").join("c.json"), b"{}");
@@ -5506,14 +5673,19 @@ pub fn selftest() -> i32 {
                     .map(|p| p.total_files == 2 && p.items.len() == 2 && p.kind == "copy")
                     .unwrap_or(false);
                 let done = migrate::execute(&g, &plan_id, &*net::never_cancel(), |_, _| {});
-                let new_id = done.as_ref().map(|r| r.instance_id.clone()).unwrap_or_default();
+                let new_id = done
+                    .as_ref()
+                    .map(|r| r.instance_id.clone())
+                    .unwrap_or_default();
                 let new_dir = instance::instance_dir(&g, &new_id);
                 let copied_mods = new_dir.join("mods").join("a.jar").is_file();
                 let copied_config = new_dir.join("config").join("c.json").is_file();
                 let no_worlds = !new_dir.join("saves").join("w1").join("level.dat").exists();
                 let no_packs = !new_dir.join("resourcepacks").join("r.zip").exists();
                 let meta_ok = instance::read_meta(&g, &new_id)
-                    .map(|m| m.memory_mb == Some(4096) && m.loader_kind.as_deref() == Some("fabric"))
+                    .map(|m| {
+                        m.memory_mb == Some(4096) && m.loader_kind.as_deref() == Some("fabric")
+                    })
                     .unwrap_or(false);
                 check!(
                     "instance copy respects categories",
@@ -5549,7 +5721,10 @@ pub fn selftest() -> i32 {
                     .map(|p| p.kind == "import" && p.total_files == 2)
                     .unwrap_or(false);
                 let done = migrate::execute(&g, &plan_id, &*net::never_cancel(), |_, _| {});
-                let inst_id = done.as_ref().map(|r| r.instance_id.clone()).unwrap_or_default();
+                let inst_id = done
+                    .as_ref()
+                    .map(|r| r.instance_id.clone())
+                    .unwrap_or_default();
                 let meta = instance::read_meta(&g, &inst_id);
                 check!(
                     "version import keeps original files",
