@@ -230,6 +230,11 @@ fn is_terminal(state: &str) -> bool {
 }
 
 /// 改状态：revision +1 并推帧；终态后忽略（防止迟到的进度覆盖结果）
+///
+/// 另外守住两条不变量：
+/// 1. 终态（done / error / cancelled）一旦写入，任何迟到的进度或事件都不能改写它；
+/// 2. 已请求取消（cancelling）的任务不会被旧的进度帧改回 running —— 否则界面会
+///    在"正在取消"和"下载中"之间来回跳。
 pub fn update(task_id: &str, f: impl FnOnce(&mut Task)) {
     let (updated, changed) = {
         let mut s = store().lock().unwrap();
@@ -239,7 +244,17 @@ pub fn update(task_id: &str, f: impl FnOnce(&mut Task)) {
         if is_terminal(&t.state) {
             return;
         }
+        let was_cancelling = t.cancelling;
+        let before = t.state.clone();
         f(t);
+        // 取消请求已发出时，进度更新不许把状态改回 running
+        if was_cancelling && !is_terminal(&t.state) {
+            t.state = "cancelling".into();
+        }
+        // 状态只能往前走：queued -> running -> 终态
+        if before == "running" && t.state == "queued" {
+            t.state = "running".into();
+        }
         t.revision += 1;
         let changed = t.state != "running";
         let snap = t.clone();
@@ -291,6 +306,7 @@ pub fn finish(task_id: &str, result: serde_json::Value) {
         t.ended_at = Some(now_iso());
         t.cancelling = false;
     });
+    release_token(task_id);
 }
 
 pub fn fail(task_id: &str, encoded: String) {
@@ -305,6 +321,7 @@ pub fn fail(task_id: &str, encoded: String) {
         t.ended_at = Some(now_iso());
         t.cancelling = false;
     });
+    release_token(task_id);
 }
 
 /// 请求取消：置标记并通知 worker；worker 确认停止后调用 [`cancelled`]。
@@ -367,6 +384,37 @@ pub fn cancelled(task_id: &str) {
         t.ended_at = Some(now_iso());
         t.cancelling = false;
     });
+    release_token(task_id);
+}
+
+/// 任务结束后释放取消令牌，避免 `tokens` 表一直涨。
+///
+/// 保留一小段时间没有意义：终态任务不会再被取消。
+fn release_token(task_id: &str) {
+    if let Ok(mut s) = store().lock() {
+        s.tokens.remove(task_id);
+    }
+}
+
+/// 统计：有多少任务、多少还在跑、多少令牌。
+///
+/// 自检与诊断页用它确认没有泄漏。
+pub fn health() -> serde_json::Value {
+    let s = store().lock().unwrap();
+    let running = s
+        .tasks
+        .values()
+        .filter(|t| !is_terminal(&t.state))
+        .count();
+    let cancelling = s.tasks.values().filter(|t| t.cancelling).count();
+    serde_json::json!({
+        "tasks": s.tasks.len(),
+        "running": running,
+        "cancelling": cancelling,
+        "tokens": s.tokens.len(),
+        "bootId": s.boot_id,
+        "maxTasks": MAX_TASKS,
+    })
 }
 
 /// worker 在阶段边界调用：已请求取消则返回错误串

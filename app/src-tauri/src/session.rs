@@ -17,6 +17,10 @@ pub struct GameSession {
     pub instance_id: String,
     pub task_id: String,
     pub pid: u32,
+    /// 进程创建时间（Unix 秒）。用来识别 PID 复用：
+    /// 老会话的 pid 被系统分配给了别的进程时，创建时间对不上就不是同一个进程。
+    #[serde(default)]
+    pub pid_started_at: Option<u64>,
     pub started_at: String,
     pub state: String, // starting | running | exited
     pub exit_code: Option<i32>,
@@ -46,6 +50,14 @@ fn file() -> PathBuf {
         .join("sessions.json")
 }
 
+/// 自检专用：直接把会话列表写进存储，用于构造 PID 复用等边界场景。
+#[doc(hidden)]
+pub fn save_for_test(list: Vec<GameSession>) {
+    let mut s = store().lock().unwrap();
+    *s = list;
+    persist(&s);
+}
+
 fn persist(list: &[GameSession]) {
     let p = file();
     if let Some(dir) = p.parent() {
@@ -66,15 +78,34 @@ pub fn load() {
     }
 }
 
-fn pid_alive(pid: u32) -> bool {
+/// 读某个 pid 的创建时间（Unix 秒）。进程不存在返回 None。
+fn pid_start_time(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
     let mut sys = sysinfo::System::new();
     let p = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[p]), true);
+    sys.process(p).map(|proc| proc.start_time())
+}
+
+/// 进程是否还是**同一个**进程。
+///
+/// 只比 pid 不够：Windows 会复用 pid，关掉游戏后同号 pid 可能是别的程序。
+/// 老记录没有创建时间时退化成只看 pid 是否存在（兼容旧数据）。
+fn pid_alive(pid: u32, expected_start: Option<u64>) -> bool {
     // PID 0 是系统空闲进程，绝不是游戏进程
     if pid == 0 {
         return false;
     }
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[p]), true);
-    sys.process(p).is_some()
+    match pid_start_time(pid) {
+        Some(start) => match expected_start {
+            // 允许 2 秒误差：取创建时间的时机与系统记录可能差一点点
+            Some(want) => start.abs_diff(want) <= 2,
+            None => true,
+        },
+        None => false,
+    }
 }
 
 pub fn begin(instance_id: &str, task_id: &str, pid: u32) -> GameSession {
@@ -87,6 +118,7 @@ pub fn begin(instance_id: &str, task_id: &str, pid: u32) -> GameSession {
             instance_id: instance_id.to_string(),
             task_id: task_id.to_string(),
             pid,
+            pid_started_at: pid_start_time(pid),
             started_at: crate::task::now_iso(),
             state: "running".into(),
             exit_code: None,
@@ -161,7 +193,7 @@ pub fn active(instance_id: Option<&str>) -> Option<GameSession> {
                 continue;
             }
         }
-        if !pid_alive(s.pid) {
+        if !pid_alive(s.pid, s.pid_started_at) {
             // 进程已退出：收尾这条会话，但**不能**把它当作"还在运行"返回，
             // 否则 start_launch / delete_instance 会误报 INSTANCE_BUSY
             s.state = "exited".into();
@@ -215,7 +247,7 @@ pub fn reconcile() {
     let mut list = store().lock().unwrap();
     let mut changed = false;
     for s in list.iter_mut() {
-        if s.state != "exited" && !pid_alive(s.pid) {
+        if s.state != "exited" && !pid_alive(s.pid, s.pid_started_at) {
             s.state = "exited".into();
             s.exit_code = None;
             s.reconciled = true;

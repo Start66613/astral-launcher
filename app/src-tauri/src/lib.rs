@@ -2048,6 +2048,34 @@ pub fn selftest() -> i32 {
     );
     check!("task persisted", task_dir.join("tasks.json").exists());
 
+    // 取消令牌不能泄漏：任务进终态后 tokens 里不该还留着它
+    check!(
+        "task token released",
+        task::health()["tokens"].as_u64().unwrap_or(99) < task::health()["tasks"].as_u64().unwrap_or(0)
+            || task::health()["tokens"].as_u64() == Some(0)
+    );
+
+    // 状态单调：取消请求发出后，迟到的进度不能把它改回 running
+    let tc2 = task::create("install", None, Some("1.20.1".into()), "取消单调测试");
+    task::start(&tc2.task_id);
+    let _ = task::cancel_task(&tc2.task_id);
+    task::progress(&tc2.task_id, "download", "迟到的进度", 1, 2);
+    check!(
+        "task cancelling not reverted by progress",
+        task::get(&tc2.task_id)
+            .map(|t| t.state != "running")
+            .unwrap_or(false)
+    );
+    task::cancelled(&tc2.task_id);
+    check!(
+        "task health shape",
+        task::health()["tasks"].is_number()
+            && task::health()["running"].is_number()
+            && task::health()["cancelling"].is_number()
+            && task::health()["tokens"].is_number()
+            && task::health()["bootId"].is_string()
+    );
+
     let sess = session::begin("inst_selftest", &t.task_id, 0);
     check!("session begin", !sess.session_id.is_empty());
     let exited = session::mark_exited(&sess.session_id, Some(0));
@@ -2073,6 +2101,39 @@ pub fn selftest() -> i32 {
             .map(|s| s.reconciled && s.exit_code.is_none() && s.state == "exited")
             .unwrap_or(false)
     );
+
+    // PID 复用：同一个 pid 但创建时间对不上，就不能算"还在运行"
+    {
+        let mut s = session::begin("inst_pidreuse", "task_pid", 0);
+        // 真实 pid 但创建时间故意写错（比真实时间早 1 小时）
+        let me = std::process::id();
+        s.pid = me;
+        s.pid_started_at = Some(1);
+        session::save_for_test(vec![s.clone()]);
+        session::reconcile();
+        let listed = session::list(Some("inst_pidreuse"), 1);
+        check!(
+            "session detects pid reuse",
+            listed
+                .first()
+                .map(|x| x.state == "exited" && x.reconciled)
+                .unwrap_or(false)
+        );
+        // 创建时间对得上时，活着的进程不能被误判为已退出
+        let mut s2 = session::begin("inst_pidalive", "task_pid2", me);
+        let real_start = s2.pid_started_at;
+        s2.pid_started_at = real_start;
+        session::save_for_test(vec![s2]);
+        session::reconcile();
+        let listed2 = session::list(Some("inst_pidalive"), 1);
+        check!(
+            "session keeps live process",
+            listed2
+                .first()
+                .map(|x| x.state != "exited")
+                .unwrap_or(false)
+        );
+    }
 
     let save = game.join("saves").join("World1");
     let _ = std::fs::create_dir_all(&save);
