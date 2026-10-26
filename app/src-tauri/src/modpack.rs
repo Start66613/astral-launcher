@@ -22,6 +22,22 @@ pub struct ModpackInfo {
     pub loader_version: Option<String>,
     pub file_count: u32,
     pub total_bytes: u64,
+    /// 需要装的客户端文件数（不含 optional / unsupported）
+    pub client_files: u32,
+    /// 可选文件数（玩家勾选后才装）
+    pub optional_files: u32,
+    /// 明确声明不支持客户端的文件数（永远不装）
+    pub unsupported_files: u32,
+    /// 只对服务端有意义的文件数（env.client = unsupported）
+    pub server_only_files: u32,
+    /// overrides / client-overrides 里的条目数（只统计，安装时才解压）
+    pub override_entries: u32,
+    /// 安装来源：`modrinth` 或 `local`
+    pub source: String,
+    /// Modrinth 项目 id（本地导入的包为空）
+    pub project_id: String,
+    /// Modrinth 版本 id（本地导入的包为空）
+    pub version_id: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -83,6 +99,29 @@ pub struct IndexFile {
     pub size: u64,
     pub sha1: Option<String>,
     pub sha512: Option<String>,
+    /// mrpack 的 `env.client`：required / optional / unsupported
+    pub env_client: String,
+    /// mrpack 的 `env.server`：required / optional / unsupported
+    pub env_server: String,
+}
+
+impl IndexFile {
+    /// 客户端要不要装这个文件
+    ///
+    /// - `unsupported`：明确不支持客户端 → 跳过
+    /// - `optional`：可选 → 默认跳过，玩家勾了才装
+    /// - 其他：装
+    pub fn wanted_on_client(&self, include_optional: bool) -> bool {
+        match self.env_client.as_str() {
+            "unsupported" => false,
+            "optional" => include_optional,
+            _ => true,
+        }
+    }
+
+    pub fn is_optional(&self) -> bool {
+        self.env_client == "optional"
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -94,6 +133,16 @@ pub struct ModpackIndex {
     pub loader_version: Option<String>,
     pub files: Vec<IndexFile>,
     pub total_bytes: u64,
+    /// 需要装的客户端文件数（不含 optional/unsupported）
+    pub client_files: u32,
+    /// 可选文件数
+    pub optional_files: u32,
+    /// 明确不支持客户端的文件数
+    pub unsupported_files: u32,
+    /// 只对服务端有意义的文件数
+    pub server_only_files: u32,
+    /// 整合包内 overrides 条目数（只统计，不解压）
+    pub override_entries: u32,
 }
 
 /// 校验 index 里的相对路径：必须相对、无 `..`、无反斜杠、无盘符
@@ -185,6 +234,18 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
             if total > 64 * 1024 * 1024 * 1024 {
                 return Err("INVALID_VALUE|整合包声明体积异常（超过 64 GiB）".into());
             }
+            // env 只认三个合法值，其他一律当 required（保守：宁可装也别漏）
+            let env_of = |key: &str| -> String {
+                match f
+                    .get("env")
+                    .and_then(|e| e.get(key))
+                    .and_then(|v| v.as_str())
+                {
+                    Some("unsupported") => "unsupported".into(),
+                    Some("optional") => "optional".into(),
+                    _ => "required".into(),
+                }
+            };
             files.push(IndexFile {
                 path: path.to_string(),
                 url,
@@ -199,6 +260,8 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
                     .and_then(|h| h.get("sha1"))
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string()),
+                env_client: env_of("client"),
+                env_server: env_of("server"),
             });
         }
     }
@@ -206,6 +269,17 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
     if files.is_empty() {
         return Err("INVALID_VALUE|整合包没有任何可安装文件".into());
     }
+
+    let client_files = files.iter().filter(|f| f.wanted_on_client(false)).count() as u32;
+    let optional_files = files.iter().filter(|f| f.is_optional()).count() as u32;
+    let unsupported_files = files
+        .iter()
+        .filter(|f| f.env_client == "unsupported")
+        .count() as u32;
+    let server_only_files = files
+        .iter()
+        .filter(|f| f.env_server != "unsupported" && f.env_client == "unsupported")
+        .count() as u32;
 
     Ok(ModpackIndex {
         name: v
@@ -227,6 +301,11 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
         loader_version,
         total_bytes: total,
         files,
+        client_files,
+        optional_files,
+        unsupported_files,
+        server_only_files,
+        override_entries: 0,
     })
 }
 
@@ -245,7 +324,28 @@ pub fn read_index(pack: &Path) -> Result<ModpackIndex, String> {
     entry
         .read_to_string(&mut text)
         .map_err(|e| format!("INTERNAL|读取 index 失败|{e}"))?;
-    parse_index(&text)
+    let mut index = parse_index(&text)?;
+    // 顺便数一下 overrides 条目（只数名字，不解压）
+    index.override_entries = count_overrides(pack).unwrap_or(0);
+    Ok(index)
+}
+
+/// 数一下 overrides / client-overrides 里有多少条目
+fn count_overrides(pack: &Path) -> Result<u32, String> {
+    let file = std::fs::File::open(pack).map_err(|e| format!("PERMISSION|打不开整合包|{e}"))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("INTERNAL|不是有效 zip|{e}"))?;
+    let mut n = 0u32;
+    for i in 0..zip.len() {
+        if let Ok(entry) = zip.by_index(i) {
+            let name = entry.name().map(|c| c.to_string()).unwrap_or_default();
+            if (name.starts_with("overrides/") || name.starts_with("client-overrides/"))
+                && !name.ends_with('/')
+            {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
 }
 
 /// 规划安装：下载 mrpack 并解析，不创建实例
@@ -318,6 +418,14 @@ pub fn prepare(game: &Path, req: ModpackRequest) -> Result<ModpackPlan, String> 
         loader_version: index.loader_version.clone(),
         file_count: index.files.len() as u32,
         total_bytes: index.total_bytes,
+        client_files: index.client_files,
+        optional_files: index.optional_files,
+        unsupported_files: index.unsupported_files,
+        server_only_files: index.server_only_files,
+        override_entries: index.override_entries,
+        source: "modrinth".to_string(),
+        project_id: req.project_id.clone(),
+        version_id: req.version_id.clone(),
     };
 
     let plan = ModpackPlan {
@@ -339,6 +447,127 @@ pub fn prepare(game: &Path, req: ModpackRequest) -> Result<ModpackPlan, String> 
             plan: plan.clone(),
             pack_path,
             memory_mb: req.memory_mb,
+            created_ms: now,
+        },
+    );
+    Ok(plan)
+}
+
+/// 本地 .mrpack 导入：把玩家选中的文件复制进受管缓存再解析
+///
+/// 严格限制：
+/// - 必须是 `.mrpack` 扩展名、普通文件、不是符号链接；
+/// - 大小上限 512 MiB（正常整合包远小于此）；
+/// - 只读取 zip 的 index 与条目名，不解压到任意位置；
+/// - 复制到 `{game}/.astral/modpacks/local-<hash>.mrpack`，不改动原文件。
+pub const MAX_LOCAL_PACK: u64 = 512 * 1024 * 1024;
+
+pub fn prepare_local(game: &Path, path: &str, name: Option<String>) -> Result<ModpackPlan, String> {
+    let src = Path::new(path);
+    if !src.is_file() {
+        return Err("NOT_FOUND|找不到这个整合包文件".into());
+    }
+    let ext_ok = src
+        .extension()
+        .map(|e| e.to_string_lossy().eq_ignore_ascii_case("mrpack"))
+        .unwrap_or(false);
+    if !ext_ok {
+        return Err("INVALID_VALUE|只支持 .mrpack 整合包".into());
+    }
+    let meta = std::fs::metadata(src).map_err(|e| format!("PERMISSION|读取文件信息失败|{e}"))?;
+    if !meta.is_file() {
+        return Err("INVALID_VALUE|不是普通文件".into());
+    }
+    if meta.len() > MAX_LOCAL_PACK {
+        return Err(format!(
+            "INVALID_VALUE|整合包过大（{} MB），上限 {} MB",
+            meta.len() / 1024 / 1024,
+            MAX_LOCAL_PACK / 1024 / 1024
+        ));
+    }
+    // 符号链接：读到的可能是任意系统文件，直接拒绝
+    if crate::net::is_reparse_point(src) {
+        return Err("INVALID_PATH|不接受符号链接".into());
+    }
+
+    let cache = game.join(".astral").join("modpacks");
+    std::fs::create_dir_all(&cache).map_err(|e| format!("PERMISSION|创建缓存目录失败|{e}"))?;
+    // 用内容哈希命名，同一个包重复导入不会重复占空间
+    let sha1 = crate::net::sha1_file(src).map_err(|e| format!("PERMISSION|读取整合包失败|{e}"))?;
+    let short: String = sha1.chars().take(16).collect();
+    let pack_path = cache.join(format!("local-{short}.mrpack"));
+    if !pack_path.is_file() {
+        let tmp = cache.join(format!("local-{short}.mrpack.part"));
+        std::fs::copy(src, &tmp).map_err(|e| format!("PERMISSION|复制整合包失败|{e}"))?;
+        if std::fs::rename(&tmp, &pack_path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("PERMISSION|保存整合包失败".into());
+        }
+    }
+
+    let index = read_index(&pack_path)?;
+    let mut issues = Vec::new();
+    if index.loader_kind.is_none() {
+        issues.push(issue(
+            "UNSUPPORTED",
+            "整合包没有声明加载器，只能按原版安装".to_string(),
+            false,
+        ));
+    }
+    for f in &index.files {
+        if crate::net::check_url(&f.url).is_err() {
+            issues.push(issue(
+                "BLOCKED_URL",
+                format!("文件来源不在白名单：{}", f.path),
+                true,
+            ));
+        }
+    }
+
+    let display = name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| index.name.clone());
+    let info = ModpackInfo {
+        name: display,
+        summary: index.summary.clone(),
+        version_name: src
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        mc_version: index.mc_version.clone(),
+        loader_kind: index.loader_kind.clone(),
+        loader_version: index.loader_version.clone(),
+        file_count: index.files.len() as u32,
+        total_bytes: index.total_bytes,
+        client_files: index.client_files,
+        optional_files: index.optional_files,
+        unsupported_files: index.unsupported_files,
+        server_only_files: index.server_only_files,
+        override_entries: index.override_entries,
+        source: "local".to_string(),
+        project_id: String::new(),
+        version_id: String::new(),
+    };
+
+    let plan = ModpackPlan {
+        plan_id: format!("mplan_{:x}", crate::time::now_unix_ms()),
+        revision: 1,
+        expires_at: crate::time::unix_ms_to_iso(crate::time::now_unix_ms() + TTL_MS),
+        info,
+        issues,
+        download_bytes: index.total_bytes,
+    };
+
+    let mut s = store();
+    let map = s.get_or_insert_with(HashMap::new);
+    let now = crate::time::now_unix_ms();
+    map.retain(|_, p| now - p.created_ms < TTL_MS);
+    map.insert(
+        plan.plan_id.clone(),
+        StoredModpackPlan {
+            plan: plan.clone(),
+            pack_path,
+            memory_mb: None,
             created_ms: now,
         },
     );
@@ -467,13 +696,19 @@ pub fn extract_overrides(
 pub fn download_files(
     index: &ModpackIndex,
     instance_dir: &Path,
+    include_optional: bool,
     should_cancel: crate::net::CancelRef<'_>,
     mut on: impl FnMut(u32, u32),
 ) -> Result<u32, String> {
-    let total = index.files.len() as u32;
+    let wanted: Vec<&IndexFile> = index
+        .files
+        .iter()
+        .filter(|f| f.wanted_on_client(include_optional))
+        .collect();
+    let total = wanted.len() as u32;
     let cancel = should_cancel;
     let mut done = 0u32;
-    for f in &index.files {
+    for f in wanted {
         if should_cancel() {
             return Err("CANCELLED|已取消".into());
         }
@@ -499,6 +734,105 @@ pub fn download_files(
         on(done, total);
     }
     Ok(done)
+}
+
+/// 安装前磁盘预检：目标盘剩余空间要够放"还没下载的文件 + overrides 解压"
+///
+/// 返回 `(需要字节, 可用字节)`。可用空间拿不到时返回 `None`（不阻断，只提示）。
+pub fn disk_precheck(index: &ModpackIndex, instance_dir: &Path) -> (u64, Option<u64>) {
+    let needed = index.total_bytes;
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    // Windows 上 canonicalize 会带 \\?\ 前缀，和 sysinfo 给的 C:\ 对不上，
+    // 所以两边都规范化后再比；规范化失败就退回原路径比。
+    let canon = |p: &Path| -> PathBuf {
+        let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let s = c.to_string_lossy().to_string();
+        match s.strip_prefix(r"\\?\") {
+            Some(rest) => PathBuf::from(rest),
+            None => PathBuf::from(s),
+        }
+    };
+    let target = canon(instance_dir);
+    let mut best: Option<(usize, u64)> = None;
+    for d in disks.list() {
+        let mp = canon(d.mount_point());
+        if target.starts_with(&mp) {
+            let depth = mp.components().count();
+            if best.map(|(bd, _)| depth >= bd).unwrap_or(true) {
+                best = Some((depth, d.available_space()));
+            }
+        }
+    }
+    (needed, best.map(|(_, a)| a))
+}
+
+/// 记录实例是从哪个整合包来的（写在实例目录的 `.astral-pack.json`）
+///
+/// 用来回答"这个包装过哪些版本""这个实例属于哪个整合包"，
+/// 以及未来做"整合包更新"时判断新旧版本关系。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PackProvenance {
+    pub project_id: String,
+    pub version_id: String,
+    pub version_name: String,
+    /// `modrinth` 或 `local`
+    pub source: String,
+    pub pack_name: String,
+    pub installed_at: String,
+}
+
+pub const PROVENANCE_FILE: &str = ".astral-pack.json";
+
+pub fn read_provenance(instance_dir: &Path) -> Option<PackProvenance> {
+    let p = instance_dir.join(PROVENANCE_FILE);
+    let text = std::fs::read_to_string(p).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub fn write_provenance(instance_dir: &Path, prov: &PackProvenance) -> Result<(), String> {
+    let p = instance_dir.join(PROVENANCE_FILE);
+    let text = serde_json::to_string_pretty(prov)
+        .map_err(|e| format!("INTERNAL|序列化整合包来源失败|{e}"))?;
+    let tmp = instance_dir.join(format!("{PROVENANCE_FILE}.part"));
+    std::fs::write(&tmp, text).map_err(|e| format!("PERMISSION|写入整合包来源失败|{e}"))?;
+    std::fs::rename(&tmp, &p).map_err(|e| format!("PERMISSION|保存整合包来源失败|{e}"))?;
+    Ok(())
+}
+
+/// 同一个整合包在本地装过哪些版本（只读扫描实例目录，不联网）
+pub fn installed_versions(game: &Path, project_id: &str) -> Vec<serde_json::Value> {
+    let root = crate::instance::instances_root(game);
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let dir = e.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(prov) = read_provenance(&dir) else {
+            continue;
+        };
+        if prov.project_id != project_id {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        out.push(serde_json::json!({
+            "instanceId": name,
+            "versionId": prov.version_id,
+            "versionName": prov.version_name,
+            "installedAt": prov.installed_at,
+            "source": prov.source,
+        }));
+    }
+    out.sort_by(|a, b| {
+        b.get("installedAt")
+            .and_then(|v| v.as_str())
+            .cmp(&a.get("installedAt").and_then(|v| v.as_str()))
+    });
+    out
 }
 
 /// 执行安装：建实例 → 游戏本体 → 加载器 → 下载文件 → 解压覆盖 → 健康检查
@@ -556,12 +890,22 @@ pub fn install(
         if should_cancel() {
             return Err("CANCELLED|已取消".into());
         }
-        download_files(&index, &dir, &should_cancel, |d, total| {
+        download_files(&index, &dir, false, &should_cancel, |d, total| {
             on("download", "整合包文件", d, total)
         })?;
         extract_overrides(&stored.pack_path, &dir, &should_cancel, |d, _| {
-        on("extract", "解压覆盖文件", d, 0)
-    })?;
+            on("extract", "解压覆盖文件", d, 0)
+        })?;
+        // 记下来源，供"同一个包装了哪些版本"使用
+        let prov = PackProvenance {
+            project_id: stored.plan.info.project_id.clone(),
+            version_id: stored.plan.info.version_id.clone(),
+            version_name: stored.plan.info.version_name.clone(),
+            source: stored.plan.info.source.clone(),
+            pack_name: stored.plan.info.name.clone(),
+            installed_at: crate::time::now_iso(),
+        };
+        let _ = write_provenance(&dir, &prov);
         Ok(())
     };
 

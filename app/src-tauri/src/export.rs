@@ -219,6 +219,55 @@ pub fn export(
     })
 }
 
+/// 导出后回读校验：把 .mrpack 重新解析一遍，确认 index 与 overrides 都能读
+///
+/// 只读操作，不修改任何文件。返回结构与前端展示一一对应。
+pub fn verify_roundtrip(game: &Path, path: &str) -> Result<serde_json::Value, String> {
+    let p = Path::new(path);
+    if !p.is_file() {
+        return Err("NOT_FOUND|整合包不存在".into());
+    }
+    // 只允许校验自己导出目录下的包，避免被当成任意文件读取器
+    let out_dir = game.join("exports");
+    let canon_out = out_dir
+        .canonicalize()
+        .map_err(|e| format!("PERMISSION|导出目录不可用|{e}"))?;
+    let canon_p = p
+        .canonicalize()
+        .map_err(|e| format!("PERMISSION|整合包不可读|{e}"))?;
+    if !canon_p.starts_with(&canon_out) {
+        return Err("INVALID_PATH|只能校验 exports 目录下的整合包".into());
+    }
+    let index = crate::modpack::read_index(&canon_p)?;
+    let mut issues: Vec<String> = Vec::new();
+    if index.files.is_empty() {
+        issues.push("index 里没有任何文件".into());
+    }
+    if index.mc_version.trim().is_empty() {
+        issues.push("index 缺少 minecraft 版本".into());
+    }
+    for f in &index.files {
+        if crate::net::check_url(&f.url).is_err() {
+            issues.push(format!("下载地址不在白名单：{}", f.path));
+        }
+        if f.sha1.is_none() && f.sha512.is_none() {
+            issues.push(format!("文件没有哈希，无法校验：{}", f.path));
+        }
+    }
+    Ok(serde_json::json!({
+        "ok": issues.is_empty(),
+        "path": canon_p.to_string_lossy(),
+        "name": index.name,
+        "mcVersion": index.mc_version,
+        "loaderKind": index.loader_kind,
+        "loaderVersion": index.loader_version,
+        "files": index.files.len(),
+        "overrideEntries": index.override_entries,
+        "totalBytes": index.total_bytes,
+        "issues": issues,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

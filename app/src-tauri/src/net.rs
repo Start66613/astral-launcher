@@ -185,7 +185,7 @@ fn validate_url_with(raw: &str, allow_local: bool) -> Result<(), String> {
 
 /// 目标或临时文件是不是符号链接 / junction / 其他重解析点。
 #[cfg(windows)]
-fn is_reparse_point(path: &Path) -> bool {
+pub fn is_reparse_point(path: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     match std::fs::symlink_metadata(path) {
@@ -195,7 +195,7 @@ fn is_reparse_point(path: &Path) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_reparse_point(path: &Path) -> bool {
+pub fn is_reparse_point(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Ok(m) => m.file_type().is_symlink(),
         Err(_) => false,

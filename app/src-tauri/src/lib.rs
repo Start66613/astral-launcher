@@ -646,6 +646,24 @@ async fn export_modpack(request: export::ExportRequest) -> Result<export::Export
         .map_err(|e| e.to_string())?
 }
 
+/// 同一个整合包在本地装过哪些版本（只读，用于安装前的"已装版本"提示）
+#[tauri::command]
+async fn modpack_installed_versions(project_id: String) -> Result<Vec<serde_json::Value>, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || Ok(modpack::installed_versions(&game, &project_id)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 导出回读校验：把导出的 .mrpack 重新解析一遍，确认 index 与 overrides 都能读
+#[tauri::command]
+async fn verify_exported_modpack(path: String) -> Result<serde_json::Value, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || export::verify_roundtrip(&game, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ── 模组更新检查 ────────────────────────────────────────────────
 
 #[tauri::command]
@@ -979,8 +997,25 @@ async fn prepare_modpack_install(
         .map_err(|e| e.to_string())?
 }
 
+/// 导入本地 .mrpack：只读原文件，复制进受管缓存后按普通流程安装
 #[tauri::command]
-async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, String> {
+async fn import_local_modpack(
+    path: String,
+    name: Option<String>,
+) -> Result<modpack::ModpackPlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || modpack::prepare_local(&game, &path, name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn start_modpack_install(
+    plan_id: String,
+    revision: u32,
+    include_optional: Option<bool>,
+) -> Result<Task, String> {
+    let include_optional = include_optional.unwrap_or(false);
     let stored = modpack::take(&plan_id, revision)?;
     if let Some(first) = stored.plan.issues.iter().find(|i| i.blocking) {
         return Err(format!("{}|{}", first.code, first.message));
@@ -1058,17 +1093,31 @@ async fn start_modpack_install(plan_id: String, revision: u32) -> Result<Task, S
                 task::check_cancel(&tid)?;
 
                 let inst_dir = instance::instance_dir(&game, &inst.id);
+
+                // 磁盘预检：不够就早点失败，别下到一半才发现
+                let (need, avail) = modpack::disk_precheck(&index, &inst_dir);
+
+                if let Some(a) = avail {
+                    if a < need.saturating_add(64 * 1024 * 1024) {
+                        return Err(format!(
+                            "DISK_FULL|磁盘空间不足|需要约 {} MB，可用 {} MB",
+                            need / 1024 / 1024,
+                            a / 1024 / 1024
+                        ));
+                    }
+                }
+
                 let t2 = tid.clone();
                 let tc = tid.clone();
                 modpack::download_files(
                     &index,
                     &inst_dir,
+                    include_optional,
                     &move || task::is_cancelled(&tc),
                     move |d, total| {
                         task::progress(&t2, "download", format!("整合包文件 {d}/{total}"), d, total);
                     },
                 )?;
-                task::check_cancel(&tid)?;
 
                 let t3 = tid.clone();
                 let tc2 = tid.clone();
@@ -2135,6 +2184,8 @@ pub fn run() {
             prepare_resource_install,
             start_resource_install,
             export_modpack,
+            modpack_installed_versions,
+            verify_exported_modpack,
             check_mod_updates,
             start_mod_update,
             msa_status,
@@ -2145,6 +2196,7 @@ pub fn run() {
             install_java,
             list_managed_jdks,
             prepare_modpack_install,
+            import_local_modpack,
             start_modpack_install,
             list_logs,
             read_log,
@@ -4537,6 +4589,190 @@ pub fn selftest() -> i32 {
                     r == Ok(2)
                         && inst.join("config").join("a.json").exists()
                         && inst.join("options.txt").exists()
+                );
+            }
+
+            // 21) index 的 env 分类正确（optional / unsupported 不默认安装）
+            {
+                let j = r#"{
+                  "name":"EnvPack","dependencies":{"minecraft":"1.20.1","fabric-loader":"0.16.9"},
+                  "files":[
+                    {"path":"mods/a.jar","downloads":["https://cdn.modrinth.com/a.jar"],"fileSize":1,"env":{"client":"required","server":"required"}},
+                    {"path":"mods/b.jar","downloads":["https://cdn.modrinth.com/b.jar"],"fileSize":1,"env":{"client":"optional","server":"optional"}},
+                    {"path":"mods/c.jar","downloads":["https://cdn.modrinth.com/c.jar"],"fileSize":1,"env":{"client":"unsupported","server":"required"}},
+                    {"path":"mods/d.jar","downloads":["https://cdn.modrinth.com/d.jar"],"fileSize":1}
+                  ]
+                }"#;
+                let idx = modpack::parse_index(j).unwrap();
+                let wanted_default: Vec<&str> = idx
+                    .files
+                    .iter()
+                    .filter(|f| f.wanted_on_client(false))
+                    .map(|f| f.path.as_str())
+                    .collect();
+                let wanted_all: Vec<&str> = idx
+                    .files
+                    .iter()
+                    .filter(|f| f.wanted_on_client(true))
+                    .map(|f| f.path.as_str())
+                    .collect();
+                check!(
+                    "modpack env filters client files",
+                    wanted_default == vec!["mods/a.jar", "mods/d.jar"]
+                        && wanted_all == vec!["mods/a.jar", "mods/b.jar", "mods/d.jar"]
+                        && idx.client_files == 2
+                        && idx.optional_files == 1
+                        && idx.unsupported_files == 1
+                        && idx.server_only_files == 1
+                );
+            }
+
+            // 22) 本地 .mrpack 导入：拒绝非 mrpack、拒绝不存在的文件
+            {
+                let g = dl.join("modpack-game");
+                let _ = std::fs::create_dir_all(&g);
+                let txt = dl.join("not-a-pack.txt");
+                let _ = std::fs::write(&txt, b"hello");
+                let r1 = modpack::prepare_local(&g, &txt.to_string_lossy(), None);
+                let missing = g.join("nope.mrpack");
+                let r2 = modpack::prepare_local(&g, &missing.to_string_lossy(), None);
+                check!(
+                    "modpack local import rejects bad input",
+                    r1.is_err() && r2.is_err()
+                );
+            }
+
+            // 23) 本地 .mrpack 导入能解析并标记来源
+            {
+                use std::io::Write;
+                let g = dl.join("modpack-game");
+                let _ = std::fs::create_dir_all(&g);
+                let pack = dl.join("local-test.mrpack");
+                {
+                    let f = std::fs::File::create(&pack).unwrap();
+                    let mut zw = zip::ZipWriter::new(f);
+                    let opts = zip::write::SimpleFileOptions::default();
+                    let index = serde_json::json!({
+                        "formatVersion": 1,
+                        "game": "minecraft",
+                        "name": "本地包",
+                        "dependencies": {"minecraft": "1.20.1", "fabric-loader": "0.16.9"},
+                        "files": [
+                            {"path": "mods/x.jar", "downloads": ["https://cdn.modrinth.com/x.jar"],
+                             "hashes": {"sha1": "aa", "sha512": "bb"}, "fileSize": 12}
+                        ]
+                    });
+                    zw.start_file("modrinth.index.json", opts).unwrap();
+                    zw.write_all(serde_json::to_string(&index).unwrap().as_bytes())
+                        .unwrap();
+                    zw.start_file("overrides/config/x.json", opts).unwrap();
+                    zw.write_all(b"{}").unwrap();
+                    zw.finish().unwrap();
+                }
+                match modpack::prepare_local(&g, &pack.to_string_lossy(), Some("我的包".into())) {
+                    Ok(plan) => check!(
+                        "modpack local import parses",
+                        plan.info.source == "local"
+                            && plan.info.name == "我的包"
+                            && plan.info.mc_version == "1.20.1"
+                            && plan.info.loader_kind.as_deref() == Some("fabric")
+                            && plan.info.file_count == 1
+                            && plan.info.override_entries == 1
+                            && plan.info.project_id.is_empty()
+                    ),
+                    Err(e) => {
+                        log.push_str(&format!("LIVE local import: {e}\n"));
+                        check!("modpack local import parses", false);
+                    }
+                }
+            }
+
+            // 24) 整合包来源记录与"同包已装版本"查询
+            {
+                let g = dl.join("modpack-game");
+                let inst_root = crate::instance::instances_root(&g);
+                let dir = inst_root.join("inst_prov");
+                let _ = std::fs::create_dir_all(&dir);
+                let prov = modpack::PackProvenance {
+                    project_id: "proj-1".into(),
+                    version_id: "ver-1".into(),
+                    version_name: "1.0.0".into(),
+                    source: "modrinth".into(),
+                    pack_name: "测试包".into(),
+                    installed_at: "2026-01-01T00:00:00Z".into(),
+                };
+                let wrote = modpack::write_provenance(&dir, &prov).is_ok();
+                let back = modpack::read_provenance(&dir);
+                let list = modpack::installed_versions(&g, "proj-1");
+                let other = modpack::installed_versions(&g, "proj-2");
+                check!(
+                    "modpack provenance roundtrip",
+                    wrote
+                        && back.as_ref().map(|p| p.version_id.as_str()) == Some("ver-1")
+                        && list.len() == 1
+                        && list[0]["instanceId"].as_str() == Some("inst_prov")
+                        && other.is_empty()
+                );
+            }
+
+            // 25) 磁盘预检能拿到可用空间
+            {
+                let g = dl.join("modpack-game");
+                let idx = modpack::parse_index(
+                    r#"{"dependencies":{"minecraft":"1.20.1"},"files":[
+                        {"path":"mods/a.jar","downloads":["https://cdn.modrinth.com/a.jar"],"fileSize":2048}
+                    ]}"#,
+                )
+                .unwrap();
+                let (need, avail) = modpack::disk_precheck(&idx, &g);
+                log.push_str(&format!("LIVE disk precheck: need={need} avail={avail:?} dir={}\n", g.display()));
+                check!(
+                    "modpack disk precheck reports space",
+                    need == 2048 && avail.map(|a| a > 0).unwrap_or(false)
+                );
+            }
+
+            // 26) 导出回读校验：只允许 exports 目录，且能识别缺哈希
+            {
+                use std::io::Write;
+                let g = dl.join("modpack-game");
+                let out_dir = g.join("exports");
+                let _ = std::fs::create_dir_all(&out_dir);
+                let pack = out_dir.join("roundtrip.mrpack");
+                {
+                    let f = std::fs::File::create(&pack).unwrap();
+                    let mut zw = zip::ZipWriter::new(f);
+                    let opts = zip::write::SimpleFileOptions::default();
+                    let index = serde_json::json!({
+                        "formatVersion": 1, "game": "minecraft", "name": "导出包",
+                        "dependencies": {"minecraft": "1.20.1"},
+                        "files": [
+                            {"path": "mods/ok.jar", "downloads": ["https://cdn.modrinth.com/ok.jar"],
+                             "hashes": {"sha1": "aa"}, "fileSize": 1},
+                            {"path": "mods/nohash.jar", "downloads": ["https://cdn.modrinth.com/nohash.jar"],
+                             "fileSize": 1}
+                        ]
+                    });
+                    zw.start_file("modrinth.index.json", opts).unwrap();
+                    zw.write_all(serde_json::to_string(&index).unwrap().as_bytes())
+                        .unwrap();
+                    zw.finish().unwrap();
+                }
+                let ok_report = export::verify_roundtrip(&g, &pack.to_string_lossy());
+                let outside = dl.join("outside.mrpack");
+                let _ = std::fs::write(&outside, b"x");
+                let blocked = export::verify_roundtrip(&g, &outside.to_string_lossy());
+                check!(
+                    "export roundtrip verify",
+                    blocked.is_err()
+                        && ok_report
+                            .map(|v| v["ok"] == serde_json::json!(false)
+                                && v["files"].as_u64() == Some(2)
+                                && v["issues"]
+                                    .as_array()
+                                    .map(|a| a.len() == 1)
+                                    .unwrap_or(false))
+                            .unwrap_or(false)
                 );
             }
 
