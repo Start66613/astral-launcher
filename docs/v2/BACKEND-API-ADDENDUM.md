@@ -783,3 +783,73 @@ const fatal = report.issues.filter(i => i.severity === "error");
 
 不需要读这个文件。需要展示"这个 Mod 是哪个版本"时，用 `list_mods` 的
 `version` 字段（人类可读的那个）即可；`scan_mods` 的 `mods[].version` 同理。
+
+
+---
+
+## 14. 实时日志跟随（V2.5 新增）
+
+### 14.1 命令
+
+```ts
+invoke<LogChunk>("tail_log", {
+  instanceId: string,
+  logId?: string,     // 不传就自动跟"当前正在写"的那份游戏日志
+  offset?: number,    // 上次返回的 nextOffset，第一次传 0 或不传
+  maxBytes?: number,  // 单次上限，默认 65536，最大 262144
+})
+```
+
+### 14.2 返回
+
+```ts
+interface LogChunk {
+  id: string;
+  name: string;
+  fromOffset: number;    // 这次从哪个字节开始读的
+  nextOffset: number;    // 下次该传的 offset
+  text: string;          // 已脱敏，且只含完整的行
+  lines: number;         // 这次带回多少行
+  eof: boolean;          // true = 已经追到文件末尾（下次可能还有新内容）
+  reset: boolean;        // true = 文件被重写过，这次是从头给的
+  pendingBytes: number;  // 还剩多少字节没读（一次读不完就接着调）
+  truncated: boolean;    // 是否因为超长单行而截断
+}
+```
+
+### 14.3 前端怎么用
+
+```ts
+let offset = 0;
+let timer: number | undefined;
+
+async function tick() {
+  const c = await invoke<LogChunk>("tail_log", {
+    instanceId, logId, offset,
+  });
+  if (c.reset) {
+    // 游戏重启把 latest.log 重写了：把界面上的旧内容清掉再贴
+    clearViewer();
+  }
+  if (c.text) appendText(c.text);
+  offset = c.nextOffset;
+  // pendingBytes 还有就立刻再要一次，否则等下一拍
+  if (c.pendingBytes > 0) queueMicrotask(tick);
+}
+
+// 500ms 一拍足够；游戏自己写日志也就这个频率
+timer = window.setInterval(tick, 500);
+```
+
+要点：
+
+- **只给完整的行**。末尾没写完的半行不会返回，`nextOffset` 也停在半行之前，
+  所以前端不会出现"半截乱码"或者拼错行。
+- **`reset` 必须处理**。游戏重启会把 `latest.log` 重写成长度更短的新文件，
+  这时后端自动 `reset=true` 并从 0 开始给；前端要清空已有内容，否则会重复。
+- **`logId` 可以不传**。不传时后端找 `modifiedAt` 最新的游戏日志（按文件系统
+  真实 mtime，不是秒级字符串），启动后直接就能跟，不用先 `list_logs`。
+- **一次读不完会分批**。`pendingBytes > 0` 说明还有，接着用 `nextOffset` 调；
+  单行超长（几百 KB 的堆栈或 JSON）读满上限就整段返回并标 `truncated`，
+  不会死等一个换行。
+- 内容和 `read_log` 一样走脱敏（邮箱、IP、token、用户目录路径），可以放心贴到界面。

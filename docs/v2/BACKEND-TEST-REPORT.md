@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 202 项全过，单元测试 110 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 207 项全过，单元测试 116 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（202 项）
+## 2. 自检覆盖（207 项）
 
 按前缀分组：
 
@@ -64,12 +64,13 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `ledger` | 3 | 账本让 Astral 装的进 known、玩家手放的仍 unknown、文件删掉后不再算已装 |
 | `cache` | 3 | 第二次走缓存、统计与淘汰、只清缓存不动文件 |
 | `diagnosis` | 3 | 结构化报告、干净日志保持安静、脱敏 |
+| `live` | 5 | 只给完整行、无新内容不重复、追加增量、重写后 reset、半行留到下次 |
 | `installer` | 3 | Forge/NeoForge 下载地址 |
 | 其余 | 30+ | 时间、错误编解码、URL 白名单、路径越界、用户名规则、账户、组件目录、调度器、磁盘用量、导出回环、阶段标签、平台规则等 |
 
 ---
 
-## 3. 单元测试（116 个）
+## 3. 单元测试（122 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -79,6 +80,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `deps` | 9 | 嵌套顺序、环、双版本冲突、深度/节点上限、已装跳过、release 优先、缺失、via 链 |
 | `verify` | 5 | 相对路径、需要修复、干净不需、计划不碰玩家文件、空计划 |
 | `logs` | 6 | 脱敏（邮箱/IP/token/用户目录）、常见故障分类、cause/confidence、新规则、干净日志 |
+| `live` | 6 | 只给完整行、按 offset 续读、文件变短 reset、上限与 pending、日志不存在报错、挑最新日志 |
 | `net` | 5 | 白名单、非法 URL、公网 IP 判定、`.part` 路径、磁盘满判定 |
 | `recycle` | 3 | 名字拆分、怪名字容忍、拒绝穿越 |
 | `world_backup` | 3 | sanitize 安全字符、Zip Slip、备份 id 前缀 |
