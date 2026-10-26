@@ -3521,6 +3521,46 @@ pub fn selftest() -> i32 {
     // 日志与诊断预览
     let log_dir = std::env::temp_dir().join(format!("astral-logs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&log_dir);
+    // D2：结构化诊断（本地规则、可解释、不猜测）
+    {
+        let d = game.join("diag-game");
+        let _ = std::fs::create_dir_all(d.join("logs"));
+        let _ = std::fs::write(
+            d.join("logs").join("latest.log"),
+            "[12:00:00] [main/ERROR]: java.lang.UnsupportedClassVersionError: bad\n\
+             [12:00:01] [main/ERROR]: java.lang.OutOfMemoryError: Java heap space\n\
+             [12:00:02] [main/WARN]: java.io.IOException: Access is denied\n",
+        );
+        let r = logs::diagnose(&d, None, 200).expect("diagnose");
+        check!(
+            "diagnosis report is structured",
+            r.worst == "error"
+                && r.local_only
+                && r.summary.as_deref().map(|s| s.contains("可疑")).unwrap_or(false)
+                && !r.next_steps.is_empty()
+                && r.next_steps.len() <= 4
+                && r.basis.contains("本地规则")
+                && r.findings.iter().all(|f| !f.cause.is_empty()
+                    && matches!(f.confidence, "high" | "medium" | "low"))
+                && r.findings
+                    .iter()
+                    .any(|f| f.id == "java-version" && f.category == "java")
+        );
+        let _ = std::fs::write(
+            d.join("logs").join("latest.log"),
+            "[12:00:00] [main/INFO]: Loading Minecraft 1.20.1\n",
+        );
+        let clean = logs::diagnose(&d, None, 200).expect("diagnose clean");
+        check!(
+            "diagnosis stays quiet on clean log",
+            clean.findings.is_empty()
+                && clean.worst == "none"
+                && clean.summary.is_none()
+                && clean.next_steps.is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     let _ = std::fs::create_dir_all(log_dir.join("logs"));
     let _ = std::fs::create_dir_all(log_dir.join("crash-reports"));
     let _ = std::fs::write(

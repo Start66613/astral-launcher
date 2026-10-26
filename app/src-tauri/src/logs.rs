@@ -265,6 +265,16 @@ pub struct DiagnosisReport {
     pub findings: Vec<Finding>,
     /// 全部脱敏文本（供"查看原文"用，已裁剪）
     pub text: String,
+    /// 一句话结论（没有发现问题时是 null，不硬编一个"正常"）
+    pub summary: Option<String>,
+    /// 命中的最高严重度：error / warn / none
+    pub worst: String,
+    /// 建议优先做的事（来自命中的规则，去重）
+    pub next_steps: Vec<String>,
+    /// 说明诊断依据，让玩家知道这不是猜的
+    pub basis: String,
+    /// 本地处理，未上传
+    pub local_only: bool,
 }
 
 /// 对实例日志做结构化诊断（读 → 脱敏 → 规则匹配）
@@ -288,16 +298,50 @@ pub fn diagnose(
     let text = read(instance_dir, &picked.id, Some(max_lines))?;
     let (clean, _redactions) = redact(&text.text);
     let findings = classify_text(&clean);
+    let worst = if findings.iter().any(|f| f.severity == "error") {
+        "error".to_string()
+    } else if findings.iter().any(|f| f.severity == "warn") {
+        "warn".to_string()
+    } else {
+        "none".to_string()
+    };
+    let summary = if findings.is_empty() {
+        None
+    } else {
+        let labels: Vec<&str> = findings.iter().take(3).map(|f| f.label).collect();
+        Some(format!(
+            "日志里有 {} 处可疑，最可能是：{}",
+            findings.len(),
+            labels.join("、")
+        ))
+    };
+    let mut next_steps: Vec<String> = Vec::new();
+    for f in &findings {
+        let s = f.hint.to_string();
+        if !next_steps.contains(&s) {
+            next_steps.push(s);
+        }
+    }
+    next_steps.truncate(4);
     Ok(DiagnosisReport {
         log_id: picked.id.clone(),
         log_name: picked.name.clone(),
         lines: text.lines,
         findings,
         text: clean,
+        summary,
+        worst,
+        next_steps,
+        basis: format!(
+            "按 {} 条本地规则匹配日志原文（已脱敏 {} 处），未上传任何内容",
+            RULES.len(),
+            _redactions
+        ),
+        local_only: true,
     })
 }
 /// 结构化诊断的一条结论
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
     pub id: &'static str,
@@ -306,15 +350,24 @@ pub struct Finding {
     pub severity: &'static str,
     /// 命中的日志行（已脱敏，最多 3 条）
     pub evidence: Vec<String>,
+    /// 可能的原因（基于规则，不是猜测）
+    pub cause: &'static str,
     /// 给玩家的下一步建议
     pub hint: &'static str,
+    /// high | medium | low —— 这条结论有多可信
+    pub confidence: &'static str,
+    /// 这类问题通常由什么引起，方便玩家自己判断
+    pub category: &'static str,
 }
 
 struct Rule {
     id: &'static str,
     label: &'static str,
     severity: &'static str,
+    cause: &'static str,
     hint: &'static str,
+    confidence: &'static str,
+    category: &'static str,
     patterns: &'static [&'static str],
 }
 
@@ -323,73 +376,172 @@ const RULES: &[Rule] = &[
         id: "java-version",
         label: "Java 版本不匹配",
         severity: "error",
+        cause: "游戏用了一个版本不对的 Java：类文件版本高于运行时支持的范围",
         hint: "换用该版本要求的 Java（实例设置里可指定 javaPath）",
+        confidence: "high",
+        category: "java",
         patterns: &["UnsupportedClassVersionError", "requires Java", "class file version"],
     },
     Rule {
         id: "missing-class",
         label: "缺少类或依赖库",
         severity: "error",
+        cause: "依赖库缺失、下载不完整，或加载器装到了错误的版本上",
         hint: "用「修复实例」补全依赖库；仍失败请检查加载器是否装对",
+        confidence: "high",
+        category: "files",
         patterns: &[
             "NoClassDefFoundError",
             "ClassNotFoundException",
             "Could not find or load main class",
             "java.lang.NoSuchMethodError",
+            "java.lang.NoSuchFieldError",
         ],
     },
     Rule {
         id: "mod-conflict",
         label: "模组冲突或重复",
         severity: "error",
+        cause: "同一个模组装了两份，或两个模组改同一处逻辑",
         hint: "移除重复/不兼容的模组；看日志里被点名的 mod id",
+        confidence: "high",
+        category: "mods",
         patterns: &[
             "Duplicate mods",
             "Incompatible mod set",
             "ModResolutionException",
             "Duplicate entry",
             "already registered",
+            "Duplicate mod",
+        ],
+    },
+    Rule {
+        id: "duplicate-mod-id",
+        label: "模组 ID 重复",
+        severity: "error",
+        cause: "mods 目录里存在同一个 modId 的两个 jar（常见于手动更新后没删旧版）",
+        hint: "打开 mods 目录，删掉旧版本 jar；「批量更新」会自动处理这种情况",
+        confidence: "high",
+        category: "mods",
+        patterns: &[
+            "Duplicate mod id",
+            "duplicate modid",
+            "DuplicateModId",
+            "Found duplicate mod",
         ],
     },
     Rule {
         id: "out-of-memory",
         label: "内存不足",
         severity: "error",
+        cause: "分配的堆内存不够，或大型整合包 + 光影同时加载",
         hint: "调大实例内存（建议 2–4 GB），或减少大型整合包",
+        confidence: "high",
+        category: "memory",
         patterns: &["OutOfMemoryError", "Java heap space", "GC overhead limit"],
     },
     Rule {
         id: "graphics",
         label: "显卡/窗口初始化失败",
         severity: "error",
+        cause: "显卡驱动过旧、笔记本用了核显，或 OpenGL 版本不够",
         hint: "更新显卡驱动；笔记本请确认用独显运行；必要时关闭光影",
+        confidence: "high",
+        category: "graphics",
         patterns: &[
             "GLFW error",
             "Failed to create window",
             "Pixel format not accelerated",
             "OpenGL",
             "A fatal error has been detected",
+            "EXCEPTION_ACCESS_VIOLATION",
+        ],
+    },
+    Rule {
+        id: "loader-mismatch",
+        label: "加载器版本不兼容",
+        severity: "error",
+        cause: "加载器版本与游戏版本不匹配，或加载器文件被另一个版本覆盖",
+        hint: "在实例设置里重装对应版本的加载器；不要混用不同加载器",
+        confidence: "medium",
+        category: "loader",
+        patterns: &[
+            "LoaderException",
+            "Unsupported class file major version",
+            "fabric-loader",
+            "Mixin apply failed",
+            "MixinTransformerError",
+            "Could not find valid Forge",
+            "Missing or unsupported mandatory dependencies",
+        ],
+    },
+    Rule {
+        id: "config-corrupt",
+        label: "配置文件损坏",
+        severity: "warn",
+        cause: "配置文件写入中断或被手动改坏，常见于强退游戏后",
+        hint: "删掉日志里点名的那个配置文件（通常在 config/ 下），游戏会重新生成",
+        confidence: "medium",
+        category: "config",
+        patterns: &[
+            "JsonSyntaxException",
+            "MalformedJsonException",
+            "com.google.gson.stream.MalformedJsonException",
+            "Couldn't parse",
+            "Failed to load config",
         ],
     },
     Rule {
         id: "download",
         label: "下载或校验失败",
         severity: "warn",
+        cause: "网络中断、镜像不稳定，或本地文件与哈希对不上",
         hint: "检查网络/镜像设置后重试；同目录可能留有 .part 临时文件",
+        confidence: "high",
+        category: "network",
         patterns: &[
             "Failed to download",
             "Couldn't download",
             "Checksum",
             "HASH_MISMATCH",
             "Connection reset",
+            "Connect timed out",
         ],
     },
     Rule {
         id: "auth",
         label: "登录凭据问题",
         severity: "warn",
+        cause: "登录令牌过期、账号名不合法，或正版验证没配好",
         hint: "重新输入用户名；正版登录需先配置微软应用",
+        confidence: "medium",
+        category: "account",
         patterns: &["Invalid credentials", "Authentication", "Failed to login"],
+    },
+    Rule {
+        id: "permission",
+        label: "文件权限不足",
+        severity: "error",
+        cause: "游戏目录在受保护位置（如 Program Files），或文件被其他程序占用",
+        hint: "把游戏目录换到普通文件夹（如 D:\\Games），并关掉占用文件的程序",
+        confidence: "medium",
+        category: "filesystem",
+        patterns: &[
+            "Access is denied",
+            "Permission denied",
+            "java.io.IOException: Access",
+            "The process cannot access the file",
+        ],
+    },
+    Rule {
+        id: "disk-full",
+        label: "磁盘空间不足",
+        severity: "error",
+        cause: "游戏目录所在磁盘写满，下载或解压中途失败",
+        hint: "清理磁盘空间后重试；「存储」页面可以看到各目录占用",
+        confidence: "high",
+        category: "filesystem",
+        patterns: &["No space left on device", "not enough space", "DISK_FULL"],
     },
 ];
 
@@ -409,6 +561,9 @@ pub fn classify_text(text: &str) -> Vec<Finding> {
                 .any(|p| lower.contains(&p.to_ascii_lowercase()))
             {
                 let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
                 if trimmed.len() > 240 {
                     evidence.push(trimmed.chars().take(240).collect());
                 } else {
@@ -422,18 +577,27 @@ pub fn classify_text(text: &str) -> Vec<Finding> {
                 label: rule.label,
                 severity: rule.severity,
                 evidence,
+                cause: rule.cause,
                 hint: rule.hint,
+                confidence: rule.confidence,
+                category: rule.category,
             });
         }
     }
-    // 错误优先展示
-    out.sort_by_key(|f| match f.severity {
-        "error" => 0,
-        "warn" => 1,
-        _ => 2,
+    // 错误优先展示，同级按证据条数多的在前
+    out.sort_by(|a, b| {
+        let rank = |s: &str| match s {
+            "error" => 0,
+            "warn" => 1,
+            _ => 2,
+        };
+        rank(a.severity)
+            .cmp(&rank(b.severity))
+            .then(b.evidence.len().cmp(&a.evidence.len()))
     });
     out
 }
+
 pub fn prepare(instance_dir: &Path, log_ids: &[String], max_lines: u32) -> Result<DiagnosisPreview, String> {
     if log_ids.is_empty() {
         return Err("INVALID_VALUE|至少选择一个日志".into());
@@ -482,6 +646,34 @@ Duplicate mods found: sodium
         assert!(ids.contains(&"graphics"));
         assert!(ids.contains(&"mod-conflict"));
         assert!(found.iter().all(|f| f.evidence.len() <= 3));
+    }
+
+    #[test]
+    fn findings_carry_cause_and_confidence() {
+        let text = "\
+java.lang.UnsupportedClassVersionError: net/minecraft/client/Minecraft has been compiled by a more recent version
+java.lang.OutOfMemoryError: Java heap space
+";
+        let found = classify_text(text);
+        let java = found.iter().find(|f| f.id == "java-version").unwrap();
+        assert_eq!(java.confidence, "high");
+        assert_eq!(java.category, "java");
+        assert!(!java.cause.is_empty());
+        // error 排在 warn 前面
+        assert_eq!(found.first().map(|f| f.severity), Some("error"));
+    }
+
+    #[test]
+    fn new_rules_cover_permission_and_duplicate_mod() {
+        let text = "\
+java.io.IOException: Access is denied
+Found duplicate mod id: sodium
+java.lang.ExceptionInInitializerError: Mixin apply failed
+";
+        let ids: Vec<&str> = classify_text(text).iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"permission"));
+        assert!(ids.contains(&"duplicate-mod-id"));
+        assert!(ids.contains(&"loader-mismatch"));
     }
 
     #[test]
