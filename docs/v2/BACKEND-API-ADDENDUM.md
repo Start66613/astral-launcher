@@ -1418,3 +1418,72 @@ const result = await invoke<OptionsWrite>("set_game_options", {
    一并写回 —— 只提交用户真正改过的键。
 4. `invalid: true` 的项高亮提示"这个值游戏不认，要不要重置成默认"。
 5. 保存成功后提示"已备份到 <backupDir>"，给个"打开备份目录"的入口。
+
+---
+
+## 22. 实例封面（V2.5 变更）
+
+`instance.json` 里的 `cover` 以前是**任意字符串**：前端传什么就存什么。
+这有两个问题 —— 存绝对路径会把本机目录结构写进配置文件，存 `..` 能指到
+别处；而且前端没有 asset 协议，压根显示不出来，等于一个存了也没用的字段。
+
+现在改成：图片复制进实例目录，只存固定文件名，读的时候走 IPC 返回 data URL。
+
+### 22.1 命令
+
+```ts
+interface CoverInfo {
+  fileName: string;   // `.astral-cover.png` 这类固定名
+  mime: string;       // image/png | image/jpeg | image/webp | image/gif
+  sizeBytes: number;
+  width: number | null;   // 只有 PNG / JPEG 能读出来
+  height: number | null;
+  dataUrl: string;
+}
+
+// 设置：传本机图片路径，后端复制进实例目录
+const inst = await invoke<Instance>("set_instance_cover", {
+  instanceId, sourcePath: "D:\\图片\\cover.png"
+});
+
+// 读：没设置封面返回 null
+const info = await invoke<CoverInfo | null>("read_instance_cover", { instanceId });
+
+// 清：同时删文件并把 instance.json 的 cover 置空
+const cleared = await invoke<Instance>("clear_instance_cover", { instanceId });
+```
+
+### 22.2 行为约定
+
+- **按魔数识别格式**，不信扩展名：PNG / JPEG / WebP / GIF 四种。
+  传进来一个改了后缀的文本文件会被拒（`INVALID_VALUE|只支持 …`）。
+- 落盘名固定为 `.astral-cover.png` / `.jpg` / `.webp` / `.gif`。
+  **换格式时会把旧扩展名的文件删掉**，不会留两个。
+- 单张上限 8 MB；拒符号链接；先写 `.part` 再 `rename`，失败清理。
+- 读的时候 PNG / JPEG 会顺带报宽高（读文件头，不解码像素），
+  WebP / GIF 返回 `null`。
+- 文件不在（玩家手动删了）时 `read_instance_cover` 返回 `null`，不报错。
+
+### 22.3 破坏性变更：`update_instance` 不再接受任意 cover
+
+`InstancePatch.cover` 现在**只接受 `.astral-cover.<ext>`**，其它值报：
+
+```
+INVALID_VALUE|封面请用 set_instance_cover 设置，不能直接写路径
+```
+
+`instance::build` 里还会再 `sanitize` 一次 —— 老配置里如果已经存了绝对
+路径，列表里读出来是 `null`（当没有封面），不会显示一个来路不明的路径。
+
+前端如果要支持"选一张图当封面"，应该调 `set_instance_cover`，而不是把
+路径塞进 `update_instance`。
+
+### 22.4 前端接入建议
+
+1. 实例卡片：`read_instance_cover` 返回 `null` 就显示默认渐变底 + 首字母，
+   有 `dataUrl` 就直接 `<img src={dataUrl}>`。
+2. 设置封面的入口用系统文件选择框（Tauri dialog 插件或 `<input type=file>`
+   拿到的 `path`），把路径交给 `set_instance_cover`。
+3. 换封面不用先 `clear_instance_cover`，直接 `set` 会覆盖。
+4. 封面是缩略图场景，别拿 4K 原图当封面 —— 8 MB 上限只是兜底，
+   前端可以在选图时提示"建议 1280×720 以内"。

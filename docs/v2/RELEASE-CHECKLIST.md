@@ -20,7 +20,7 @@
 - [ ] `cargo check --release` 通过
 - [ ] `cargo build --release` 通过
 - [ ] `cargo test --release --lib` 通过（91 通过 / 6 忽略）
-- [ ] `--selftest` 退出码为 0（247 项全过）
+- [ ] `--selftest` 退出码为 0（251 项全过）
 - [ ] `scripts/check-commands.ps1` 通过（没有"写了命令忘了注册"）
 - [ ] `cargo audit` 无已知漏洞
 - [ ] 前端 `tsc --noEmit` 与 `vite build` 通过
