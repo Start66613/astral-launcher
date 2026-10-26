@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 272 项全过，单元测试 221 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 276 项全过，单元测试 229 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（272 项）
+## 2. 自检覆盖（276 项）
 
 按前缀分组：
 
@@ -74,12 +74,13 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `crash` | 4 | 按报告格式解析、系统详情与原因链、可疑模组只认报告写的、没有报告时报错 |
 | `support` | 8 | 预览列出全部小节、预览不落盘、导出 zip、条目齐全、报告能看懂、日志脱敏、机器可读那份带事实、不带日志时如实标注 |
 | `preflight` | 4 | 7 项一次列全、缺版本文件时阻塞、内存建议不阻塞、预检不写文件 |
+| `source` | 4 | 本地开端口能连上、关端口报不通、建议逻辑（接近时优先官方、差太多用最快、全不通为 null）、全部源都有标签 |
 | `installer` | 3 | Forge/NeoForge 下载地址 |
 | 其余 | 30+ | 时间、错误编解码、URL 白名单、路径越界、用户名规则、账户、组件目录、调度器、磁盘用量、导出回环、阶段标签、平台规则等 |
 
 ---
 
-## 3. 单元测试（227 个）
+## 3. 单元测试（235 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -113,6 +114,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `cache` | 2 | 哈希优先 SHA512、拒绝非 hex |
 | `update_plan` | 2 | 批次 id、历史往返 |
 | `task` | 7 | 错误解码（带/不带 detail）、首次采样只记基线、两次采样算速度与 ETA、间隔太短不重算、进度回退重新采样、总量未知不报 ETA |
+| `source_probe` | 8 | 开端口可达、关端口不可达、域名解析不了、挑最快、接近时优先官方、跳过不可达、全不通为 None、每个源都有标签与主机 |
 | `session` | 2 | 时长、统计累计 |
 | `error` | 3 | 编码带/不带 detail、detail 含分隔符 |
 | jdk | 4 | 主版本范围、正常解压落地、拒绝 `../` 穿越、拒绝符号链接条目 |

@@ -1894,3 +1894,70 @@ function formatEta(ms: number | null): string {
 
 唯一没带字节的是纯覆盖/解压阶段（`extract`），那一步没有下载，速度是 0、
 ETA 是 null，属于预期。
+---
+
+## 28. 下载源测速（V2.5 新增）
+
+### 28.1 为什么要这个
+
+配置里的 `source` 一直是玩家自己选的（`official` / `bmclapi`），但没人知道
+自己该选哪个。国内连 Mojang 有时几百毫秒、有时直接连不上，而镜像偶尔又会
+慢得离谱 —— 结果"下载慢"变成玄学。
+
+`probe_sources` 对每个下载源做几次 TCP 连接，量往返时间，然后给一句建议。
+
+### 28.2 命令
+
+```ts
+import { invoke } from "@tauri-apps/api/core";
+
+interface SourceProbe {
+  source: string;        // 配置里 source 该填的值："official" | "bmclapi"
+  label: string;         // 给玩家看的名字
+  host: string;          // 测的主机名
+  reachable: boolean;    // 连得上就是 true（只要有一次成功）
+  dnsMs: number | null;  // DNS 解析耗时，取最快的一次
+  connectMs: number | null;
+  samples: number;       // 实际尝试了几次
+  error: string | null;  // 连不上时的原因
+}
+
+interface ProbeReport {
+  sources: SourceProbe[];
+  suggested: string | null;  // 建议用的源；全都不通时是 null
+  note: string;              // 一句话说清测的是什么
+}
+
+const report = await invoke<ProbeReport>("probe_sources");
+```
+
+### 28.3 它到底测了什么，没测什么
+
+**测的**：DNS 解析耗时、TCP 连接耗时。两者分开计时，因为"解析慢"和
+"连接慢"是两种完全不同的毛病，混成一个数字就看不出问题在哪。
+
+**没测**：下载速度。每个源都得下一份几 MB 的东西，玩家点一下测速就要多耗
+几十 MB 流量，而且慢速下载很容易把界面卡住。连接延迟已经足够区分
+"这个源通不通、快不快"。
+
+返回值里的 `note` 就是给界面直接显示这句话用的，别删。
+
+### 28.4 建议是怎么给的
+
+1. 全都不通 → `suggested` 为 `null`，界面提示"检查网络"
+2. 官方源可达、且和最快的那个差距不到 20 ms → 建议官方源
+   （镜像的内容可能比官方晚几小时到几天，延迟差不多时没理由用它）
+3. 否则建议最快的那个
+
+### 28.5 前端接入建议
+
+- 设置页"下载源"旁边放一个"测速"按钮，点了调 `probe_sources`
+- 每行显示 `label` + `connectMs`（连不上显示 `error`），`suggested` 那行加个标记
+- 测速要花几秒（3 次采样 × 3 秒超时，最坏情况），按钮期间要禁用并显示"测速中"
+- **测速不写配置**。要不要切换由玩家自己决定，后端不擅自改
+- 结果不要缓存，玩家网络随时在变
+
+### 28.6 和前端的既有字段的关系
+
+`list_versions_cached` 返回的 `cache.source` 说的是"这份数据从网络还是缓存来的"，
+和这里的下载源 `source` 是两回事，别混。
