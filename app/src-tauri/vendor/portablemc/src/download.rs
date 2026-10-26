@@ -116,10 +116,20 @@ impl Single {
 }
 
 /// A list of pending download that can be all downloaded at once.
-#[derive(Debug)]
 pub struct Batch {
     /// All entries to be downloaded.
     entries: Vec<Entry>,
+    /// [Astral patch] 取消判断：返回 true 时尽快停下，未完成的分片标记为已取消。
+    cancel: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+impl std::fmt::Debug for Batch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Batch")
+            .field("entries", &self.entries)
+            .field("cancel", &self.cancel.is_some())
+            .finish()
+    }
 }
 
 impl Batch {
@@ -128,7 +138,15 @@ impl Batch {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            cancel: None,
         }
+    }
+
+    /// [Astral patch] 设置取消判断，允许调用方在大批量下载中途叫停。
+    #[inline]
+    pub fn set_cancel(&mut self, cancel: Arc<dyn Fn() -> bool + Send + Sync>) -> &mut Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     /// Return the total number of entries pushed into this download batch.
@@ -175,6 +193,7 @@ impl Batch {
     pub fn download(&mut self, mut handler: impl Handler) -> reqwest::Result<BatchResult> {
         let client = crate::http::client()?;
         let entries = mem::take(&mut self.entries);
+        let cancel = self.cancel.take();
         // [Astral patch] 走国内镜像时降低并发：BMCLAPI 对高并发会重置连接
         let concurrent = if crate::mirror::enabled() { 6 } else { 40 };
         Ok(crate::tokio::sync(download_many(
@@ -182,6 +201,7 @@ impl Batch {
             &mut handler,
             concurrent,
             entries,
+            cancel,
         )))
     }
 }
@@ -578,6 +598,9 @@ pub enum EntryErrorKind {
     /// Invalid HTTP status code while requesting the entry.
     #[error("invalid status: {0}")]
     InvalidStatus(u16),
+    /// [Astral patch] 调用方在下载过程中取消了，这个分片没下完。
+    #[error("cancelled")]
+    Cancelled,
     /// A generic error type for internal and third-party errors that may change depending
     /// on the actual implementation.
     ///
@@ -649,6 +672,7 @@ async fn download_many(
     handler: &mut dyn Handler,
     concurrent_count: usize,
     entries: Vec<Entry>,
+    cancel: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> BatchResult {
     // Make it constant and sharable between all tasks.
     let entries = Arc::new(entries);
@@ -692,20 +716,33 @@ async fn download_many(
     let (progress_tx, mut progress_rx) = mpsc::channel(concurrent_count * 2);
 
     let mut results = (0..entries.len()).map(|_| None).collect::<Vec<_>>();
+    // [Astral patch] 取消时给调用方推一次进度，别让它一直等
+    let mut force_progress_cancel = false;
 
     // If we have theoretically completed all downloads, we still wait for joining all
     // remaining futures in the join set.
     while completed < entries.len() || !futures.is_empty() {
+        // [Astral patch] 取消后不再派发新的分片：还没开始的全标记为已取消，
+        // 已经在飞的分片会在自己的读循环里停下。
+        if cancel.as_ref().is_some_and(|c| c()) {
+            while let Some(index) = indices.pop() {
+                results[index] = Some(Err(EntryErrorKind::Cancelled));
+                completed += 1;
+            }
+            force_progress_cancel = true;
+        }
         while futures.len() < concurrent_count && !indices.is_empty() {
             futures.spawn(download_many_entry(
                 client.clone(),
                 Arc::clone(&entries),
                 indices.pop().unwrap(), // Safe because not empty.
                 progress_tx.clone(),
+                cancel.clone(),
             ));
         }
 
-        let mut force_progress = false;
+        let mut force_progress = force_progress_cancel;
+        force_progress_cancel = false;
 
         tokio::select! {
             Some(res) = futures.join_next() => {
@@ -772,6 +809,7 @@ async fn download_many_entry(
     entries: Arc<Vec<Entry>>,
     index: usize,
     progress_sender: mpsc::Sender<u32>,
+    cancel: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> (usize, Result<EntrySuccessInner, EntryErrorKind>) {
     let progress_sender = ChannelEntryProgressSender {
         sender: progress_sender,
@@ -779,7 +817,7 @@ async fn download_many_entry(
 
     (
         index,
-        download_entry(client, &entries[index], progress_sender).await,
+        download_entry(client, &entries[index], progress_sender, cancel).await,
     )
 }
 
@@ -799,7 +837,7 @@ async fn download_single(
         total_size,
     };
 
-    let res = download_entry(client, entry, progress_sender).await;
+    let res = download_entry(client, entry, progress_sender, None).await;
 
     handler.on_progress(1, 1, size, total_size);
 
@@ -821,6 +859,7 @@ async fn download_entry(
     client: Client,
     entry: &Entry,
     mut progress_sender: impl EntryProgressSender,
+    cancel: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> Result<EntrySuccessInner, EntryErrorKind> {
     let mut req = client.get(&*entry.core.url);
 
@@ -908,6 +947,11 @@ async fn download_entry(
         // On success we break the 'outer loop, on error we break the inner loop!
         // We specify if this error should be retried.
         let (retry, mut err) = loop {
+            // [Astral patch] 每个分片读完一块就看一眼取消，命中就立刻停手，
+            // 不再重试，也不留下"写了一半当成功"的文件。
+            if cancel.as_ref().is_some_and(|c| c()) {
+                break (false, EntryErrorKind::Cancelled);
+            }
             // Read chunk by chunk, any error break the loop and fallthrough, retrying if
             // this is timeout or decode error.
             let chunk = match res.chunk().await {

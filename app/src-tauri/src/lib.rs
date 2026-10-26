@@ -414,9 +414,12 @@ fn run_install(tid: &str, game_version: String) {
     let dir = PathBuf::from(&cfg.game_dir);
     let t2 = tid.to_string();
     let v = game_version.clone();
+    // 取消判断交给批量下载器，取消后不会继续往磁盘写
+    let tc = tid.to_string();
+    let cancel = net::cancel_from(move || task::is_cancelled(&tc));
     // 后台线程 panic 必须变成任务失败，不能让任务永远 running
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        core::install(&game_version, &dir, &cfg.username, move |p| {
+        core::install_with_cancel(&game_version, &dir, &cfg.username, Some(cancel), move |p| {
             task::progress(&t2, &p.stage, p.label, p.done, p.total);
         })
     }))
@@ -1341,15 +1344,23 @@ async fn start_modpack_install(
 
                 if !core::version_installed(&game, &index.mc_version) {
                     let t2 = tid.clone();
-                    core::install(&index.mc_version, &game, &cfg.username, move |p| {
-                        task::progress(
-                            &t2,
-                            &p.stage,
-                            format!("游戏本体 {}", p.label),
-                            p.done,
-                            p.total,
-                        );
-                    })?;
+                    let tc = tid.clone();
+                    let cancel = net::cancel_from(move || task::is_cancelled(&tc));
+                    core::install_with_cancel(
+                        &index.mc_version,
+                        &game,
+                        &cfg.username,
+                        Some(cancel),
+                        move |p| {
+                            task::progress(
+                                &t2,
+                                &p.stage,
+                                format!("游戏本体 {}", p.label),
+                                p.done,
+                                p.total,
+                            );
+                        },
+                    )?;
                 }
                 task::check_cancel(&tid)?;
 
@@ -1368,12 +1379,15 @@ async fn start_modpack_install(
                         m.launch_version = Some(generated);
                         instance::save_meta(&game, &m)?;
                     } else {
-                        core::install_loader(
+                        let tc = tid.clone();
+                        let cancel = net::cancel_from(move || task::is_cancelled(&tc));
+                        core::install_loader_with_cancel(
                             &index.mc_version,
                             kind,
                             ver,
                             &game,
                             &cfg.username,
+                            Some(cancel),
                             move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
                         )?;
                     }
@@ -1582,7 +1596,9 @@ fn run_game_install(
         || -> Result<Instance, String> {
             if !core::version_installed(&game, &v) {
                 let t2 = tid.to_string();
-                core::install(&v, &game, &cfg.username, move |pr| {
+                let tc = tid.to_string();
+                let cancel = net::cancel_from(move || task::is_cancelled(&tc));
+                core::install_with_cancel(&v, &game, &cfg.username, Some(cancel), move |pr| {
                     task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
                 })?;
             }
@@ -1620,12 +1636,15 @@ fn run_game_install(
                     meta.launch_version = Some(generated);
                     instance::save_meta(&game, &meta)?;
                 } else {
-                    core::install_loader(
+                    let tc = tid.to_string();
+                    let cancel = net::cancel_from(move || task::is_cancelled(&tc));
+                    core::install_loader_with_cancel(
                         &v,
                         &l.kind,
                         &l.version,
                         &game,
                         &cfg.username,
+                        Some(cancel),
                         move |pr| {
                             task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
                         },
@@ -1726,9 +1745,17 @@ async fn repair_instance(instance_id: String) -> Result<Task, String> {
                     match *step {
                         "base" => {
                             let t2 = tid.to_string();
-                            core::install(&meta.game_version, &game, &cfg.username, move |pr| {
-                                task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
-                            })?;
+                            let tc = tid.to_string();
+                            let cancel = net::cancel_from(move || task::is_cancelled(&tc));
+                            core::install_with_cancel(
+                                &meta.game_version,
+                                &game,
+                                &cfg.username,
+                                Some(cancel),
+                                move |pr| {
+                                    task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
+                                },
+                            )?;
                         }
                         "loader" => {
                             if let (Some(kind), Some(ver)) =
@@ -1751,12 +1778,15 @@ async fn repair_instance(instance_id: String) -> Result<Task, String> {
                                     m.launch_version = Some(generated);
                                     instance::save_meta(&game, &m)?;
                                 } else {
-                                    core::install_loader(
+                                    let tc = tid.to_string();
+                                    let cancel = net::cancel_from(move || task::is_cancelled(&tc));
+                                    core::install_loader_with_cancel(
                                         &meta.game_version,
                                         kind,
                                         ver,
                                         &game,
                                         &cfg.username,
+                                        Some(cancel),
                                         move |pr| {
                                             task::progress(
                                                 &t2, &pr.stage, pr.label, pr.done, pr.total,
@@ -1868,6 +1898,8 @@ async fn start_install_loader(
         let cfg = core::load_config();
         let main_dir = PathBuf::from(&cfg.game_dir);
         let t2 = tid.clone();
+        let tc = tid.clone();
+        let cancel = net::cancel_from(move || task::is_cancelled(&tc));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<Option<String>, String> {
                 if kind == "forge" || kind == "neoforge" {
@@ -1883,12 +1915,13 @@ async fn start_install_loader(
                     )
                     .map(Some)
                 } else {
-                    core::install_loader(
+                    core::install_loader_with_cancel(
                         &inst.game_version,
                         &kind,
                         &version,
                         &main_dir,
                         &cfg.username,
+                        Some(cancel),
                         move |p| task::progress(&t2, &p.stage, p.label, p.done, p.total),
                     )
                     .map(|_| None)
@@ -5009,6 +5042,53 @@ pub fn selftest() -> i32 {
                     .unwrap_or_else(|e| e.starts_with("CANCELLED"))
                     && !queued_dest.exists()
             );
+
+            // 13b) portablemc 的批量下载器也能被取消（安装游戏本体走的就是这条路）
+            {
+                let bdir = dl.join("batch-cancel");
+                let _ = std::fs::create_dir_all(&bdir);
+                let mut batch = portablemc::download::Batch::new();
+                for i in 0..6 {
+                    let dest = bdir.join(format!("b{i}.bin"));
+                    batch.push(
+                        srv.data_url(512 * 1024, 32 * 1024, 30),
+                        dest.into_boxed_path(),
+                    );
+                }
+                let bstop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let bstop2 = bstop.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    bstop2.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                let bflag = bstop.clone();
+                batch.set_cancel(std::sync::Arc::new(move || {
+                    bflag.load(std::sync::atomic::Ordering::SeqCst)
+                }));
+                let bres = batch.download(());
+                let cancelled_count = bres
+                    .as_ref()
+                    .map(|r| {
+                        r.iter_errors()
+                            .filter(|e| {
+                                matches!(e.kind(), portablemc::download::EntryErrorKind::Cancelled)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                // 已经下完的文件不应该存在（取消的分片会被清掉）
+                let full = (0..6)
+                    .filter(|i| {
+                        std::fs::metadata(bdir.join(format!("b{i}.bin")))
+                            .map(|m| m.len() == 512 * 1024)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                check!(
+                    "portablemc batch download cancels",
+                    cancelled_count >= 1 && full < 6
+                );
+            }
 
             // 14) 共享缓存：第二次下同一个文件不再联网，缓存里能查到
             let c1 = dl.join("cache1.bin");

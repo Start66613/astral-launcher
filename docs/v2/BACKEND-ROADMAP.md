@@ -10,7 +10,7 @@
 
 A1–A5、B1–B4、C1–C4、D1–D2 已完成并有自动化测试；D3 的测试矩阵已随各功能逐项落地；
 D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发布检查清单与自动更新
-签名方案尚未完成。共 98 个 Tauri 命令、185 项自检、94 个 Rust 单元测试（88 通过 6 忽略）。
+签名方案尚未完成。共 98 个 Tauri 命令、186 项自检、97 个 Rust 单元测试（91 通过 6 忽略）。
 
 ---
 
@@ -20,7 +20,7 @@ D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发�
 
 | 项 | 内容 | 状态 | 关键实现 |
 |---|---|---|---|
-| A1 | 真可取消下载引擎 | ✅ | `vendor/portablemc/src/stream.rs` + `net::download` |
+| A1 | 真可取消下载引擎 | ✅ | `vendor/portablemc/src/stream.rs` + `net::download` + `portablemc::download::Batch::set_cancel` |
 | A2 | 断点续传与下载缓存 | ✅ | `net::PartMeta` + `cache.rs` |
 | A3 | 并发与调度 | ✅ | `net::acquire_slot` / `scheduler_stats` |
 | A4 | 网络与文件安全 | ✅ | `net::validate_url` / `ensure_within` / `modpack` 解压防护 |
@@ -34,6 +34,13 @@ D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发�
 Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` 在其上再加文件锁、
 `.part` 元数据、原子提交、重试退避、缓存。旧的 `download_atomic` / `download_verified`
 签名保留，内部换实现，所以 40 多处调用点不用一次性全改。
+
+**后来补的一刀**：安装游戏本体 / 加载器走的是 portablemc 自己的 `Batch`，跟 `net::download`
+是两条路。2026-10 补上了 `Batch::set_cancel` 与 `base::Installer::set_cancel`——
+批量下载器在每个分片读完一块时检查取消，未派发的分片直接标记为 `EntryErrorKind::Cancelled`，
+`install_dyn` 里再把它翻译成 `Error::DownloadResourcesCancelled`。这样"取消安装"才真的会停，
+而不是界面显示已取消、后台继续下几百个库。
+
 
 ### 第二轮 B：Mod 与文件完整性（已完成）
 
@@ -106,7 +113,7 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
   当前 94 个，88 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
 - **自检（`--selftest`）**：所有需要真实文件系统、真实 HTTP、真实进程的检查都放这里。
   用 `testsrv.rs` 起一个只监听 `127.0.0.1` 的临时服务器，能确定性制造 503、慢速、
-  重定向、Range 响应。当前 185 项。
+  重定向、Range 响应。当前 186 项。
 - **为什么不依赖 `cargo test` 跑全部**：本机 `cargo test` 的测试二进制在仓库目录里
   运行会因路径 ACL 报"拒绝访问"（见 `10-cargo-test-调查.md`），所以 `scripts/run-tests.ps1`
   会先把二进制复制到 `%TEMP%` 再跑。CI 上没有这个问题。

@@ -249,8 +249,23 @@ pub fn install(
     username: &str,
     on: impl FnMut(Progress),
 ) -> Result<Game, String> {
+    install_with_cancel(version, dir, username, None, on)
+}
+
+/// 带取消的安装：取消后批量下载会在分片级别停下，不会出现"界面显示已取消、
+/// 后台还在往磁盘写"的情况。
+pub fn install_with_cancel(
+    version: &str,
+    dir: &Path,
+    username: &str,
+    cancel: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    on: impl FnMut(Progress),
+) -> Result<Game, String> {
     portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
     let mut inst = base_installer(version, dir, username);
+    if let Some(c) = cancel {
+        inst.base_mut().set_cancel(c);
+    }
     inst.install(Fwd(on))
         .map_err(|e| format!("安装失败: {e:?}"))
 }
@@ -390,6 +405,28 @@ pub fn install_loader(
     username: &str,
     on: impl FnMut(Progress),
 ) -> Result<(), String> {
+    install_loader_with_cancel(
+        game_version,
+        loader_kind,
+        loader_version,
+        main_dir,
+        username,
+        None,
+        on,
+    )
+}
+
+/// 带取消的加载器安装，取消后批量下载会在分片级别停下
+#[allow(clippy::too_many_arguments)]
+pub fn install_loader_with_cancel(
+    game_version: &str,
+    loader_kind: &str,
+    loader_version: &str,
+    main_dir: &Path,
+    username: &str,
+    cancel: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    on: impl FnMut(Progress),
+) -> Result<(), String> {
     portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
     let l = match loader_kind {
         "fabric" => portablemc::fabric::Loader::Fabric,
@@ -402,6 +439,9 @@ pub fn install_loader(
     moj.base_mut().set_launcher_name("Astral");
     moj.base_mut().set_launcher_version("0.1.0");
     moj.set_auth_offline_username(username);
+    if let Some(c) = cancel {
+        inst.mojang_mut().base_mut().set_cancel(c);
+    }
     inst.install(Fwd(on))
         .map(|_| ())
         .map_err(|e| format!("INTERNAL|加载器安装失败|{e:?}"))

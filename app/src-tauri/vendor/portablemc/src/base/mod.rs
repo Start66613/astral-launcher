@@ -56,6 +56,22 @@ pub(crate) const LEGACY_JVM_ARGS: &[&str] = &[
 /// reverse engineering. **Most of the time, you don't want to use this directly, instead
 /// you can use the [`moj::Installer`](crate::moj::Installer), that provides support
 /// for fetching missing Mojang versions, various fixes and authentication support.**
+/// [Astral patch] 取消判断的薄包装，只为了能在 `Installer` 的 `Debug` 里打印。
+#[derive(Clone)]
+pub struct CancelFlag(pub std::sync::Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl std::fmt::Debug for CancelFlag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CancelFlag(..)")
+    }
+}
+
+impl CancelFlag {
+    pub fn cancelled(&self) -> bool {
+        (self.0)()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Installer {
     version: String,
@@ -75,6 +91,8 @@ pub struct Installer {
     extra_jvm_args: Vec<String>,
     /// [Astral patch] 指定 java 可执行文件，跳过 JVM 解析/下载
     jvm_override: Option<PathBuf>,
+    /// [Astral patch] 取消判断，安装过程中的批量下载会定期检查
+    cancel: Option<CancelFlag>,
 }
 
 impl Installer {
@@ -101,6 +119,7 @@ impl Installer {
             launcher_version: None,
             extra_jvm_args: Vec::new(),
             jvm_override: None,
+            cancel: None,
         }
     }
 
@@ -321,6 +340,16 @@ impl Installer {
         self
     }
 
+    /// [Astral patch] 设置取消判断，安装过程中的大批量下载会定期检查，
+    /// 命中后立刻停下并把剩余分片标记为已取消。
+    pub fn set_cancel(
+        &mut self,
+        cancel: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> &mut Self {
+        self.cancel = Some(CancelFlag(cancel));
+        self
+    }
+
     /// Ensure that a the given version, from its id, is fully installed and return
     /// a game instance that can be used to run launch it.
     #[inline]
@@ -376,10 +405,22 @@ impl Installer {
                 return Err(Error::DownloadResourcesCancelled {});
             }
 
-            batch
+            // [Astral patch] 把调用方的取消判断交给批量下载器，让它在分片级别生效
+            if let Some(c) = self.cancel.clone() {
+                batch.set_cancel(c.0);
+            }
+
+            let batch_res = batch
                 .download((&mut *handler).into_download())
-                .map_err(|e| Error::new_reqwest(e, "download resources"))?
-                .into_result()?;
+                .map_err(|e| Error::new_reqwest(e, "download resources"))?;
+
+            // [Astral patch] 因为取消而失败的，用专门的错误类型往上抛，
+            // 让调用方能区分"取消"和"真的下载失败"。
+            if self.cancel.as_ref().is_some_and(|c| c.cancelled()) {
+                return Err(Error::DownloadResourcesCancelled {});
+            }
+
+            batch_res.into_result()?;
 
             handler.on_event(Event::DownloadedResources);
         }

@@ -532,3 +532,10 @@ export type Task = {
 **取消语义**：`cancel_task` 之后任务进入 `cancelling`，真正停下来是在下一个检查点
 （下载是每个 chunk 检查，所以大文件也能在几百毫秒内停）。
 `state === "cancelled"` 时 `.part` 会保留，下次可以续传。
+
+**安装类任务同样可取消**（V2.5 补完）：`install` / `loader` / `modpack` / `repair`
+这些会调用 portablemc 批量下载器的任务，取消判断已经下沉到批量下载器内部——
+每个分片读完一块检查一次，未开始的分片直接标记为已取消，不会再出现
+「界面显示已取消、后台还在往磁盘写」的情况。前端不需要额外处理，
+`cancelling` → `cancelled` 的时序和以前一样，只是真的会停了。
+
