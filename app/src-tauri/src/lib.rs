@@ -17,6 +17,7 @@ mod migrate;
 mod modpack;
 mod mods;
 mod modscan;
+mod nbt;
 mod net;
 mod packs;
 mod plan;
@@ -584,6 +585,15 @@ fn list_target_worlds(instance_id: String) -> Result<Vec<worlds::WorldTarget>, S
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
     Ok(worlds::list(std::path::Path::new(&inst.dirs.saves)))
+}
+
+/// 单个存档的详细信息（只读）。列表只给概要，点开才读这些。
+#[tauri::command]
+fn get_world_info(instance_id: String, world_id: String) -> Result<worlds::WorldDetail, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    worlds::detail(std::path::Path::new(&inst.dirs.saves), &world_id)
 }
 
 // ── 存档备份与恢复 ──────────────────────────────────────────────
@@ -2741,6 +2751,7 @@ pub fn run() {
             list_loader_builds,
             repair_instance,
             list_target_worlds,
+            get_world_info,
             scan_local_versions,
             plan_instance_copy,
             plan_version_import,
@@ -3736,6 +3747,67 @@ pub fn selftest() -> i32 {
     let _ = std::fs::create_dir_all(&save);
     let _ = std::fs::write(save.join("level.dat"), "x");
     check!("saves listed", stats::list_saves(&game, None).len() == 1);
+
+    // level.dat 是 gzip 压缩的 NBT：版本、难度、上次游玩都从里面读。
+    // 读不出来也不能让整个存档列表失败——坏文件只是没有信息，不是没这个存档。
+    {
+        let entries = stats::list_saves(&game, None);
+        check!(
+            "saves survive a broken level.dat",
+            entries
+                .first()
+                .map(|e| e.game_version.is_none() && e.info_note.is_some())
+                .unwrap_or(false)
+        );
+        let _ = std::fs::write(
+            save.join("level.dat"),
+            nbt::sample_level_dat("1.20.1", 1, true),
+        );
+        let entries = stats::list_saves(&game, None);
+        let first = entries.first();
+        check!(
+            "saves read version from level.dat",
+            first
+                .map(|e| e.game_version.as_deref() == Some("1.20.1"))
+                .unwrap_or(false)
+                && first.and_then(|e| e.version_id) == Some(3465)
+                && first.and_then(|e| e.game_mode.as_deref()) == Some("创造")
+                && first.and_then(|e| e.difficulty.as_deref()) == Some("普通")
+                && first.and_then(|e| e.hardcore) == Some(true)
+        );
+        check!(
+            "saves prefer last played from level.dat",
+            first.and_then(|e| e.last_played.as_deref()) == Some("2023-11-14T22:13:20Z")
+                && first.and_then(|e| e.level_name.as_deref()) == Some("测试世界")
+                && first.map(|e| e.info_note.is_none()).unwrap_or(false)
+        );
+        check!(
+            "worlds carry the real game version",
+            worlds::list(&game.join("saves"))
+                .first()
+                .map(|w| w.game_version.as_deref() == Some("1.20.1"))
+                .unwrap_or(false)
+        );
+        let wid = worlds::world_id("World1");
+        let detail = worlds::detail(&game.join("saves"), &wid);
+        check!(
+            "world detail reads level info",
+            detail
+                .as_ref()
+                .map(|d| d.game_version.as_deref() == Some("1.20.1")
+                    && d.game_mode.as_deref() == Some("创造")
+                    && d.hardcore == Some(true)
+                    && d.info_note.is_none())
+                .unwrap_or(false)
+        );
+        check!(
+            "world detail rejects unknown id",
+            worlds::detail(&game.join("saves"), "w_00000000")
+                .err()
+                .map(|e| e.starts_with("WORLD_NOT_FOUND|"))
+                .unwrap_or(false)
+        );
+    }
 
     let st = stats::stats("7d", &|id| id.to_string());
     check!(

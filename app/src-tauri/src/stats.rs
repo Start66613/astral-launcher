@@ -11,10 +11,23 @@ use std::path::Path;
 pub struct SaveEntry {
     pub name: String,
     pub dir: String,
+    /// 存档自报的版本（`level.dat` 里的 `Data.Version.Name`），读不到才是 null
     pub game_version: Option<String>,
     pub last_modified: String,
     pub size_bytes: u64,
     pub icon_path: Option<String>,
+    /// `level.dat` 里写的名字，可能和目录名不同
+    pub level_name: Option<String>,
+    pub version_id: Option<i32>,
+    pub game_mode: Option<String>,
+    pub difficulty: Option<String>,
+    pub hardcore: Option<bool>,
+    pub allow_commands: Option<bool>,
+    /// 上次游玩时间：优先用存档自报的 `LastPlayed`（复制/解压不会改它），
+    /// 读不到才退回文件 mtime
+    pub last_played: Option<String>,
+    /// `level.dat` 存在但读不懂时给一句人话，列表照常返回
+    pub info_note: Option<String>,
 }
 
 fn dir_size(p: &Path) -> u64 {
@@ -58,13 +71,26 @@ pub fn list_saves(game: &Path, inst: Option<&Instance>) -> Vec<SaveEntry> {
             .and_then(|m| m.modified().ok())
             .unwrap_or(std::time::UNIX_EPOCH);
         let icon = p.join("icon.png");
+        let (info, note) = match crate::nbt::LevelInfo::read(&p) {
+            Some(i) if i.looks_valid() => (Some(i), None),
+            Some(_) => (None, Some("level.dat 里没有版本信息".to_string())),
+            None => (None, Some("level.dat 读不出来（可能已损坏）".to_string())),
+        };
         out.push(SaveEntry {
             name: e.file_name().to_string_lossy().to_string(),
             dir: p.to_string_lossy().to_string(),
-            game_version: None, // level.dat 是 NBT，暂不解析
+            game_version: info.as_ref().and_then(|i| i.version_name.clone()),
             last_modified: iso(mtime),
             size_bytes: dir_size(&p),
             icon_path: icon.exists().then(|| icon.to_string_lossy().to_string()),
+            level_name: info.as_ref().and_then(|i| i.level_name.clone()),
+            version_id: info.as_ref().and_then(|i| i.version_id),
+            game_mode: info.as_ref().and_then(|i| i.game_mode.clone()),
+            difficulty: info.as_ref().and_then(|i| i.difficulty.clone()),
+            hardcore: info.as_ref().and_then(|i| i.hardcore),
+            allow_commands: info.as_ref().and_then(|i| i.allow_commands),
+            last_played: info.as_ref().and_then(|i| i.last_played.clone()),
+            info_note: note,
         });
     }
     out.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
