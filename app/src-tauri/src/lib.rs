@@ -10,6 +10,7 @@ mod java;
 mod java_audit;
 mod jdk;
 mod ledger;
+mod live;
 mod loader;
 mod logs;
 mod migrate;
@@ -1537,6 +1538,27 @@ fn read_log(
     logs::read(&dir, &log_id, limit)
 }
 
+/// 实时日志跟随：从 `offset` 开始读新增的完整行。
+///
+/// 前端记住返回的 `nextOffset`，下次带上它再调；`reset: true` 时清屏重来。
+/// 没传 `log_id` 时自动跟最新一份游戏日志（启动后直接就能看）。
+#[tauri::command]
+fn tail_log(
+    instance_id: String,
+    log_id: Option<String>,
+    offset: Option<u64>,
+    max_bytes: Option<u64>,
+) -> Result<live::LogChunk, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    let id = match log_id {
+        Some(id) => id,
+        None => live::active_game_log(&dir)
+            .map(|l| l.id)
+            .ok_or_else(|| "INVALID_PATH|这个实例还没有日志".to_string())?,
+    };
+    live::tail(&dir, &id, offset.unwrap_or(0), max_bytes)
+}
+
 /// 只生成脱敏预览；上传由用户在界面上确认后另行处理
 #[tauri::command]
 fn prepare_diagnosis(
@@ -2675,6 +2697,7 @@ pub fn run() {
             list_logs,
             read_log,
             prepare_diagnosis,
+            tail_log,
             diagnose_instance,
             install_version,
             launch_version,
@@ -4011,6 +4034,53 @@ pub fn selftest() -> i32 {
             && preview.text.contains("<ip>")
             && preview.text.contains("<redacted>")
     );
+    // 实时跟随：只给完整行、按 offset 续读、日志被重写时自愈
+    {
+        let live_id = logs::list(&log_dir)
+            .into_iter()
+            .find(|l| l.name == "latest.log")
+            .map(|l| l.id)
+            .unwrap();
+        let c1 = live::tail(&log_dir, &live_id, 0, None).expect("tail 1");
+        check!(
+            "live log returns complete lines",
+            c1.lines == 5 && c1.eof && !c1.reset && c1.text.contains("line2")
+        );
+        // 没新内容时不该重复给旧行
+        let c2 = live::tail(&log_dir, &live_id, c1.next_offset, None).expect("tail 2");
+        check!(
+            "live log does not repeat",
+            c2.text.is_empty() && c2.next_offset == c1.next_offset
+        );
+        // 追加一行，只给新的那行
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(log_dir.join("logs/latest.log"))
+                .unwrap();
+            f.write_all(b"line6\n").unwrap();
+        }
+        let c3 = live::tail(&log_dir, &live_id, c2.next_offset, None).expect("tail 3");
+        check!(
+            "live log appends incrementally",
+            c3.text == "line6\n" && c3.eof
+        );
+        // 日志被重写（比 offset 短）→ reset 并从头给
+        let _ = std::fs::write(log_dir.join("logs/latest.log"), "fresh\n");
+        let c4 = live::tail(&log_dir, &live_id, c3.next_offset, None).expect("tail 4");
+        check!(
+            "live log resets after rewrite",
+            c4.reset && c4.from_offset == 0 && c4.text == "fresh\n"
+        );
+        // 只有半行时不返回，等补齐
+        let _ = std::fs::write(log_dir.join("logs/latest.log"), "whole\npart");
+        let c5 = live::tail(&log_dir, &live_id, 0, None).expect("tail 5");
+        check!(
+            "live log holds back partial line",
+            c5.text == "whole\n" && !c5.eof
+        );
+    }
     let _ = std::fs::remove_dir_all(&log_dir);
 
     // 可选的真实整合包安装：ASTRAL_LIVE_MODPACK="gameDir|projectId"

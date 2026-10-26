@@ -117,6 +117,22 @@ fn resolve(instance_dir: &Path, id: &str) -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
+/// 供实时跟随（`live::tail`）用：给定日志 id，返回 (绝对路径, 文件名)
+pub fn resolve_path(instance_dir: &Path, id: &str) -> Option<(PathBuf, String)> {
+    let mut entries: Vec<(LogFile, PathBuf)> = Vec::new();
+    collect(&instance_dir.join("logs"), "game", "logs/", &mut entries);
+    collect(
+        &instance_dir.join("crash-reports"),
+        "crash",
+        "crash-reports/",
+        &mut entries,
+    );
+    entries
+        .into_iter()
+        .find(|(f, _)| f.id == id)
+        .map(|(f, p)| (p, f.name))
+}
+
 /// 读日志尾部；`limit` 为行数上限（默认 400，最大 2000）
 pub fn read(instance_dir: &Path, id: &str, limit: Option<u32>) -> Result<LogText, String> {
     let path = resolve(instance_dir, id).ok_or_else(|| "INVALID_PATH|日志不存在".to_string())?;
