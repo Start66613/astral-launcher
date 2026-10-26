@@ -1487,3 +1487,83 @@ INVALID_VALUE|封面请用 set_instance_cover 设置，不能直接写路径
 3. 换封面不用先 `clear_instance_cover`，直接 `set` 会覆盖。
 4. 封面是缩略图场景，别拿 4K 原图当封面 —— 8 MB 上限只是兜底，
    前端可以在选图时提示"建议 1280×720 以内"。
+
+---
+
+## 23. 崩溃报告解析（V2.5 新增）
+
+Minecraft 崩溃时会在 `crash-reports/` 下留一份文本报告。以前这份报告和普通
+日志一样处理 —— 只做关键词匹配。但报告本身格式是固定的，字段全都写着，
+照着读比猜准得多。
+
+### 23.1 命令
+
+```ts
+interface CrashReport {
+  isCrashReport: boolean;        // 有没有 "---- Minecraft Crash Report ----"
+  time: string | null;           // "2026-10-26 12:00:00"
+  description: string | null;    // 崩的时候在干什么："Rendering overlay"
+  exception: string | null;      // 顶层异常
+  causeChain: string[];          // "Caused by:" 链，由外到内，最多 8 条
+  frames: string[];              // 顶层异常的前几行栈帧，最多 12 行
+  sections: string[];            // 报告里所有 "-- xxx --" 小节标题
+  system: Record<string, string>; // "-- System Details --" 的键值
+  suspects: string[];            // 报告自己点名的可疑模组
+  suspectsSource: "report" | "inferred" | "none";
+  inferredPackages: string[];    // 栈帧里的非原版包名（推断，仅供参考）
+  lines: number;
+  truncated: boolean;            // 超过 2 MB 只读了尾部
+}
+
+interface CrashView {
+  logId: string;
+  logName: string;
+  report: CrashReport;
+  text: string;                  // 脱敏后的原文，最多 256 KiB
+  findings: Finding[];           // 和 diagnose_instance 同一套规则
+  basis: string;                 // 依据说明
+}
+
+// 不传 logId 就取最新的崩溃报告
+const view = await invoke<CrashView>("read_crash_report", {
+  instanceId, logId: null
+});
+```
+
+### 23.2 为什么不全信 `inferredPackages`
+
+报告里如果有 `Suspected Mods:` 这一节，那就是**游戏自己**认定的可疑模组，
+`suspectsSource` 会是 `"report"`，直接用。
+
+没有这一节时（多数 Forge 崩溃报告没有），后端不会硬猜是哪个模组，只把
+栈帧里出现的非原版包名列进 `inferredPackages`，`suspectsSource` 保持
+`"none"`。前端展示时**必须**把这一块标成"推断"，不能说成"就是它崩的"——
+栈帧里出现的第三方包很可能只是路过。
+
+原版/框架包名（`java.`、`net.minecraft`、`com.mojang`、`org.lwjgl`、
+`org.apache`、`org.slf4j`、`com.google`、`it.unimi`、`oshi.` 等）会被过滤掉。
+
+### 23.3 和 `diagnose_instance` 的关系
+
+两个命令是**互补**的，不是替代：
+
+- `diagnose_instance` 读普通日志（`latest.log`），按 12 条关键词规则给结论，
+  适合"游戏没崩但行为异常"。
+- `read_crash_report` 读崩溃报告，按报告格式拆字段，适合"确实崩了"。
+
+`CrashView.findings` 里放的就是同一套关键词规则的结论，所以界面上可以
+先展示 `report.description` + `exception`（人话 + 技术细节），再列
+`findings`，最后给 `next_steps`。
+
+### 23.4 前端接入建议
+
+1. 实例页检测到 `crash-reports/` 有新文件时（`list_logs` 里 `kind === "crash"`），
+   直接弹一个"上次崩溃了，要看看原因吗"的入口。
+2. 头部用 `description` + `time`，正文用 `exception` + `causeChain`，
+   技术细节折叠 `frames`。
+3. `system` 里的 `Minecraft Version` / `Java Version` / `Operating System`
+   单独展示成一行标签 —— 这三个是排查时最常看的。
+4. `suspects` 有值时才显示"报告点名了这些模组"，`inferredPackages` 单独
+   一块并明确标"推断"。
+5. `text` 已经是脱敏后的原文，可以直接放进 `<pre>` 里滚动显示，
+   不需要前端再脱敏一遍。
