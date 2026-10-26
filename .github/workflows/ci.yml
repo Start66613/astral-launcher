@@ -117,14 +117,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # 用官方 action：有漏洞才失败，只提示"未维护"这类警告时不算失败，
+      # 免得上游发一条 unmaintained 通知就把整个 CI 卡红。
+      - uses: rustsec/audit-check@v2.0.0
         with:
-          workspaces: app/src-tauri
-      - name: 安装 cargo-audit
-        run: cargo install cargo-audit --locked
-      # 只审计，不因为上游新披露的漏洞把整个 CI 卡死：
-      # 有漏洞时这一步会失败并给出报告，由人判断是否影响发布。
-      - name: cargo audit
-        working-directory: app/src-tauri
-        run: cargo audit --deny warnings
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: app/src-tauri
