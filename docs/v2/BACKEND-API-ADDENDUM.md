@@ -2833,3 +2833,136 @@ if (check?.canAutoCheck && check.updateAvailable) {
 - 计划里的 `added` / `removed` / `changed` 按 `kind` 分组展示：Mod 一组、配置一组、其他一组。
 - `removed` 里的条目要标红，并提示"这些文件会从实例里删掉"。
 - 阻塞时不要给"仍然继续"的按钮 —— 换游戏版本请引导玩家新建实例。
+
+---
+
+## 37. 实例快照：整个实例打包与还原（V2.5 新增）
+
+存档备份（§19 那一套是单存档）、整合包导出（§18，不含存档）都覆盖不到一件事：
+**"我想把现在这个实例整个存下来，回头原样还回来"**。换电脑前存一份、装一堆新
+Mod 之前存一份、手滑删了东西之后找回来 —— 这就是实例快照。
+
+### 37.1 命令
+
+| 命令 | 参数 | 返回 |
+|---|---|---|
+| `list_instance_snapshots` | — | `Snapshot[]` |
+| `create_instance_snapshot` | `{ instanceId: string, note?: string, taskId?: string }` | `Snapshot` |
+| `preview_instance_restore` | `{ snapshotId: string }` | `SnapshotPreview` |
+| `restore_instance_snapshot` | `{ snapshotId: string, taskId?: string }` | `RestoreOutcome` |
+| `delete_instance_snapshot` | `{ snapshotId: string, confirm: boolean }` | `number`（删掉的字节数） |
+
+### 37.2 类型
+
+```ts
+export interface Snapshot {
+  snapshotId: string;
+  instanceId: string;
+  instanceName: string;
+  gameVersion: string;
+  loaderKind: string | null;
+  loaderVersion: string | null;
+  createdAt: string;
+  /** zip 文件大小 */
+  bytes: number;
+  /** 打包进去的文件数 */
+  fileCount: number;
+  /** 打包前这些文件的原始大小（还原要占的空间按这个算） */
+  sourceBytes: number;
+  sha256: string;
+  note: string;
+  /** 实际收进去的目录与文件，例如 ["instance.json", "mods", "config", "saves"] */
+  parts: string[];
+  /** 明确没进的，例如 ["logs", "screenshots"] */
+  skipped: string[];
+}
+
+export interface SnapshotPreview {
+  snapshot: Snapshot;
+  targetDir: string;
+  targetExists: boolean;
+  targetFiles: number;
+  targetBytes: number;
+  needBytes: number;
+  availableBytes: number | null;
+  /** 现有实例会被搬到这里（不是删除）；目标原来不存在时为 null */
+  replacedDir: string | null;
+  /** 不能还原的原因，非空就不要给"还原"按钮 */
+  blockers: string[];
+  /** 能还原但玩家该知道的 */
+  warnings: string[];
+}
+
+export interface RestoreOutcome {
+  instanceId: string;
+  restoredFiles: number;
+  bytes: number;
+  replacedDir: string | null;
+}
+```
+
+### 37.3 调用示例
+
+```ts
+import { invoke } from "@tauri-apps/api/core";
+
+// 1. 实例详情页的"备份"按钮
+const snap = await invoke<Snapshot>("create_instance_snapshot", {
+  instanceId: instance.id,
+  note: "装新 Mod 之前",
+});
+toast(`已备份 ${snap.fileCount} 个文件，${(snap.bytes / 1048576).toFixed(1)} MB`);
+
+// 2. 快照列表（全局，不属于某个实例）
+const snaps = await invoke<Snapshot[]>("list_instance_snapshots");
+
+// 3. 还原前必须先预览
+const preview = await invoke<SnapshotPreview>("preview_instance_restore", {
+  snapshotId: snaps[0].snapshotId,
+});
+if (preview.blockers.length > 0) {
+  showErrors(preview.blockers);
+} else {
+  await confirm({
+    title: `还原到「${preview.snapshot.createdAt}」的状态`,
+    lines: [
+      `会写回 ${preview.snapshot.fileCount} 个文件`,
+      preview.targetExists
+        ? `现在的实例会先搬到 ${preview.replacedDir}（不会删除）`
+        : "这个实例现在不在，还原会重新建出来",
+    ],
+    notes: preview.warnings,
+  });
+  const out = await invoke<RestoreOutcome>("restore_instance_snapshot", {
+    snapshotId: preview.snapshot.snapshotId,
+  });
+}
+```
+
+### 37.4 行为约定
+
+- **游戏运行中、或有进行中的任务时一律拒绝**（`INSTANCE_BUSY`）。这时候文件正在被写，
+  快照拿到的会是半成品，事后也无法自证一致 —— 和存档备份（§19）是同一条原则。
+- **收哪些**：`mods/`、`config/`、`saves/`、`resourcepacks/`、`shaderpacks/`，以及顶层的
+  `instance.json`、`options.txt`、`servers.dat`、`optionsof.txt`。
+- **不收哪些**：`logs/` 和 `screenshots/`（体积大、丢了不可惜）。`skipped` 字段会如实列出来，
+  还原预览的 `warnings` 也会提醒"历史日志/截图不会回来"。
+- **快照存在 `<gameDir>/snapshots/`，不在实例目录里**。放在实例里的话，还原时整个目录被换掉，
+  快照自己也没了。
+- **还原不删现有实例**：先把整个实例目录 rename 到 `snapshots/replaced/<时间戳>-<实例id>/`，
+  再把快照放回去。玩家不满意还能手动把旧目录搬回来。
+- **先解到暂存目录**：`snapshots/staging-<纳秒>/`，全部解完、确认里面有 `instance.json`，
+  才动现有实例。中途失败直接清掉暂存，现有实例一个字节都没动。
+- **还原前校验 sha256**，坏包直接 `VERIFY_FAILED`，不会解出一半。
+- **删除快照必须 `confirm: true`**，否则 `UNSUPPORTED`。
+- **快照 zip 自带一份 `snapshot.json` 清单**，就算 `index.json` 丢了，zip 本身也说得清自己是什么。
+- 符号链接一律跳过（打包时）/ 拒绝（解压时）；解压逐条校验路径防 Zip Slip。
+
+### 37.5 前端接入建议
+
+- 快照列表放"实例 → 备份"页，和存档备份（§19）并列，但用不同的 tab：
+  一个叫"存档备份"，一个叫"整个实例"。
+- 创建快照时给一句人话说明："会把 Mod、配置、存档一起打包，不含日志和截图"。
+- 还原按钮做成危险色，且必须先走 `preview_instance_restore`；`blockers` 非空时禁用。
+- `replacedDir` 可以显示成"旧版本保存在 …"，配一个"打开文件夹"按钮（复用 `open_path`）。
+- 快照体积通常几百 MB，列表里显示 `bytes` 时要带单位换算。

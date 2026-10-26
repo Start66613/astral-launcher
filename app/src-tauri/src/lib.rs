@@ -40,6 +40,7 @@ mod server;
 mod servers;
 mod servers_dat;
 mod session;
+mod snapshot;
 mod source_probe;
 mod stats;
 mod support;
@@ -773,6 +774,63 @@ fn delete_world_backup(
         &backup_id,
         confirm,
     )
+}
+
+// ── 实例快照（整个实例打包 / 还原）────────────────────────────
+
+#[tauri::command]
+fn list_instance_snapshots() -> Vec<snapshot::Snapshot> {
+    snapshot::list(&game_root())
+}
+
+#[tauri::command]
+fn create_instance_snapshot(
+    instance_id: String,
+    note: Option<String>,
+    task_id: Option<String>,
+) -> Result<snapshot::Snapshot, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let running = session::active(Some(&inst.id)).is_some();
+    let has_task = task::has_running(&inst.id);
+    let cancel =
+        net::cancel_from(move || task_id.as_deref().map(task::is_cancelled).unwrap_or(false));
+    snapshot::create(
+        &game,
+        &inst.id,
+        note.as_deref().unwrap_or(""),
+        running,
+        has_task,
+        &*cancel,
+        |_, _| {},
+    )
+}
+
+#[tauri::command]
+fn preview_instance_restore(snapshot_id: String) -> Result<snapshot::SnapshotPreview, String> {
+    snapshot::preview_restore(&game_root(), &snapshot_id)
+}
+
+#[tauri::command]
+fn restore_instance_snapshot(
+    snapshot_id: String,
+    task_id: Option<String>,
+) -> Result<snapshot::RestoreOutcome, String> {
+    let game = game_root();
+    // 快照里记着 instanceId，先读出来判断这个实例是不是正在跑
+    let preview = snapshot::preview_restore(&game, &snapshot_id)?;
+    let inst_id = preview.snapshot.instance_id.clone();
+    let running = session::active(Some(&inst_id)).is_some();
+    let has_task = task::has_running(&inst_id);
+    let cancel =
+        net::cancel_from(move || task_id.as_deref().map(task::is_cancelled).unwrap_or(false));
+    snapshot::restore(&game, &snapshot_id, running, has_task, &*cancel, |_, _| {})
+}
+
+#[tauri::command]
+fn delete_instance_snapshot(snapshot_id: String, confirm: bool) -> Result<u64, String> {
+    snapshot::delete(&game_root(), &snapshot_id, confirm)
 }
 
 // ── 存档管理（重命名 / 复制 / 删除到回收站）────────────────────
@@ -3449,6 +3507,11 @@ pub fn run() {
             preview_world_restore,
             restore_world,
             delete_world_backup,
+            list_instance_snapshots,
+            create_instance_snapshot,
+            preview_instance_restore,
+            restore_instance_snapshot,
+            delete_instance_snapshot,
             rename_world,
             duplicate_world,
             delete_world,
@@ -4917,6 +4980,110 @@ pub fn selftest() -> i32 {
             ["", "..", "a/b", "CON", "x."]
                 .iter()
                 .all(|n| save_manage::validate_name(n).is_err())
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // 实例快照：整个实例打包、还原不删旧实例、删除需确认。全在隔离目录里做。
+    {
+        let base = std::env::temp_dir().join(format!("astral-snap-{}", time::now_nanos()));
+        let _ = std::fs::create_dir_all(&base);
+        let meta = instance::InstanceMeta {
+            id: "snap_selftest".to_string(),
+            name: "快照测试".into(),
+            game_version: "1.20.1".into(),
+            loader_kind: Some("fabric".into()),
+            loader_version: Some("0.16.9".into()),
+            launch_version: None,
+            memory_mb: None,
+            jvm_args: Vec::new(),
+            java_path: None,
+            cover: None,
+            created_at: time::now_iso(),
+        };
+        let _ = instance::create(&base, &meta);
+        let inst_dir = instance::instance_dir(&base, "snap_selftest");
+        let _ = std::fs::write(inst_dir.join("mods").join("a.jar"), b"mod-a");
+        let _ = std::fs::create_dir_all(inst_dir.join("saves").join("w1"));
+        let _ = std::fs::write(inst_dir.join("saves").join("w1").join("level.dat"), b"nbt");
+        let _ = std::fs::write(inst_dir.join("options.txt"), b"fov:70\n");
+        let _ = std::fs::write(inst_dir.join("logs").join("latest.log"), b"log");
+
+        let snap = snapshot::create(
+            &base,
+            "snap_selftest",
+            "自检快照",
+            false,
+            false,
+            &*net::never_cancel(),
+            |_, _| {},
+        );
+        check!(
+            "snapshot packs the whole instance",
+            match &snap {
+                Ok(s) => {
+                    s.instance_id == "snap_selftest"
+                        && s.file_count >= 4
+                        && !s.sha256.is_empty()
+                        && s.parts.iter().any(|p| p == "saves")
+                        && s.skipped.iter().any(|p| p == "logs")
+                }
+                Err(_) => false,
+            }
+        );
+        check!(
+            "snapshot refuses while running",
+            snapshot::create(
+                &base,
+                "snap_selftest",
+                "",
+                true,
+                false,
+                &*net::never_cancel(),
+                |_, _| {}
+            )
+            .unwrap_err()
+            .starts_with("INSTANCE_BUSY|")
+        );
+
+        let snap_id = snap
+            .as_ref()
+            .map(|s| s.snapshot_id.clone())
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(inst_dir.join("mods").join("a.jar"));
+        let _ = std::fs::write(inst_dir.join("options.txt"), b"fov:30\n");
+        let restored = snapshot::restore(
+            &base,
+            &snap_id,
+            false,
+            false,
+            &*net::never_cancel(),
+            |_, _| {},
+        );
+        check!(
+            "snapshot restore brings files back",
+            match &restored {
+                Ok(r) => {
+                    r.restored_files >= 4
+                        && inst_dir.join("mods").join("a.jar").is_file()
+                        && std::fs::read(inst_dir.join("options.txt")).unwrap_or_default()
+                            == b"fov:70\n"
+                        && r.replaced_dir.is_some()
+                }
+                Err(_) => false,
+            }
+        );
+
+        let list = snapshot::list(&base);
+        check!(
+            "snapshot list and confirm",
+            list.len() == 1
+                && snapshot::delete(&base, &snap_id, false)
+                    .unwrap_err()
+                    .starts_with("UNSUPPORTED|")
+                && snapshot::delete(&base, &snap_id, true).is_ok()
+                && snapshot::list(&base).is_empty()
         );
 
         let _ = std::fs::remove_dir_all(&base);
