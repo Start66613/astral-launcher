@@ -993,3 +993,80 @@ for (const s of list) {
 - 名字超 48 字符会被截断（不报错），备注超 200 字符同理；最多存 200 个。
 - 批量刷新内部是 8 线程并行，前端不要再自己并发一轮，直接等这一个调用即可。
 - 建议刷新频率 ≥30 秒；服务器列表协议没有推送机制。
+
+---
+
+## 17. 存档详情与 `level.dat`（V2.5 新增）
+
+### 17.1 变了什么
+
+`list_saves` 和 `list_target_worlds` 以前 `gameVersion` 永远是 `null`（当时注释写的是
+"level.dat 是 NBT，暂不解析"）。现在解析了，所以这两个接口多出几个字段，
+**老字段一个没动**，前端不改也能跑。
+
+```ts
+interface SaveEntry {
+  name: string;
+  dir: string;
+  gameVersion: string | null;   // 现在是真值了，例如 "1.20.1"
+  lastModified: string;
+  sizeBytes: number;
+  iconPath: string | null;
+
+  // 新增
+  levelName: string | null;     // 存档自报的名字，可能和目录名不同
+  versionId: number | null;     // 数据版本号，如 3465
+  gameMode: string | null;      // "生存" / "创造" / "冒险" / "观战"
+  difficulty: string | null;    // "和平" / "简单" / "普通" / "困难"
+  hardcore: boolean | null;
+  allowCommands: boolean | null;
+  lastPlayed: string | null;    // 存档自报的上次游玩时间（UTC ISO）
+  infoNote: string | null;      // 读不出来时的一句人话
+}
+```
+
+### 17.2 新命令：`get_world_info`
+
+列表只给概要（要扫很多存档，不能每个都深读），点开某一个再要详情：
+
+```ts
+invoke<WorldDetail>("get_world_info", { instanceId, worldId })
+```
+
+```ts
+interface WorldDetail {
+  worldId: string;
+  displayName: string;
+  dir: string;
+  lastModified: string;
+  sizeBytes: number;
+  gameVersion: string | null;
+  levelName: string | null;
+  versionId: number | null;
+  gameMode: string | null;
+  difficulty: string | null;
+  hardcore: boolean | null;
+  allowCommands: boolean | null;
+  lastPlayed: string | null;
+  dataVersion: number | null;
+  infoNote: string | null;
+  regionFiles: number;       // region/*.mca 数量，大致等于探索过的区块组
+  playerFiles: number;       // playerdata/*.dat 数量
+  hasIcon: boolean;
+  looksLikeServer: boolean;  // 有 session.lock + level.dat_old，像是服务端存档
+}
+```
+
+要点：
+
+- `worldId` 还是 `w_<8位十六进制>`（由目录名派生），不是目录名，也不是
+  `levelName`。前端传 `worldId`，Rust 负责映射回真实目录。
+- **`lastPlayed` 优先用存档自报的时间**，而不是文件 mtime。复制、解压、
+  从备份恢复都会改 mtime，但存档内部记的时间不会变——那才是真的"上次玩"。
+- 读不出来（`level.dat` 损坏、被替换成别的文件、加密）时：
+  存档**照常出现在列表里**，`infoNote` 给一句 "level.dat 读不出来（可能已损坏）"，
+  其余字段为 `null`。**不会因为一个坏存档让整页失败。**
+- `get_world_info` 找不到存档返回 `WORLD_NOT_FOUND|存档不存在`。
+- 难度/模式是中文（"生存"/"普通"），直接显示即可；要枚举的话按上面的字符串匹配。
+- `looksLikeServer` 只是个提示，不是判定——真实服务器存档可能没有这两个文件，
+  单人存档也可能因为开过局域网而有 `session.lock`。

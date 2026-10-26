@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 221 项全过，单元测试 134 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 227 项全过，单元测试 147 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（221 项）
+## 2. 自检覆盖（227 项）
 
 按前缀分组：
 
@@ -50,7 +50,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `session` | 9 | 开始、退出、统计、对账、PID 复用识别、活进程不误判、死亡不活跃、已对账 |
 | `plan` | 8 | 安装计划准备/复用/取用/单次、坏名字、Forge、修订守卫 |
 | `modpack` | 8 | 路径穿越、符号链接、正常 overrides、env 过滤、本地导入拒绝/解析、来源记录、磁盘预检 |
-| `world` | 7 | 备份创建、运行中拒绝、恢复需确认、损坏备份拒绝、存档列表、世界 id、解析 |
+| `world` | 13 | 备份创建、运行中拒绝、恢复需确认、损坏备份拒绝、存档列表、世界 id、解析、坏 level.dat 仍能列出、从 level.dat 读版本/难度/硬核、优先用存档自报的上次游玩时间、存档详情能读、未知 id 被拒 |
 | `deps` | 7 | 拓扑序、via 链、环检测、缺失依赖、深度上限、已装跳过、可选跳过 |
 | `update` | 6 | 历史、回滚恢复旧文件、回滚清历史、不碰其他 mod、挡 beta 升级 |
 | `trash` | 5 | 列表、冲突改名恢复、恢复后清空、只删指定项、拒绝穿越 |
@@ -72,7 +72,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（140 个）
+## 3. 单元测试（153 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -84,6 +84,8 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `logs` | 6 | 脱敏（邮箱/IP/token/用户目录）、常见故障分类、cause/confidence、新规则、干净日志 |
 | `live` | 6 | 只给完整行、按 offset 续读、文件变短 reset、上限与 pending、日志不存在报错、挑最新日志 |
 | `server` | 10 | VarInt 往返、字符串长度按字节、聊天组件拍平、颜色代码剥离、状态解析、坏 favicon、地址拆分、老协议解析、非法地址 |
+| `nbt` | 9 | 标量与数组往返、LevelInfo 解析、缺字段保持 null、截断数据被拒、荒谬长度被拒、非 compound 根被拒、未压缩文件可读 |
+| `worlds` | +4 | 详情读全、坏 level.dat 只丢信息、未知 id 报错、列表带版本 |
 | `servers` | 9 | 增删改查、重复与非法地址、选择性更新、改回自己地址不算冲突、重排、lastSeen、坏文件读成空、名字截断 |
 | `net` | 5 | 白名单、非法 URL、公网 IP 判定、`.part` 路径、磁盘满判定 |
 | `recycle` | 3 | 名字拆分、怪名字容忍、拒绝穿越 |

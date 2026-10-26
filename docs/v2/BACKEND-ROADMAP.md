@@ -10,7 +10,7 @@
 
 A1–A5、B1–B4、C1–C4、D1–D2 已完成并有自动化测试；D3 的测试矩阵已随各功能逐项落地；
 D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发布检查清单与自动更新
-签名方案尚未完成。共 111 个 Tauri 命令、221 项自检、140 个 Rust 单元测试（134 通过 6 忽略）。
+签名方案尚未完成。共 112 个 Tauri 命令、227 项自检、153 个 Rust 单元测试（147 通过 6 忽略）。
 
 ---
 
@@ -96,6 +96,7 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 | E4 | 实时日志跟随 | ✅ | `live.rs` + `tail_log`，按 offset 增量读、只给完整行、重写自愈、超长行不死等 |
 | E5 | 服务器状态查询 | ✅ | `server.rs` + `ping_server`，直连服务器列表协议（modern + legacy 回退），离线不报错 |
 | E6 | 收藏的服务器列表 | ✅ | `servers.rs` + 6 个命令，自管 `.astral-servers.json`（不动 `servers.dat`），8 线程批量刷新、每条独立成败 |
+| E7 | 存档详情（读 `level.dat`） | ✅ | `nbt.rs`（只读 NBT）+ `worlds::detail` + `get_world_info`，真实版本/难度/上次游玩，坏文件只丢信息 |
 
 ---
 
@@ -121,10 +122,10 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 ## 3. 测试策略
 
 - **单元测试**：纯逻辑（解析、分类、命名、路径校验、状态机）放 `#[cfg(test)]`。
-  当前 140 个，134 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
+  当前 153 个，147 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
 - **自检（`--selftest`）**：所有需要真实文件系统、真实 HTTP、真实进程的检查都放这里。
   用 `testsrv.rs` 起一个只监听 `127.0.0.1` 的临时服务器，能确定性制造 503、慢速、
-  重定向、Range 响应。当前 221 项。
+  重定向、Range 响应。当前 227 项。
 - **为什么不依赖 `cargo test` 跑全部**：本机 `cargo test` 的测试二进制在仓库目录里
   运行会因路径 ACL 报"拒绝访问"（见 `10-cargo-test-调查.md`），所以 `scripts/run-tests.ps1`
   会先把二进制复制到 `%TEMP%` 再跑。CI 上没有这个问题。
