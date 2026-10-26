@@ -4789,6 +4789,44 @@ pub fn selftest() -> i32 {
             && preview.text.contains("<redacted>")
     );
 
+    // 归档日志（.gz）：Minecraft 会把旧日志压成 .log.gz，以前整个跳过，
+    // 玩家点开"历史日志"什么也看不到。现在能列出来也能读。
+    {
+        use std::io::Write;
+        let logs_dir2 = log_dir.join("logs");
+        let _ = std::fs::create_dir_all(&logs_dir2);
+        let gz_path = logs_dir2.join("2026-10-01-1.log.gz");
+        if let Ok(f) = std::fs::File::create(&gz_path) {
+            let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+            let _ = enc.write_all(b"[old] archived line one\n[old] archived line two\n");
+            let _ = enc.finish();
+        }
+        let listed = logs::list(&log_dir);
+        let gz = listed.iter().find(|l| l.name.ends_with(".log.gz"));
+        check!(
+            "gz log is listed as compressed",
+            gz.map(|f| f.compressed).unwrap_or(false) && listed.iter().any(|l| !l.compressed)
+        );
+        let gz_text = gz.and_then(|f| logs::read(&log_dir, &f.id, None).ok());
+        check!(
+            "gz log reads as text",
+            gz_text
+                .map(|t| t.text.contains("archived line two") && t.lines == 2)
+                .unwrap_or(false)
+        );
+        // 归档日志不能按字节偏移追，必须明确报错而不是给出乱码
+        let gz_tail = gz
+            .map(|f| live::tail(&log_dir, &f.id, 0, None))
+            .unwrap_or_else(|| Err("INVALID_VALUE|no gz".into()));
+        check!(
+            "gz log refuses live tail",
+            gz_tail
+                .map(|c| c.text.is_empty())
+                .unwrap_or_else(|e| e.starts_with("INVALID_VALUE|"))
+        );
+        let _ = std::fs::remove_file(&gz_path);
+    }
+
     // 崩溃报告：按报告自己的格式拆，读不出来就说读不出来，不猜
     {
         let crash_dir = std::env::temp_dir().join(format!("astral-crash-{}", time::now_nanos()));

@@ -6,6 +6,11 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+/// 普通日志一次最多读的字节数（只读尾部）。
+const MAX_READ: u64 = 4 * 1024 * 1024;
+/// `.gz` 日志解压后的硬上限。超过就不给开，免得一份异常归档把内存吃光。
+const MAX_UNPACKED: u64 = 64 * 1024 * 1024;
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct LogFile {
@@ -16,6 +21,9 @@ pub struct LogFile {
     pub kind: String,
     pub size_bytes: u64,
     pub modified_at: String,
+    /// 是不是 `.gz` 归档日志。这类文件不能按字节 seek，读法不一样。
+    #[serde(default)]
+    pub compressed: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -66,11 +74,11 @@ fn collect(dir: &Path, kind: &str, rel_prefix: &str, out: &mut Vec<(LogFile, Pat
         }
         let name = e.file_name().to_string_lossy().to_string();
         let lower = name.to_lowercase();
-        if !(lower.ends_with(".log") || lower.ends_with(".txt") || lower.ends_with(".gz")) {
-            continue;
-        }
-        // .gz 不能直接按文本读，暂不列出
-        if lower.ends_with(".gz") {
+        // `.log.gz` / `.txt.gz` 是 Minecraft 自己滚动的归档日志，照样能读
+        let gz = lower.ends_with(".gz");
+        let plain = lower.ends_with(".log") || lower.ends_with(".txt");
+        let gz_ok = gz && (lower.ends_with(".log.gz") || lower.ends_with(".txt.gz"));
+        if !plain && !gz_ok {
             continue;
         }
         let rel = format!("{rel_prefix}{name}");
@@ -82,6 +90,7 @@ fn collect(dir: &Path, kind: &str, rel_prefix: &str, out: &mut Vec<(LogFile, Pat
                 kind: kind.to_string(),
                 size_bytes: size,
                 modified_at: mtime_iso(&p),
+                compressed: gz_ok,
             },
             p,
         ));
@@ -102,7 +111,8 @@ pub fn list(instance_dir: &Path) -> Vec<LogFile> {
     entries.into_iter().map(|(f, _)| f).collect()
 }
 
-fn resolve(instance_dir: &Path, id: &str) -> Option<PathBuf> {
+/// 按 id 找日志文件，同时告诉调用方它是不是 `.gz` 归档。
+fn resolve_full(instance_dir: &Path, id: &str) -> Option<(PathBuf, bool)> {
     let mut entries: Vec<(LogFile, PathBuf)> = Vec::new();
     collect(&instance_dir.join("logs"), "game", "logs/", &mut entries);
     collect(
@@ -114,7 +124,7 @@ fn resolve(instance_dir: &Path, id: &str) -> Option<PathBuf> {
     entries
         .into_iter()
         .find(|(f, _)| f.id == id)
-        .map(|(_, p)| p)
+        .map(|(f, p)| (p, f.compressed))
 }
 
 /// 供实时跟随（`live::tail`）用：给定日志 id，返回 (绝对路径, 文件名)
@@ -135,21 +145,25 @@ pub fn resolve_path(instance_dir: &Path, id: &str) -> Option<(PathBuf, String)> 
 
 /// 读日志尾部；`limit` 为行数上限（默认 400，最大 2000）
 pub fn read(instance_dir: &Path, id: &str, limit: Option<u32>) -> Result<LogText, String> {
-    let path = resolve(instance_dir, id).ok_or_else(|| "INVALID_PATH|日志不存在".to_string())?;
-    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    // 超大日志只读尾部 4 MiB，避免一次读进内存
-    const MAX_READ: u64 = 4 * 1024 * 1024;
-    let text = if bytes > MAX_READ {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut f = std::fs::File::open(&path).map_err(|e| format!("PERMISSION|读取失败|{e}"))?;
-        f.seek(SeekFrom::Start(bytes - MAX_READ))
-            .map_err(|e| format!("PERMISSION|定位失败|{e}"))?;
-        let mut buf = String::new();
-        f.read_to_string(&mut buf)
-            .map_err(|e| format!("PERMISSION|读取失败|{e}"))?;
-        buf
+    let (path, compressed) =
+        resolve_full(instance_dir, id).ok_or_else(|| "INVALID_PATH|日志不存在".to_string())?;
+    let text = if compressed {
+        read_gz_text(&path, MAX_READ)?
     } else {
-        std::fs::read_to_string(&path).map_err(|e| format!("PERMISSION|读取失败|{e}"))?
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if bytes > MAX_READ {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut f =
+                std::fs::File::open(&path).map_err(|e| format!("PERMISSION|读取失败|{e}"))?;
+            f.seek(SeekFrom::Start(bytes - MAX_READ))
+                .map_err(|e| format!("PERMISSION|定位失败|{e}"))?;
+            let mut buf = String::new();
+            f.read_to_string(&mut buf)
+                .map_err(|e| format!("PERMISSION|读取失败|{e}"))?;
+            buf
+        } else {
+            std::fs::read_to_string(&path).map_err(|e| format!("PERMISSION|读取失败|{e}"))?
+        }
     };
 
     let limit = limit.unwrap_or(400).clamp(1, 2000) as usize;
@@ -171,6 +185,54 @@ pub fn read(instance_dir: &Path, id: &str, limit: Option<u32>) -> Result<LogText
         lines: tail.len() as u32,
         truncated,
     })
+}
+
+/// 解压 `.gz` 日志并留尾部 `max` 字节（按行对齐，不切半个字）。
+///
+/// 归档日志解压后可能很大（几十 MB），所以边解边数，只留最后一段。
+/// 解压炸弹由 `MAX_UNPACKED` 兜底：超过就停下并保留已读到的尾部。
+fn read_gz_text(path: &Path, max: u64) -> Result<String, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("PERMISSION|读取失败|{e}"))?;
+    let mut dec = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+    let mut keep: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    // 只有真的从头部丢掉过字节，开头才可能是半行
+    let mut trimmed = false;
+    loop {
+        let n = match dec.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return Err(format!("INVALID_VALUE|这个日志解压失败|{e}")),
+        };
+        total = total.saturating_add(n as u64);
+        if total > MAX_UNPACKED {
+            return Err(format!(
+                "INVALID_VALUE|日志解压后超过 {} MB，没法整份打开",
+                MAX_UNPACKED / (1024 * 1024)
+            ));
+        }
+        keep.extend_from_slice(&chunk[..n]);
+        // 只留尾部，防止一份很大的旧日志把内存吃光
+        if keep.len() as u64 > max * 2 {
+            let drop = keep.len() - max as usize;
+            keep.drain(..drop);
+            trimmed = true;
+        }
+    }
+    if keep.len() as u64 > max {
+        let drop = keep.len() - max as usize;
+        keep.drain(..drop);
+        trimmed = true;
+    }
+    // 裁过头部时，第一行多半是半行，丢掉
+    if trimmed {
+        if let Some(p) = keep.iter().position(|b| *b == b'\n') {
+            keep.drain(..p + 1);
+        }
+    }
+    Ok(String::from_utf8_lossy(&keep).to_string())
 }
 
 /// 本地脱敏：token、邮箱、IPv4、Windows 用户目录
@@ -729,5 +791,89 @@ java.lang.ExceptionInInitializerError: Mixin apply failed
     fn redacts_user_dir() {
         let (out, _) = redact("C:\\Users\\alice\\AppData\\Roaming\\.minecraft");
         assert!(out.contains("<user>"));
+    }
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("astral-logs-{tag}-{}", crate::time::now_nanos()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_gz(path: &Path, text: &str) {
+        use std::io::Write;
+        let f = std::fs::File::create(path).unwrap();
+        let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+        enc.write_all(text.as_bytes()).unwrap();
+        enc.finish().unwrap();
+    }
+
+    #[test]
+    fn lists_gz_archives_as_compressed() {
+        let d = tmp_dir("gz-list");
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+        std::fs::write(d.join("logs").join("latest.log"), b"plain\n").unwrap();
+        write_gz(&d.join("logs").join("2026-10-01-1.log.gz"), "old\n");
+        // 不是日志的 .gz 不该被列出来
+        write_gz(&d.join("logs").join("random.gz"), "x\n");
+
+        let files = list(&d);
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(files.len(), 2, "只该有 latest.log 和滚动归档：{names:?}");
+        let gz = files.iter().find(|f| f.name.ends_with(".gz")).unwrap();
+        assert!(gz.compressed);
+        let plain = files.iter().find(|f| f.name == "latest.log").unwrap();
+        assert!(!plain.compressed);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn reads_gz_archive_text() {
+        let d = tmp_dir("gz-read");
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+        write_gz(
+            &d.join("logs").join("2026-10-01-1.log.gz"),
+            "line one\nline two\nline three\n",
+        );
+        let files = list(&d);
+        let id = &files[0].id;
+        let t = read(&d, id, Some(2)).unwrap();
+        assert_eq!(t.text, "line two\nline three");
+        assert_eq!(t.lines, 2);
+        assert!(t.truncated);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn gz_read_keeps_the_tail_only() {
+        let d = tmp_dir("gz-tail");
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+        // 造一份超过 MAX_READ 的归档，确认只留尾部
+        let mut text = String::new();
+        for i in 0..200_000 {
+            text.push_str(&format!(
+                "filler line {i} 0123456789012345678901234567890123456789\n"
+            ));
+        }
+        text.push_str("LAST LINE MARKER\n");
+        assert!(text.len() as u64 > MAX_READ);
+        write_gz(&d.join("logs").join("big.log.gz"), &text);
+        let id = &list(&d)[0].id;
+        let t = read(&d, id, Some(50)).unwrap();
+        assert!(t.text.contains("LAST LINE MARKER"));
+        assert!(!t.text.contains("filler line 0 "), "开头的行不该出现");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn broken_gz_reports_a_readable_error() {
+        let d = tmp_dir("gz-bad");
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+        std::fs::write(d.join("logs").join("bad.log.gz"), b"not really gzip").unwrap();
+        let id = &list(&d)[0].id;
+        let e = read(&d, id, None).unwrap_err();
+        assert!(e.starts_with("INVALID_VALUE|"), "错误码要能区分：{e}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

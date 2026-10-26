@@ -57,6 +57,10 @@ pub fn tail(
 ) -> Result<LogChunk, String> {
     let (path, name) = super::logs::resolve_path(instance_dir, id)
         .ok_or_else(|| "INVALID_PATH|日志不存在".to_string())?;
+    // 归档日志（`.gz`）是压缩流，没法按字节偏移追。要看得用 logs::read 整份读。
+    if name.to_lowercase().ends_with(".gz") {
+        return Err("INVALID_VALUE|这是归档日志，不能实时跟随，请直接打开查看".to_string());
+    }
     let size = std::fs::metadata(&path)
         .map_err(|e| format!("INVALID_PATH|读不到日志信息|{e}"))?
         .len();
@@ -146,7 +150,8 @@ pub fn active_game_log(instance_dir: &Path) -> Option<super::logs::LogFile> {
     // 这里直接用文件系统的真实修改时间，取不到时间戳的排最后。
     super::logs::list(instance_dir)
         .into_iter()
-        .filter(|l| l.kind == "game")
+        // 归档日志不能实时跟随，跳过（不然前端会拿到一个 tail 不了的文件）
+        .filter(|l| l.kind == "game" && !l.compressed)
         .map(|l| {
             let stamp = super::logs::resolve_path(instance_dir, &l.id)
                 .and_then(|(p, _)| std::fs::metadata(p).ok())
