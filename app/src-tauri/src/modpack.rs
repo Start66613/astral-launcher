@@ -266,9 +266,8 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
         }
     }
 
-    if files.is_empty() {
-        return Err("INVALID_VALUE|整合包没有任何可安装文件".into());
-    }
+    // 注意：`files` 为空本身不算错 —— 纯 overrides 的整合包（只带配置/资源包）
+    // 是合法的。到底是不是空包，要等 read_index 数完 overrides 才知道。
 
     let client_files = files.iter().filter(|f| f.wanted_on_client(false)).count() as u32;
     let optional_files = files.iter().filter(|f| f.is_optional()).count() as u32;
@@ -326,6 +325,11 @@ pub fn read_index(pack: &Path) -> Result<ModpackIndex, String> {
     let mut index = parse_index(&text)?;
     // 顺便数一下 overrides 条目（只数名字，不解压）
     index.override_entries = count_overrides(pack).unwrap_or(0);
+    // index 里没有要下载的文件、overrides 也是空的 —— 这才是真的空包。
+    // 纯 overrides 的包（只带配置/资源包）是合法的，不能一刀切拒绝。
+    if index.files.is_empty() && index.override_entries == 0 {
+        return Err("INVALID_VALUE|整合包是空的（既没有文件也没有 overrides）".into());
+    }
     Ok(index)
 }
 
@@ -945,10 +949,6 @@ mod tests {
 
     #[test]
     fn parse_index_rejects_bad_packs() {
-        // 没有文件
-        let empty = r#"{"dependencies":{"minecraft":"1.20.1"},"files":[]}"#;
-        assert!(parse_index(empty).is_err());
-
         // 路径重复
         let dup = r#"{"dependencies":{"minecraft":"1.20.1"},"files":[
             {"path":"mods/a.jar","downloads":["https://cdn.modrinth.com/a.jar"]},
@@ -962,11 +962,42 @@ mod tests {
         ]}"#;
         assert!(parse_index(no_ver).is_err());
 
+        // 缺 minecraft 版本
+        let no_mc = r#"{"dependencies":{},"files":[
+            {"path":"mods/a.jar","downloads":["https://cdn.modrinth.com/a.jar"]}
+        ]}"#;
+        assert!(parse_index(no_mc).is_err());
+
         // 正常的最小包
         let ok = r#"{"dependencies":{"minecraft":"1.20.1"},"files":[
             {"path":"mods/a.jar","downloads":["https://cdn.modrinth.com/a.jar"],"fileSize":10}
         ]}"#;
         assert!(parse_index(ok).is_ok());
+    }
+
+    #[test]
+    fn empty_files_is_only_an_error_when_there_are_no_overrides() {
+        // 纯 overrides 的整合包（只有配置/资源包，没有要下载的文件）是合法的，
+        // 这是 Modrinth 上"配置包"的常见形态，不能当坏包拒掉。
+        let cfg_only = r#"{"name":"Config Pack","dependencies":{"minecraft":"1.20.1"},"files":[]}"#;
+        assert!(parse_index(cfg_only).is_ok());
+        assert!(parse_index(cfg_only).unwrap().files.is_empty());
+
+        // 真正的空包：文件空 + overrides 也空
+        let d = std::env::temp_dir().join(format!("astral-mp-{:x}", crate::time::now_nanos()));
+        std::fs::create_dir_all(&d).unwrap();
+        let pack = d.join("empty.mrpack");
+        {
+            use std::io::Write;
+            let f = std::fs::File::create(&pack).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("modrinth.index.json", opts).unwrap();
+            zw.write_all(cfg_only.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        assert!(read_index(&pack).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
     #[test]
     fn parse_index_basic() {

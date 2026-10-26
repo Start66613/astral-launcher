@@ -861,6 +861,15 @@ async fn export_modpack(request: export::ExportRequest) -> Result<export::Export
         .map_err(|e| e.to_string())?
 }
 
+/// 导出前的预览：只读，不写任何文件。看清楚要打多少、放不放得下再导。
+#[tauri::command]
+async fn plan_modpack_export(request: export::ExportRequest) -> Result<export::ExportPlan, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || export::plan(&game, &request, &play_stats))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 同一个整合包在本地装过哪些版本（只读，用于安装前的"已装版本"提示）
 #[tauri::command]
 async fn modpack_installed_versions(project_id: String) -> Result<Vec<serde_json::Value>, String> {
@@ -2767,6 +2776,7 @@ pub fn run() {
             prepare_resource_install,
             start_resource_install,
             export_modpack,
+            plan_modpack_export,
             modpack_installed_versions,
             verify_exported_modpack,
             check_mod_updates,
@@ -4640,6 +4650,7 @@ pub fn selftest() -> i32 {
                 name: "Astral Export Test".into(),
                 version: Some("1.0.0".into()),
                 include_config: false,
+                include_resources: false,
             };
             match export::export(&game, &req, &play_stats) {
                 Ok(r) => {
@@ -5930,6 +5941,72 @@ pub fn selftest() -> i32 {
                                     .as_array()
                                     .map(|a| a.len() == 1)
                                     .unwrap_or(false))
+                            .unwrap_or(false)
+                );
+            }
+
+            // 27) 导出预览与递归 config / 资源包：预览只读，导出后能读回来
+            {
+                let g = dl.join("export-plan-game");
+                let _ = std::fs::create_dir_all(&g);
+                let meta = instance::InstanceMeta {
+                    id: instance::new_id(),
+                    name: "export-plan".into(),
+                    game_version: "1.20.1".into(),
+                    loader_kind: Some("fabric".into()),
+                    loader_version: Some("0.16.9".into()),
+                    launch_version: None,
+                    memory_mb: None,
+                    jvm_args: vec![],
+                    java_path: None,
+                    cover: None,
+                    created_at: time::now_iso(),
+                };
+                let inst = instance::create(&g, &meta).unwrap();
+                let cfg = std::path::Path::new(&inst.dirs.config).to_path_buf();
+                std::fs::create_dir_all(cfg.join("jei/sub")).unwrap();
+                std::fs::write(cfg.join("a.toml"), b"x").unwrap();
+                std::fs::write(cfg.join("jei/b.toml"), b"yy").unwrap();
+                std::fs::write(cfg.join("jei/sub/c.toml"), b"zzz").unwrap();
+                std::fs::create_dir_all(&inst.dirs.resourcepacks).unwrap();
+                std::fs::write(
+                    std::path::Path::new(&inst.dirs.resourcepacks).join("p.zip"),
+                    b"1234",
+                )
+                .unwrap();
+
+                let req = export::ExportRequest {
+                    instance_id: inst.id.clone(),
+                    name: "Preview Test".into(),
+                    version: Some("2.0.0".into()),
+                    include_config: true,
+                    include_resources: true,
+                };
+                let p = export::plan(&g, &req, &play_stats).unwrap();
+                check!(
+                    "export plan counts nested config",
+                    p.config_files == 3
+                        && p.resource_files == 1
+                        && p.pack_files == 4
+                        && p.estimated_bytes == 10
+                        && !p.blocking
+                        && p.free_bytes.map(|f| f > 0).unwrap_or(false)
+                );
+                check!(
+                    "export plan is read only",
+                    !std::path::Path::new(&p.target_path).exists()
+                );
+                let r = export::export(&g, &req, &play_stats).unwrap();
+                let again = export::plan(&g, &req, &play_stats).unwrap();
+                check!(
+                    "export writes nested overrides",
+                    r.override_files == 4
+                        && r.config_files == 3
+                        && r.resource_files == 1
+                        && again.exists
+                        && again.blocking
+                        && modpack::read_index(std::path::Path::new(&r.path))
+                            .map(|i| i.override_entries == 4)
                             .unwrap_or(false)
                 );
             }
