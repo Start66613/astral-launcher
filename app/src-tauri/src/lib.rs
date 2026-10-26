@@ -24,6 +24,7 @@ mod recycle;
 mod resources;
 mod search;
 mod server;
+mod servers;
 mod session;
 mod stats;
 mod task;
@@ -1576,6 +1577,73 @@ async fn ping_server(
         .map_err(|e| format!("INTERNAL|查询任务异常|{e}"))?
 }
 
+/// 收藏的服务器列表。
+#[tauri::command]
+fn list_servers() -> Vec<servers::ServerEntry> {
+    servers::list(&game_root())
+}
+
+/// 加一个收藏。`host` 可以是 `example.com:25566`，端口会自己拆出来。
+#[tauri::command]
+fn add_server(
+    name: String,
+    host: String,
+    port: Option<u16>,
+    note: Option<String>,
+) -> Result<servers::ServerEntry, String> {
+    servers::add(
+        &game_root(),
+        &name,
+        &host,
+        port,
+        note.as_deref().unwrap_or(""),
+    )
+}
+
+/// 改收藏。`None` 的字段保持不变。
+#[tauri::command]
+fn update_server(
+    id: String,
+    name: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    note: Option<String>,
+) -> Result<servers::ServerEntry, String> {
+    servers::update(
+        &game_root(),
+        &id,
+        name.as_deref(),
+        host.as_deref(),
+        port,
+        note.as_deref(),
+    )
+}
+
+/// 从收藏里删掉。**只删记录，不碰任何文件。**
+#[tauri::command]
+fn remove_server(id: String) -> Result<(), String> {
+    servers::remove(&game_root(), &id)
+}
+
+/// 按给定顺序重排。
+#[tauri::command]
+fn reorder_servers(ids: Vec<String>) -> Result<Vec<servers::ServerEntry>, String> {
+    servers::reorder(&game_root(), &ids)
+}
+
+/// 批量查状态。不传 `ids` 就查全部。
+///
+/// 单条查不到不会影响其它条，每条都有自己的 `online` 和 `error`。
+#[tauri::command]
+async fn refresh_servers(
+    ids: Option<Vec<String>>,
+) -> Result<Vec<(String, server::ServerStatus)>, String> {
+    let game = game_root();
+    tauri::async_runtime::spawn_blocking(move || servers::refresh(&game, ids))
+        .await
+        .map_err(|e| format!("INTERNAL|查询任务异常|{e}"))
+}
+
 /// 只生成脱敏预览；上传由用户在界面上确认后另行处理
 #[tauri::command]
 fn prepare_diagnosis(
@@ -2716,6 +2784,12 @@ pub fn run() {
             prepare_diagnosis,
             tail_log,
             ping_server,
+            list_servers,
+            add_server,
+            update_server,
+            remove_server,
+            reorder_servers,
+            refresh_servers,
             diagnose_instance,
             install_version,
             launch_version,
@@ -6007,6 +6081,114 @@ pub fn selftest() -> i32 {
                     && server::ping("", None, None).is_err()
                     && server::ping("x", Some(0), None).is_err()
             );
+
+            // 收藏的服务器：增删改查 + 批量刷新（真实握手）
+            {
+                let sg = game.join("servers-test");
+                let _ = std::fs::create_dir_all(&sg);
+                match (
+                    servers::add(&sg, "主服", "127.0.0.1:1", None, "测试"),
+                    testsrv::FakeMcServer::start("§aHello"),
+                ) {
+                    (Ok(main_srv), Ok(mc)) => {
+                        let live = servers::add(
+                            &sg,
+                            "本地测试",
+                            &format!("127.0.0.1:{}", mc.port),
+                            None,
+                            "",
+                        )
+                        .unwrap();
+                        check!(
+                            "servers add keeps host and port apart",
+                            main_srv.host == "127.0.0.1"
+                                && main_srv.port == 1
+                                && main_srv.name == "主服"
+                                && main_srv.id.starts_with("s_")
+                        );
+                        check!(
+                            "servers reject duplicates and bad addresses",
+                            servers::add(&sg, "x", "127.0.0.1:1", None, "").is_err()
+                                && servers::add(&sg, "y", "", None, "").is_err()
+                                && servers::add(&sg, "z", "bad host", None, "").is_err()
+                        );
+                        let renamed = servers::update(
+                            &sg,
+                            &live.id,
+                            Some("改名了"),
+                            None,
+                            None,
+                            Some("备注"),
+                        )
+                        .unwrap();
+                        check!(
+                            "servers update is selective",
+                            renamed.name == "改名了"
+                                && renamed.note == "备注"
+                                && renamed.port == mc.port
+                        );
+                        let reordered =
+                            servers::reorder(&sg, &[live.id.clone(), main_srv.id.clone()]).unwrap();
+                        check!(
+                            "servers reorder follows given ids",
+                            reordered.len() == 2 && reordered[0].id == live.id
+                        );
+                        // 批量刷新：一个通一个不通，都不能拖垮对方
+                        let all = servers::refresh(&sg, None);
+                        let ok_one = all
+                            .iter()
+                            .find(|(id, _)| id == &live.id)
+                            .map(|(_, s)| s.online && s.players_online == Some(7))
+                            .unwrap_or(false);
+                        let dead_one = all
+                            .iter()
+                            .find(|(id, _)| id == &main_srv.id)
+                            .map(|(_, s)| !s.online && s.error.is_some())
+                            .unwrap_or(false);
+                        check!(
+                            "servers refresh reports each independently",
+                            all.len() == 2 && ok_one && dead_one
+                        );
+                        // 查到的那条要记 lastSeen，没查到的不能记
+                        let after = servers::list(&sg);
+                        let seen = after
+                            .iter()
+                            .find(|e| e.id == live.id)
+                            .map(|e| e.last_seen.is_some())
+                            .unwrap_or(false);
+                        let unseen = after
+                            .iter()
+                            .find(|e| e.id == main_srv.id)
+                            .map(|e| e.last_seen.is_none())
+                            .unwrap_or(false);
+                        check!("servers mark seen only on success", seen && unseen);
+                        // 只刷新指定的一批
+                        let only = servers::refresh(&sg, Some(vec![main_srv.id.clone()]));
+                        check!(
+                            "servers refresh respects id filter",
+                            only.len() == 1 && only[0].0 == main_srv.id
+                        );
+                        // 删除只删记录
+                        servers::remove(&sg, &main_srv.id).unwrap();
+                        check!(
+                            "servers remove drops one entry",
+                            servers::list(&sg).len() == 1
+                                && servers::remove(&sg, &main_srv.id).is_err()
+                        );
+                    }
+                    _ => {
+                        check!("servers add keeps host and port apart", false);
+                        check!("servers reject duplicates and bad addresses", false);
+                        check!("servers update is selective", false);
+                        check!("servers reorder follows given ids", false);
+                        check!("servers refresh reports each independently", false);
+                        check!("servers mark seen only on success", false);
+                        check!("servers refresh respects id filter", false);
+                        check!("servers remove drops one entry", false);
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&sg);
+            }
 
             // 21) 调度统计字段齐全，前端能直接用
             let s = net::scheduler_stats();

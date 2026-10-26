@@ -299,6 +299,32 @@ fn offline(host: &str, port: u16, started: Instant, error: String) -> ServerStat
     }
 }
 
+/// 参数不合法时的兜底：批量刷新里某个地址写错了，不该让整批失败。
+pub fn offline_from_error(host: &str, port: u16, error: String) -> ServerStatus {
+    // 错误串是 `CODE|消息|细节` 格式，给玩家看的时候只要消息那部分
+    let message = error
+        .split('|')
+        .nth(1)
+        .map(|s| s.to_string())
+        .unwrap_or(error);
+    ServerStatus {
+        host: host.to_string(),
+        port,
+        online: false,
+        latency_ms: 0,
+        version_name: None,
+        version_protocol: None,
+        players_online: None,
+        players_max: None,
+        sample: Vec::new(),
+        motd: String::new(),
+        motd_raw: String::new(),
+        favicon: None,
+        legacy: false,
+        error: Some(message),
+    }
+}
+
 fn connect(host: &str, port: u16, timeout: Duration) -> std::io::Result<TcpStream> {
     let addrs = (host, port).to_socket_addrs()?;
     let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "解析不到地址");
