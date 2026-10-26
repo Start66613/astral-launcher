@@ -67,7 +67,7 @@ pub struct SearchResult {
 ///
 /// 不能用 `format!` 拼裸 `[` `]` `"`：那要求服务端容忍非法 URL，
 /// 换个实现就坏。
-fn encode_component(value: &str) -> String {
+pub(crate) fn encode_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for b in value.as_bytes() {
         let keep = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');

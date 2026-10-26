@@ -35,6 +35,7 @@ mod pack_update;
 mod packs;
 mod plan;
 mod preflight;
+mod project_detail;
 mod quick_join;
 mod recycle;
 mod resources;
@@ -1207,6 +1208,14 @@ fn get_stats(range: Option<String>) -> stats::Stats {
 #[tauri::command]
 async fn get_resource_project(project_id: String) -> Result<resources::ResourceProject, String> {
     tauri::async_runtime::spawn_blocking(move || resources::project(&project_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 项目详情页要的全套信息：图集、介绍正文、分类、支持端、相关链接。
+#[tauri::command]
+async fn get_project_detail(project_id: String) -> Result<project_detail::ProjectDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || project_detail::detail(&project_id))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -3794,6 +3803,7 @@ pub fn run() {
             clear_instance_cover,
             read_instance_cover,
             get_resource_project,
+            get_project_detail,
             list_resource_files,
             search_resources,
             prepare_resource_install,
@@ -8832,6 +8842,69 @@ java.lang.RuntimeException: boom\n";
                     check!("search rejects bad filters", bad_kind && bad_sort);
                 } else {
                     check!("search returns parsed hits", false);
+                }
+            }
+
+            // 项目详情页：图集、正文、分类、支持端都要能读到
+            match testsrv::TestServer::start() {
+                Ok(srv) => {
+                    let base = srv.base();
+                    match project_detail::detail_at(&base, "AANobbMI") {
+                        Ok(d) => {
+                            check!(
+                                "project detail reads the fields",
+                                d.id == "AANobbMI"
+                                    && d.slug.as_deref() == Some("demo")
+                                    && d.title == "Demo Project"
+                                    && d.project_type == "mod"
+                                    && d.categories == vec!["optimization".to_string()]
+                                    && d.client_side.as_deref() == Some("required")
+                                    && d.server_side.as_deref() == Some("unsupported")
+                                    && d.downloads == 999
+                                    && d.followers == 12
+                                    && d.versions_count == 2
+                                    && d.license.id.as_deref() == Some("mit")
+                                    && d.game_versions == vec!["1.20.1".to_string()]
+                                    && d.loaders == vec!["fabric".to_string()]
+                                    && d.source == "network"
+                                    && !d.stale
+                            );
+                            check!(
+                                "project detail keeps body and gallery",
+                                d.body.contains("正文内容")
+                                    && !d.body_truncated
+                                    && d.body_chars > 0
+                                    && d.gallery.len() == 2
+                                    && d.gallery[0].featured
+                                    && d.gallery[0].url == "https://cdn.modrinth.com/g2.png"
+                            );
+                            // 同一个项目第二次读走缓存，不再请求服务器
+                            let before = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+                            let again = project_detail::detail_at(&base, "AANobbMI");
+                            let after = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+                            check!(
+                                "project detail reuses the cache",
+                                again.map(|x| x.source == "cache").unwrap_or(false)
+                                    && after == before
+                            );
+                            check!(
+                                "project detail rejects empty id",
+                                project_detail::detail_at(&base, "   ").is_err()
+                            );
+                        }
+                        Err(_) => {
+                            check!("project detail reads the fields", false);
+                            check!("project detail keeps body and gallery", false);
+                            check!("project detail reuses the cache", false);
+                            check!("project detail rejects empty id", false);
+                        }
+                    }
+                }
+                Err(_) => {
+                    check!("project detail reads the fields", false);
+                    check!("project detail keeps body and gallery", false);
+                    check!("project detail reuses the cache", false);
+                    check!("project detail rejects empty id", false);
                 }
             }
 

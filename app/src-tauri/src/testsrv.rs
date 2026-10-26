@@ -328,6 +328,37 @@ fn handle(
         return send_body(&mut stream, &headers, size, size.max(1), 0, port, served);
     }
 
+    // 模拟 Modrinth `/project/{id}` 详情（注意要排在 `/project/{id}/version` 之后判断）
+    if path.starts_with("/project/") && !path.ends_with("/version") {
+        let id = path.trim_start_matches("/project/");
+        let body = format!(
+            "{{\"id\":\"{id}\",\"slug\":\"demo\",\"title\":\"Demo Project\",\
+              \"description\":\"一句话简介\",\"body\":\"## 说明\\n\\n正文内容\",\
+              \"icon_url\":\"https://cdn.modrinth.com/icon.png\",\"project_type\":\"mod\",\
+              \"categories\":[\"optimization\"],\"additional_categories\":[],\
+              \"client_side\":\"required\",\"server_side\":\"unsupported\",\
+              \"downloads\":999,\"followers\":12,\
+              \"published\":\"2020-01-01T00:00:00Z\",\"updated\":\"2025-01-01T00:00:00Z\",\
+              \"status\":\"approved\",\
+              \"license\":{{\"id\":\"mit\",\"name\":\"MIT\",\"url\":\"https://example.com/mit\"}},\
+              \"source_url\":\"https://github.com/x/y\",\"issues_url\":null,\
+              \"wiki_url\":null,\"discord_url\":null,\
+              \"gallery\":[{{\"url\":\"https://cdn.modrinth.com/g1.png\",\"featured\":false}},\
+                           {{\"url\":\"https://cdn.modrinth.com/g2.png\",\"featured\":true,\
+                             \"title\":\"封面\"}}],\
+              \"game_versions\":[\"1.20.1\"],\"loaders\":[\"fabric\"],\
+              \"versions\":[\"v1\",\"v2\"]}}"
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        served.fetch_add(body.len() as u64, Ordering::SeqCst);
+        stream.write_all(resp.as_bytes())?;
+        return Ok(());
+    }
+
     // 模拟 Modrinth `/project/{id}/version` 与 `/version/{id}`：整合包更新检查用
     // 版本 id 用 `ver_old` / `ver_new` 区分，各自指向一个本地 .mrpack
     if path.starts_with("/project/") && path.ends_with("/version") {

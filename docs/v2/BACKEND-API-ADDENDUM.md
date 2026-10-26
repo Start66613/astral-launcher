@@ -3364,3 +3364,96 @@ interface ModFile {
 - 列表行左侧留 32×32 的位置：`hasIcon` 为真时调 `read_mod_icon` 填 `<img src={dataUrl}>`，否则显示首字母占位。
 - 图标只在行进入可视区时读，读完记在组件状态里，别每次渲染都 invoke。
 - 同一个实例切走再回来时清一次缓存（Mod 可能被换了）。
+
+## 43. 项目详情页（V2.5 新增）
+
+`get_resource_project` 只给标题、简介、图标、下载量四样，够列表用。详情页还需要图集、完整介绍、分类、客户端/服务端支持、关注数、相关链接 —— 这一节补上。
+
+### 43.1 命令
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `get_project_detail` | `projectId`（id 或 slug） | `ProjectDetail` |
+
+`get_resource_project` 保留不动，列表页继续用它（字段少、更省）。
+
+### 43.2 类型
+
+```ts
+interface GalleryImage {
+  url: string;              // 只收 https
+  featured: boolean;
+  title: string | null;
+  description: string | null;
+  created: string | null;
+}
+
+interface LicenseInfo {
+  id: string | null;
+  name: string | null;
+  url: string | null;
+}
+
+interface ProjectDetail {
+  id: string;
+  slug: string | null;
+  title: string;
+  description: string;        // 一句话简介
+  body: string;               // 完整介绍（Markdown），已截断
+  bodyChars: number;          // 截断前有多少字符
+  bodyTruncated: boolean;
+  iconUrl: string | null;
+  projectType: string;        // mod | modpack | resourcepack | shaderpack | datapack | plugin
+  categories: string[];
+  additionalCategories: string[];
+  clientSide: string | null;  // required | optional | unsupported | unknown
+  serverSide: string | null;
+  downloads: number;
+  followers: number;
+  published: string | null;
+  updated: string | null;
+  status: string | null;
+  license: LicenseInfo;
+  sourceUrl: string | null;
+  issuesUrl: string | null;
+  wikiUrl: string | null;
+  discordUrl: string | null;
+  gallery: GalleryImage[];
+  gameVersions: string[];
+  loaders: string[];
+  versionsCount: number;
+  source: "network" | "cache";
+  stale: boolean;
+  ageMs: number;
+  networkError: string | null;
+}
+```
+
+### 43.3 调用示例
+
+```ts
+const detail = await invoke<ProjectDetail>("get_project_detail", {
+  projectId: hit.projectId,   // 搜索结果里的 projectId 或 slug 都行
+});
+
+// 图集：第一张是作者指定的封面
+const cover = detail.gallery[0]?.url ?? detail.iconUrl;
+
+// 正文：bodyTruncated 为真时在末尾加一条「完整介绍请到项目页查看」
+```
+
+### 43.4 行为约定
+
+- **只读**：不写盘、不改任何实例。
+- **走离线缓存**：断网时返回上次的详情，`source === "cache"`、`stale === true`、`networkError` 里是原始错误。界面应该照常显示内容，另加一条「当前是缓存数据」的提示。
+- **正文按字符截到 2 万**：`bodyChars` 是原文长度，`bodyTruncated` 告诉你有没有被截。截断是为了不把几万字塞进 IPC。
+- **图集只收 https**：相对路径、http 图片一律跳过（不猜 CDN 域名）。封面（`featured`）排最前，最多 20 张。
+- **空 id 报错**：`INVALID_VALUE|项目 id 不能为空`；超长（>128）也拒。
+- **格式异常报 `INTERNAL|项目详情格式异常`**：比如服务端返回数组而不是对象。
+
+### 43.5 前端接入建议
+
+- 详情页进页面时并发拉 `get_project_detail` 与 `list_resource_files`（后者要版本列表装东西），两个请求互不依赖。
+- 正文是 Markdown，渲染前记得过滤 HTML（Modrinth 的 body 是 Markdown 不是 HTML，但别直接把字符串塞 `dangerouslySetInnerHTML`）。
+- 图集做成横向缩略图条 + 点击放大；封面图直接用在页头背景。
+- `clientSide` / `serverSide` 是 `unsupported` 时，在「安装到客户端」按钮旁标一行提醒（服务端专属的 Mod 装到客户端没用）。
