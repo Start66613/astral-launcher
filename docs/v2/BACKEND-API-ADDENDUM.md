@@ -601,3 +601,68 @@ const r = await invoke<SearchResult>("search_resources", {
   `get_resource_project` → `list_resource_files` → `prepare_resource_install`。
 
 界面上建议：搜索框防抖 300ms，翻页用 `offset += limit`，`totalHits` 只用来显示总数。
+
+---
+
+## 11. 资源包 / 光影包文件管理（V2.5 新增）
+
+以前资源包和光影包只有"安装"，装完就没法管了；现在补上列表、启停、删除三件事。
+和模组一样，**禁用是靠把文件名改成 `.zip.disabled`**，不是移到别的地方——
+这样玩家在游戏里的资源包界面照样能看到它，也能自己再启用回来。
+
+### 11.1 数据结构
+
+```ts
+type PackKind = "resourcepack" | "shaderpack";
+
+interface PackFile {
+  fileName: string;            // 实际文件名，禁用态带 .disabled
+  baseName: string;            // 去掉 .disabled 的主体名
+  kind: PackKind;
+  enabled: boolean;
+  sizeBytes: number;
+  packFormat: number | null;   // pack.mcmeta 里的 pack_format，光影包恒为 null
+  description: string | null;  // pack.mcmeta 里的描述（文本组件会取 text）
+  compatibleVersions: string[];// 由 packFormat 推出的适配版本，如 ["1.20 – 1.20.1"]
+  note: string | null;         // 给人看的提醒，例如"包里没有 pack.mcmeta"
+}
+```
+
+### 11.2 命令
+
+```ts
+// 列出某个实例下的资源包或光影包
+const packs = await invoke<PackFile[]>("list_packs", {
+  instanceId: "inst_xxx",
+  kind: "resourcepack",
+});
+
+// 启用 / 禁用
+const one = await invoke<PackFile>("set_pack_enabled", {
+  instanceId: "inst_xxx",
+  kind: "resourcepack",
+  fileName: "Better Leaves.zip",
+  enabled: false,
+});
+
+// 删除（必须显式确认）
+await invoke<void>("delete_pack", {
+  instanceId: "inst_xxx",
+  kind: "resourcepack",
+  fileName: "Better Leaves.zip",
+  confirm: true,
+});
+```
+
+要点：
+
+- `kind` 只接受 `resourcepack` / `shaderpack`，其他值返回 `INVALID_VALUE`；
+  `datapack` 在存档里，不走这套命令。
+- `delete_pack` 不带 `confirm: true` 会返回 `UNSUPPORTED|删除文件需要明确确认`，
+  界面上应该先弹确认框，不要默认传 true。
+- `packFormat` 是**读出来的**，不是猜的：包里没有 `pack.mcmeta` 时是 `null`，
+  `note` 会写"游戏可能不认"；`pack_format` 不在已知对照表里时 `compatibleVersions` 为空、
+  `note` 写"不在已知对照表里"，界面别硬编成"支持所有版本"。
+- 光影包靠包里有没有 `shaders/` 目录判断，没有的话 `note` 会提示"可能不是光影包"。
+- 这些命令都不会去改 `options.txt` 里的启用顺序——那是游戏自己管的，
+  替玩家改顺序出问题的概率远大于收益。

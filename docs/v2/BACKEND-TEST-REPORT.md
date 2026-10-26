@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 189 项全过，单元测试 97 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 194 项全过，单元测试 103 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（189 项）
+## 2. 自检覆盖（194 项）
 
 按前缀分组：
 
@@ -59,6 +59,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `retry` | 4 | 拒绝运行中、拒绝缺 spec、拒绝未知类型、接受已知类型 |
 | `loader` | 4 | 解析、空安全、兼容性、NeoForge 提示 |
 | `mod` | 4 | 列表、启用标记、禁用、启用、删除、路径守卫 |
+| `packs` | 5 | 解析 `pack.mcmeta` 的 pack_format 与描述、禁用/启用改名、删除需确认、非法类型与危险文件名被拒 |
 | `cache` | 3 | 第二次走缓存、统计与淘汰、只清缓存不动文件 |
 | `diagnosis` | 3 | 结构化报告、干净日志保持安静、脱敏 |
 | `installer` | 3 | Forge/NeoForge 下载地址 |
@@ -66,7 +67,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（103 个）
+## 3. 单元测试（109 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|

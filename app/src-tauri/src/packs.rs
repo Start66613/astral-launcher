@@ -1,0 +1,421 @@
+//! 资源包 / 光影包 / 数据包的文件层管理。
+//!
+//! 和 `mods.rs` 是同一类事，但资源包有自己的 `pack.mcmeta`（`pack_format`
+//! 决定它适配哪个游戏版本），光影包则是看包里有没有 `shaders/` 目录。
+//! 这里只读元数据、只做重命名与删除，不改 `options.txt` 里的启用顺序
+//! ——那是游戏自己的事，动它风险大于收益。
+//!
+//! 所有函数都要求传入"已经解析好的目录"，调用方负责按实例与类型取目录。
+
+use serde::Serialize;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+/// 支持的包类型
+#[allow(dead_code)]
+pub const KINDS: [&str; 3] = ["resourcepack", "shaderpack", "datapack"];
+
+/// 数据包嵌在存档里，不在这里管理；这里只允许前两种
+pub fn normalize_kind(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "resourcepack" => Ok("resourcepack"),
+        "shaderpack" => Ok("shaderpack"),
+        "datapack" => Ok("datapack"),
+        other => Err(format!("INVALID_VALUE|不支持的包类型：{other}")),
+    }
+}
+
+/// 该类型对应的子目录名（相对实例目录或游戏目录）
+#[allow(dead_code)]
+pub fn sub_dir(kind: &str) -> Result<&'static str, String> {
+    match normalize_kind(kind)? {
+        "resourcepack" => Ok("resourcepacks"),
+        "shaderpack" => Ok("shaderpacks"),
+        "datapack" => Ok("datapacks"),
+        _ => unreachable!(),
+    }
+}
+
+/// 该类型认的扩展名（小写比较）
+fn extensions(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "shaderpack" => &[".zip"],
+        _ => &[".zip", ".jar"],
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PackFile {
+    pub file_name: String,
+    pub base_name: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub size_bytes: u64,
+    /// 资源包/数据包的 `pack_format`，光影包恒为 None
+    pub pack_format: Option<u32>,
+    /// `pack.mcmeta` 里的 `description`（可以是纯文本或 JSON 文本组件，原样返回）
+    pub description: Option<String>,
+    /// 由 `pack_format` 推出来的游戏版本区间，推断不出来就是空
+    pub compatible_versions: Vec<String>,
+    /// 给人看的补充说明，例如"这个包是给 1.20.1 做的"
+    pub note: Option<String>,
+}
+
+/// `pack_format` → 游戏版本区间。Minecraft 官方没给完整对照表，
+/// 这里只覆盖资源包格式实际变更过的版本，查不到就返回空。
+///
+/// 数据来源是 wiki 的 pack_format 表；只写"能确定"的区间，
+/// 不确定的宁可空着也不猜。
+pub fn versions_for_format(format: u32) -> Vec<String> {
+    let (from, to) = match format {
+        1 => ("1.6.1", "1.8.9"),
+        2 => ("1.9", "1.10.2"),
+        3 => ("1.11", "1.12.2"),
+        4 => ("1.13", "1.14.4"),
+        5 => ("1.15", "1.16.1"),
+        6 => ("1.16.2", "1.16.5"),
+        7 => ("1.17", "1.17.1"),
+        8 => ("1.18", "1.18.2"),
+        9 => ("1.19", "1.19.2"),
+        12 => ("1.19.3", "1.19.3"),
+        13 => ("1.19.4", "1.19.4"),
+        15 => ("1.20", "1.20.1"),
+        18 => ("1.20.2", "1.20.2"),
+        22 => ("1.20.3", "1.20.4"),
+        32 => ("1.20.5", "1.20.6"),
+        34 => ("1.21", "1.21.1"),
+        42 => ("1.21.2", "1.21.3"),
+        46 => ("1.21.4", "1.21.4"),
+        55 => ("1.21.5", "1.21.5"),
+        _ => return Vec::new(),
+    };
+    if from == to {
+        vec![from.to_string()]
+    } else {
+        vec![format!("{from} – {to}")]
+    }
+}
+
+/// 把 `a.zip` / `a.zip.disabled` 拆成 (主体, 是否启用)
+fn split_name(file_name: &str) -> Option<(String, bool)> {
+    let lower = file_name.to_ascii_lowercase();
+    if let Some(stem) = lower.strip_suffix(".disabled") {
+        if stem.ends_with(".zip") || stem.ends_with(".jar") {
+            // 保留原始大小写，只去掉 .disabled
+            let cut = file_name.len() - ".disabled".len();
+            return Some((file_name[..cut].to_string(), false));
+        }
+        return None;
+    }
+    if lower.ends_with(".zip") || lower.ends_with(".jar") {
+        return Some((file_name.to_string(), true));
+    }
+    None
+}
+
+fn read_entry<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
+    const MAX_META: u64 = 1024 * 1024;
+    let mut f = zip.by_name(name).ok()?;
+    if f.size() > MAX_META {
+        return None;
+    }
+    let mut s = String::new();
+    f.read_to_string(&mut s).ok()?;
+    Some(s)
+}
+
+#[derive(Default)]
+struct PackMeta {
+    format: Option<u32>,
+    description: Option<String>,
+    has_shaders: bool,
+}
+
+/// 描述字段在 `pack.mcmeta` 里可能是字符串，也可能是文本组件对象。
+/// 对象时取 `text`，取不到就把整个 JSON 压成一行给人看。
+fn description_of(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            (!s.is_empty()).then(|| s.to_string())
+        }
+        serde_json::Value::Object(_) => {
+            if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
+                return Some(t.to_string());
+            }
+            let extra = v
+                .get("extra")
+                .and_then(|e| e.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            if !extra.trim().is_empty() {
+                return Some(extra);
+            }
+            serde_json::to_string(v).ok()
+        }
+        _ => None,
+    }
+}
+
+fn read_pack_meta(path: &Path, kind: &str) -> PackMeta {
+    let mut meta = PackMeta::default();
+    let Ok(file) = std::fs::File::open(path) else {
+        return meta;
+    };
+    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+        return meta;
+    };
+
+    if kind == "shaderpack" {
+        // 光影包没有 pack.mcmeta，靠 shaders/ 目录判定
+        meta.has_shaders = zip
+            .file_names()
+            .filter_map(|n| n.ok())
+            .any(|n| n.starts_with("shaders/") || n == "shaders");
+        return meta;
+    }
+
+    if let Some(text) = read_entry(&mut zip, "pack.mcmeta") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let pack = v.get("pack");
+            meta.format = pack
+                .and_then(|p| p.get("pack_format"))
+                .and_then(|f| f.as_u64())
+                .and_then(|f| u32::try_from(f).ok());
+            meta.description = pack
+                .and_then(|p| p.get("description"))
+                .and_then(description_of);
+            // 1.20.2 之后允许 supported_formats 声明兼容区间，有就用它覆盖
+            if let Some(sf) = pack.and_then(|p| p.get("supported_formats")) {
+                if let Some(f) = sf.as_u64().and_then(|f| u32::try_from(f).ok()) {
+                    meta.format = Some(f);
+                }
+            }
+        }
+    }
+    meta
+}
+
+fn build(dir: &Path, file_name: &str, enabled: bool, kind: &str, meta: PackMeta) -> PackFile {
+    let path = dir.join(file_name);
+    let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let base_name = split_name(file_name)
+        .map(|(s, _)| s)
+        .unwrap_or_else(|| file_name.to_string());
+    let compatible_versions = meta.format.map(versions_for_format).unwrap_or_default();
+    let note = match (kind, meta.format) {
+        ("shaderpack", _) if !meta.has_shaders => {
+            Some("包里没有 shaders/ 目录，可能不是光影包".to_string())
+        }
+        ("shaderpack", _) => None,
+        (_, Some(f)) => {
+            let v = versions_for_format(f);
+            if v.is_empty() {
+                Some(format!("pack_format {f} 不在已知对照表里"))
+            } else {
+                Some(format!("pack_format {f}，适配 {}", v.join("、")))
+            }
+        }
+        (_, None) => Some("包里没有 pack.mcmeta，游戏可能不认".to_string()),
+    };
+    PackFile {
+        file_name: file_name.to_string(),
+        base_name,
+        kind: kind.to_string(),
+        enabled,
+        size_bytes,
+        pack_format: meta.format,
+        description: meta.description,
+        compatible_versions,
+        note,
+    }
+}
+
+/// 列出某个目录下的全部包（含已禁用的）
+pub fn list(dir: &Path, kind: &str) -> Result<Vec<PackFile>, String> {
+    let kind = normalize_kind(kind)?;
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        // 目录不存在不算错误：还没装过任何包而已
+        return Ok(Vec::new());
+    };
+    let exts = extensions(kind);
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let path = e.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = e.file_name().to_string_lossy().to_string();
+        let Some((_, enabled)) = split_name(&file_name) else {
+            continue;
+        };
+        let lower = file_name.to_ascii_lowercase();
+        let stem = lower.trim_end_matches(".disabled");
+        if !exts.iter().any(|x| stem.ends_with(x)) {
+            continue;
+        }
+        let meta = read_pack_meta(&path, kind);
+        out.push(build(dir, &file_name, enabled, kind, meta));
+    }
+    out.sort_by_key(|p| p.base_name.to_lowercase());
+    Ok(out)
+}
+
+fn safe_name(file_name: &str) -> Result<(), String> {
+    if file_name.is_empty() || file_name.contains(['/', '\\', ':']) || file_name.contains("..") {
+        return Err("INVALID_PATH|文件名不安全".into());
+    }
+    if Path::new(file_name).components().count() != 1 {
+        return Err("INVALID_PATH|文件名不安全".into());
+    }
+    Ok(())
+}
+
+/// 目标名冲突时依次加 -1、-2……
+fn unique_target(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
+    let first = dir.join(format!("{stem}{suffix}"));
+    if !first.exists() {
+        return first;
+    }
+    for i in 1..=20 {
+        let p = dir.join(format!("{stem}-{i}{suffix}"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(format!("{stem}-{}{suffix}", crate::time::now_unix_ms()))
+}
+
+/// 启用/禁用：靠改文件名后缀 `.disabled` 实现，和 `mods.rs` 一致。
+///
+/// 不用"把文件移到别处"，因为那样游戏就看不到它了，玩家也没法在
+/// 游戏的资源包界面里重新启用。
+pub fn set_enabled(
+    dir: &Path,
+    kind: &str,
+    file_name: &str,
+    enabled: bool,
+) -> Result<PackFile, String> {
+    let kind = normalize_kind(kind)?;
+    safe_name(file_name)?;
+    let (stem, currently) = split_name(file_name).ok_or("INVALID_NAME|不是可识别的包文件")?;
+    if currently == enabled {
+        let meta = read_pack_meta(&dir.join(file_name), kind);
+        return Ok(build(dir, file_name, enabled, kind, meta));
+    }
+    let src = dir.join(file_name);
+    if !src.is_file() {
+        return Err("INVALID_NAME|文件不存在".into());
+    }
+
+    let dest = if enabled {
+        unique_target(dir, &stem, "")
+    } else {
+        unique_target(dir, &stem, ".disabled")
+    };
+    std::fs::rename(&src, &dest).map_err(|e| format!("PERMISSION|重命名失败|{e}"))?;
+    let new_name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_name.to_string());
+    let meta = read_pack_meta(&dest, kind);
+    Ok(build(dir, &new_name, enabled, kind, meta))
+}
+
+/// 删除必须显式确认；只删这一个文件，不动同目录其他东西。
+pub fn delete(dir: &Path, kind: &str, file_name: &str, confirm: bool) -> Result<(), String> {
+    normalize_kind(kind)?;
+    if !confirm {
+        return Err("UNSUPPORTED|删除文件需要明确确认".into());
+    }
+    safe_name(file_name)?;
+    if split_name(file_name).is_none() {
+        return Err("INVALID_NAME|不是可识别的包文件".into());
+    }
+    let p = dir.join(file_name);
+    if !p.is_file() {
+        return Err("INVALID_NAME|文件不存在".into());
+    }
+    if crate::net::is_reparse_point(&p) {
+        return Err("INVALID_PATH|这是一个符号链接，已拒绝删除".into());
+    }
+    std::fs::remove_file(&p).map_err(|e| format!("PERMISSION|删除失败|{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_split_for_packs() {
+        assert_eq!(
+            split_name("Better Leaves.zip"),
+            Some(("Better Leaves.zip".to_string(), true))
+        );
+        assert_eq!(
+            split_name("Better Leaves.zip.disabled"),
+            Some(("Better Leaves.zip".to_string(), false))
+        );
+        assert_eq!(split_name("readme.txt"), None);
+        assert_eq!(split_name("a.zip.disabled.disabled"), None);
+    }
+
+    #[test]
+    fn format_table_covers_modern_versions() {
+        assert_eq!(versions_for_format(15), vec!["1.20 – 1.20.1"]);
+        assert_eq!(versions_for_format(46), vec!["1.21.4"]);
+        assert!(versions_for_format(999).is_empty());
+    }
+
+    #[test]
+    fn description_handles_text_and_object() {
+        let s = serde_json::json!("Simple pack");
+        assert_eq!(description_of(&s).as_deref(), Some("Simple pack"));
+        let o = serde_json::json!({"text": "Hi"});
+        assert_eq!(description_of(&o).as_deref(), Some("Hi"));
+        let e = serde_json::json!({"extra": [{"text": "A"}, {"text": "B"}]});
+        assert_eq!(description_of(&e).as_deref(), Some("AB"));
+    }
+
+    #[test]
+    fn rejects_unsafe_names() {
+        assert!(safe_name("../x.zip").is_err());
+        assert!(safe_name("a/b.zip").is_err());
+        assert!(safe_name("C:x.zip").is_err());
+        assert!(safe_name("ok.zip").is_ok());
+    }
+
+    #[test]
+    fn lists_only_matching_extensions() {
+        let dir = std::env::temp_dir().join(format!("astral-packs-{}", crate::time::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.zip"), b"x").unwrap();
+        std::fs::write(dir.join("b.zip.disabled"), b"y").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"z").unwrap();
+        let list = list(&dir, "resourcepack").unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|p| p.file_name == "a.zip" && p.enabled));
+        assert!(list
+            .iter()
+            .any(|p| p.file_name == "b.zip.disabled" && !p.enabled));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_requires_confirm() {
+        let dir = std::env::temp_dir().join(format!("astral-packs-{}", crate::time::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.zip"), b"x").unwrap();
+        assert!(delete(&dir, "resourcepack", "a.zip", false).is_err());
+        assert!(dir.join("a.zip").exists());
+        assert!(delete(&dir, "resourcepack", "a.zip", true).is_ok());
+        assert!(!dir.join("a.zip").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

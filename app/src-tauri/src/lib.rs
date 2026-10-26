@@ -15,6 +15,7 @@ mod migrate;
 mod modpack;
 mod mods;
 mod net;
+mod packs;
 mod plan;
 mod recycle;
 mod resources;
@@ -2370,6 +2371,46 @@ fn delete_mod(instance_id: String, file_name: String) -> Result<(), String> {
     mods::delete(std::path::Path::new(&inst.dirs.mods), &file_name)
 }
 
+// ── 资源包 / 光影包 ─────────────────────────────────────────────
+
+fn pack_dir(instance_id: &str, kind: &str) -> Result<PathBuf, String> {
+    let inst = managed_instance(instance_id)?;
+    let dir = match packs::normalize_kind(kind)? {
+        "resourcepack" => inst.dirs.resourcepacks.clone(),
+        "shaderpack" => inst.dirs.shaderpacks.clone(),
+        other => return Err(format!("INVALID_VALUE|这个类型不支持文件管理：{other}")),
+    };
+    Ok(PathBuf::from(dir))
+}
+
+#[tauri::command]
+fn list_packs(instance_id: String, kind: String) -> Result<Vec<packs::PackFile>, String> {
+    let dir = pack_dir(&instance_id, &kind)?;
+    packs::list(&dir, &kind)
+}
+
+#[tauri::command]
+fn set_pack_enabled(
+    instance_id: String,
+    kind: String,
+    file_name: String,
+    enabled: bool,
+) -> Result<packs::PackFile, String> {
+    let dir = pack_dir(&instance_id, &kind)?;
+    packs::set_enabled(&dir, &kind, &file_name, enabled)
+}
+
+#[tauri::command]
+fn delete_pack(
+    instance_id: String,
+    kind: String,
+    file_name: String,
+    confirm: bool,
+) -> Result<(), String> {
+    let dir = pack_dir(&instance_id, &kind)?;
+    packs::delete(&dir, &kind, &file_name, confirm)
+}
+
 // ── legacy（阻塞语义，保持不变）──────────────────────────────────
 
 #[tauri::command]
@@ -2570,6 +2611,9 @@ pub fn run() {
             list_mods,
             set_mod_enabled,
             delete_mod,
+            list_packs,
+            set_pack_enabled,
+            delete_pack,
             list_loaders,
             start_install_loader,
             list_loader_builds,
@@ -2757,6 +2801,70 @@ pub fn selftest() -> i32 {
         mods::delete(&mod_dir, "../a.jar").is_err()
     );
     let _ = std::fs::remove_dir_all(&mod_dir);
+
+    // 资源包 / 光影包：文件层管理（pack_format 解析、启停、删除确认）
+    let pack_dir = std::env::temp_dir().join(format!("astral-packs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&pack_dir);
+    let _ = std::fs::create_dir_all(&pack_dir);
+    // 造一个真的带 pack.mcmeta 的资源包
+    {
+        let f = std::fs::File::create(pack_dir.join("Better Leaves.zip")).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        use std::io::Write as _;
+        zw.start_file("pack.mcmeta", opts).unwrap();
+        zw.write_all(br#"{"pack":{"pack_format":15,"description":"Leaves"}}"#)
+            .unwrap();
+        zw.finish().unwrap();
+    }
+    // 再放一个没有 pack.mcmeta 的 zip，验证"会提示游戏可能不认"
+    let _ = std::fs::write(pack_dir.join("broken.zip"), b"not a zip");
+    let _ = std::fs::write(pack_dir.join("note.txt"), b"ignore me");
+    let packs_listed = packs::list(&pack_dir, "resourcepack").unwrap_or_default();
+    check!(
+        "packs list reads pack format",
+        packs_listed.len() == 2
+            && packs_listed
+                .iter()
+                .any(|p| p.file_name == "Better Leaves.zip"
+                    && p.pack_format == Some(15)
+                    && p.description.as_deref() == Some("Leaves")
+                    && p.compatible_versions.iter().any(|v| v.contains("1.20")))
+            && packs_listed
+                .iter()
+                .any(|p| p.file_name == "broken.zip" && p.pack_format.is_none())
+    );
+    check!(
+        "packs disable renames file",
+        packs::set_enabled(&pack_dir, "resourcepack", "Better Leaves.zip", false)
+            .map(|p| p.file_name == "Better Leaves.zip.disabled" && !p.enabled)
+            .unwrap_or(false)
+            && pack_dir.join("Better Leaves.zip.disabled").exists()
+    );
+    check!(
+        "packs enable renames back",
+        packs::set_enabled(
+            &pack_dir,
+            "resourcepack",
+            "Better Leaves.zip.disabled",
+            true
+        )
+        .map(|p| p.file_name == "Better Leaves.zip" && p.enabled)
+        .unwrap_or(false)
+    );
+    check!(
+        "packs delete needs confirm",
+        packs::delete(&pack_dir, "resourcepack", "broken.zip", false).is_err()
+            && pack_dir.join("broken.zip").exists()
+            && packs::delete(&pack_dir, "resourcepack", "broken.zip", true).is_ok()
+            && !pack_dir.join("broken.zip").exists()
+    );
+    check!(
+        "packs reject bad kind and names",
+        packs::list(&pack_dir, "taco").is_err()
+            && packs::delete(&pack_dir, "resourcepack", "../x.zip", true).is_err()
+    );
+    let _ = std::fs::remove_dir_all(&pack_dir);
 
     check!(
         "instance delete to trash",
