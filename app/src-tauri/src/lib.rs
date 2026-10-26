@@ -5,6 +5,7 @@ mod core;
 mod deps;
 mod error;
 mod export;
+mod game_options;
 mod instance;
 mod java;
 mod java_audit;
@@ -802,6 +803,32 @@ fn read_screenshot(
 #[tauri::command]
 fn delete_screenshot(instance_id: String, file_name: String, confirm: bool) -> Result<u64, String> {
     screenshots::delete(&shots_dir_of(&instance_id)?, &file_name, confirm)
+}
+
+// ── 游戏设置（options.txt）─────────────────────────────────────
+
+fn inst_dir_of(instance_id: &str) -> Result<PathBuf, String> {
+    let game = game_root();
+    let inst = instance::find(&game, instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    Ok(instance::instance_dir(&game, &inst.id))
+}
+
+/// 读实例的游戏设置（只读，不改任何文件）
+#[tauri::command]
+fn get_game_options(instance_id: String) -> Result<game_options::GameOptions, String> {
+    game_options::read(&inst_dir_of(&instance_id)?)
+}
+
+/// 改游戏设置：只允许白名单里的键，改之前自动备份
+#[tauri::command]
+fn set_game_options(
+    instance_id: String,
+    changes: std::collections::BTreeMap<String, String>,
+) -> Result<game_options::OptionsWrite, String> {
+    let dir = inst_dir_of(&instance_id)?;
+    let running = session::active(Some(&instance_id)).is_some();
+    game_options::write(&dir, &changes, running)
 }
 
 // ── 版本复制 / 导入 / 迁移 ──────────────────────────────────────
@@ -2898,6 +2925,8 @@ pub fn run() {
             list_screenshots,
             read_screenshot,
             delete_screenshot,
+            get_game_options,
+            set_game_options,
             get_resource_project,
             list_resource_files,
             search_resources,
@@ -4127,6 +4156,72 @@ pub fn selftest() -> i32 {
                 && base.join("2026-10-27_12.00.00.png").is_file()
                 && screenshots::delete(&base, "2026-10-27_12.00.00.png", true).is_ok()
                 && !base.join("2026-10-27_12.00.00.png").exists()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // 游戏设置：只改白名单键，其余行原样保留，改之前备份。
+    {
+        let base = std::env::temp_dir().join(format!("astral-opts-{}", time::now_nanos()));
+        let _ = std::fs::create_dir_all(&base);
+        let _ = std::fs::write(
+            base.join("options.txt"),
+            "version:3465\nrenderDistance:8\nlang:en_us\nkey_key.jump:space\n",
+        );
+
+        let opts = game_options::read(&base);
+        check!(
+            "game options read with labels",
+            opts.as_ref()
+                .map(|o| o.exists
+                    && o.other_keys == 2
+                    && o.fields.iter().any(|f| f.key == "renderDistance"
+                        && f.value.as_deref() == Some("8")
+                        && f.group == "画面")
+                    && o.fields
+                        .iter()
+                        .any(|f| f.key == "lang" && f.choices.len() >= 3))
+                .unwrap_or(false)
+        );
+
+        let mut want = std::collections::BTreeMap::new();
+        want.insert("renderDistance".to_string(), "16".to_string());
+        let wrote = game_options::write(&base, &want, false);
+        let body = std::fs::read_to_string(base.join("options.txt")).unwrap_or_default();
+        check!(
+            "game options write keeps other keys",
+            wrote
+                .as_ref()
+                .map(|w| w.changed == vec!["renderDistance".to_string()] && w.backup.is_some())
+                .unwrap_or(false)
+                && body.contains("renderDistance:16")
+                && body.contains("version:3465")
+                && body.contains("key_key.jump:space")
+        );
+
+        let mut bad = std::collections::BTreeMap::new();
+        bad.insert("lastServer".to_string(), "evil".to_string());
+        let mut two = std::collections::BTreeMap::new();
+        two.insert("renderDistance".to_string(), "16".to_string());
+        two.insert("guiScale".to_string(), "9".to_string());
+        check!(
+            "game options reject unknown and bad values",
+            game_options::write(&base, &bad, false).is_err()
+                && game_options::write(&base, &two, false).is_err()
+                && std::fs::read_to_string(base.join("options.txt"))
+                    .unwrap_or_default()
+                    .contains("renderDistance:16")
+        );
+
+        let mut one = std::collections::BTreeMap::new();
+        one.insert("fov".to_string(), "90".to_string());
+        check!(
+            "game options refuse while running",
+            game_options::write(&base, &one, true)
+                .err()
+                .map(|e| e.starts_with("INSTANCE_BUSY|"))
+                .unwrap_or(false)
         );
 
         let _ = std::fs::remove_dir_all(&base);
