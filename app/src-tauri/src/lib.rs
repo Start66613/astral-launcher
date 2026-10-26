@@ -13,6 +13,7 @@ mod logs;
 mod modpack;
 mod mods;
 mod net;
+mod recycle;
 mod testsrv;
 mod plan;
 mod resources;
@@ -320,6 +321,44 @@ fn delete_instance(id: String, opts: Option<DeleteOpts>) -> Result<Config, Strin
         core::save_config(&cfg)?;
     }
     Ok(cfg)
+}
+
+// ── 回收站 ──────────────────────────────────────────────────────
+
+/// 列出回收站内容（只读，不删除任何东西）
+#[tauri::command]
+fn list_trash() -> Vec<recycle::TrashEntry> {
+    recycle::list(&game_root())
+}
+
+/// 从回收站恢复一个实例；id 冲突时自动换新 id，不覆盖现有实例
+#[tauri::command]
+fn restore_from_trash(trash_name: String) -> Result<recycle::RestoreResult, String> {
+    let game = game_root();
+    let r = recycle::restore(&game, &trash_name)?;
+    emit_instance_changed(&r.instance_id, "restored");
+    Ok(r)
+}
+
+/// 永久删除回收站里的指定项（危险操作，必须显式列出名称并确认）
+#[tauri::command]
+fn purge_trash(trash_names: Vec<String>, confirm: bool) -> Result<recycle::PurgeResult, String> {
+    if !confirm {
+        return error::fail(error::UNSUPPORTED, "永久删除需要明确确认");
+    }
+    if trash_names.is_empty() {
+        return error::fail(error::INVALID_VALUE, "没有指定要永久删除的项目");
+    }
+    recycle::purge(&game_root(), &trash_names)
+}
+
+/// 清空整个回收站（独立危险操作，必须二次确认）
+#[tauri::command]
+fn purge_all_trash(confirm: bool) -> Result<recycle::PurgeResult, String> {
+    if !confirm {
+        return error::fail(error::UNSUPPORTED, "清空回收站需要明确确认");
+    }
+    recycle::purge_all(&game_root())
 }
 
 // ── 任务 ────────────────────────────────────────────────────────
@@ -2142,6 +2181,10 @@ pub fn run() {
             set_active_instance,
             update_instance,
             delete_instance,
+            list_trash,
+            restore_from_trash,
+            purge_trash,
+            purge_all_trash,
             get_tasks,
             get_task,
             cancel_task,
@@ -4789,6 +4832,113 @@ pub fn selftest() -> i32 {
                     && s["retries"].is_number()
                     && s["hosts"].is_object()
             );
+
+            // 27) 回收站：删除 → 列表 → 恢复（id 冲突改名）→ 永久删除
+            {
+                let g = dl.join("trash-game");
+                let _ = std::fs::create_dir_all(crate::instance::instances_root(&g));
+                let meta = instance::InstanceMeta {
+                    id: instance::new_id(),
+                    name: "回收测试".into(),
+                    game_version: "1.20.1".into(),
+                    loader_kind: Some("fabric".into()),
+                    loader_version: Some("0.16.9".into()),
+                    launch_version: None,
+                    memory_mb: None,
+                    jvm_args: vec![],
+                    java_path: None,
+                    cover: None,
+                    created_at: time::now_iso(),
+                };
+                let inst = instance::create(&g, &meta).unwrap();
+                let orig_id = inst.id.clone();
+                // 放一个存档文件，验证恢复后还在
+                let save = crate::instance::instance_dir(&g, &orig_id)
+                    .join("saves")
+                    .join("world1")
+                    .join("level.dat");
+                let _ = std::fs::create_dir_all(save.parent().unwrap());
+                let _ = std::fs::write(&save, b"level");
+
+                let del = instance::delete(&g, &orig_id, true);
+                let listed = recycle::list(&g);
+                check!(
+                    "trash lists deleted instance",
+                    del.is_ok()
+                        && listed.len() == 1
+                        && listed[0].instance_id == orig_id
+                        && listed[0].name == "回收测试"
+                        && listed[0].restorable
+                        && listed[0].file_count >= 2
+                        && !listed[0].deleted_at.is_empty()
+                );
+
+                // id 冲突：先占住原 id，再恢复，必须换新 id 且不覆盖
+                let _ = instance::create(
+                    &g,
+                    &instance::InstanceMeta {
+                        id: orig_id.clone(),
+                        name: "占位".into(),
+                        game_version: "1.20.1".into(),
+                        loader_kind: None,
+                        loader_version: None,
+                        launch_version: None,
+                        memory_mb: None,
+                        jvm_args: vec![],
+                        java_path: None,
+                        cover: None,
+                        created_at: time::now_iso(),
+                    },
+                );
+                let trash_name = listed[0].trash_name.clone();
+                let restored = recycle::restore(&g, &trash_name);
+                let new_id = restored
+                    .as_ref()
+                    .map(|r| r.instance_id.clone())
+                    .unwrap_or_default();
+                let placeholder_kept = instance::read_meta(&g, &orig_id)
+                    .map(|m| m.name == "占位")
+                    .unwrap_or(false);
+                let save_back = crate::instance::instance_dir(&g, &new_id)
+                    .join("saves")
+                    .join("world1")
+                    .join("level.dat");
+                let meta_fixed = instance::read_meta(&g, &new_id)
+                    .map(|m| m.id == new_id && m.name == "回收测试")
+                    .unwrap_or(false);
+                check!(
+                    "trash restore renames on conflict",
+                    restored.map(|r| r.renamed).unwrap_or(false)
+                        && new_id != orig_id
+                        && placeholder_kept
+                        && save_back.is_file()
+                        && meta_fixed
+                );
+
+                // 恢复后列表应为空
+                check!("trash empty after restore", recycle::list(&g).is_empty());
+
+                // 永久删除：必须显式确认
+                let del2 = instance::delete(&g, &new_id, true);
+                let names: Vec<String> = recycle::list(&g).iter().map(|e| e.trash_name.clone()).collect();
+                let purged = recycle::purge(&g, &names);
+                check!(
+                    "trash purge removes only listed",
+                    del2.is_ok()
+                        && purged.map(|p| p.removed == 1 && p.failed.is_empty()).unwrap_or(false)
+                        && recycle::list(&g).is_empty()
+                        && instance::read_meta(&g, &orig_id).is_some()
+                );
+            }
+
+            // 28) 回收站拒绝路径穿越，清空也要能列出
+            {
+                let g = dl.join("trash-game");
+                let bad = recycle::restore(&g, "../escape");
+                let names: Vec<String> = recycle::list(&g).iter().map(|e| e.trash_name.clone()).collect();
+                let _ = names;
+                check!("trash rejects traversal", bad.is_err());
+            }
         }
         Err(e) => {
             check!("download plain + sha1", false);

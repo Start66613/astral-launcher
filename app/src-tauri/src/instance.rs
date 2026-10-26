@@ -447,6 +447,12 @@ pub fn read_meta(game: &Path, id: &str) -> Option<InstanceMeta> {
     serde_json::from_str(&text).ok()
 }
 
+/// 从任意实例目录读元数据（回收站恢复时目录名还不是实例 id）
+pub fn read_meta_at(dir: &Path) -> Option<InstanceMeta> {
+    let text = std::fs::read_to_string(dir.join("instance.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// 删除：默认进回收站
 pub fn delete(game: &Path, id: &str, trash: bool) -> Result<(), String> {
     let dir = instance_dir(game, id);

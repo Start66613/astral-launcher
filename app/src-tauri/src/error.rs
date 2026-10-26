@@ -22,6 +22,16 @@ pub const CANCELLED: &str = "CANCELLED";
 pub const BUSY: &str = "BUSY";
 pub const UNSUPPORTED: &str = "UNSUPPORTED";
 pub const INTERNAL: &str = "INTERNAL";
+pub const INVALID_VALUE: &str = "INVALID_VALUE";
+pub const INVALID_PATH: &str = "INVALID_PATH";
+pub const NOT_FOUND: &str = "NOT_FOUND";
+pub const PLAN_EXPIRED: &str = "PLAN_EXPIRED";
+pub const FILE_EXISTS: &str = "FILE_EXISTS";
+pub const BLOCKED_URL: &str = "BLOCKED_URL";
+pub const HASH_MISMATCH: &str = "HASH_MISMATCH";
+pub const DEPENDENCY_CYCLE: &str = "DEPENDENCY_CYCLE";
+pub const DEPENDENCY_CONFLICT: &str = "DEPENDENCY_CONFLICT";
+pub const JAVA_UNSUPPORTED: &str = "JAVA_UNSUPPORTED";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
