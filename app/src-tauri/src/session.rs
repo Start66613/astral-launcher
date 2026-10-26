@@ -29,6 +29,10 @@ pub struct GameSession {
     /// 启动器重启后按 pid 对账收尾的会话：退出码与时长都不精确
     #[serde(default)]
     pub reconciled: bool,
+    /// 是不是玩家自己在启动器里点了「结束游戏」。
+    /// 这种情况下退出码非 0 也不该报成崩溃——是玩家自己要关的。
+    #[serde(default)]
+    pub stopping: bool,
 }
 
 static STORE: OnceLock<Mutex<Vec<GameSession>>> = OnceLock::new();
@@ -125,6 +129,7 @@ pub fn begin(instance_id: &str, task_id: &str, pid: u32) -> GameSession {
             ended_at: None,
             duration_ms: None,
             reconciled: false,
+            stopping: false,
         }
     };
     let mut list = store().lock().unwrap();
@@ -160,9 +165,11 @@ pub fn mark_exited(session_id: &str, exit_code: Option<i32>) -> Option<GameSessi
 }
 
 pub fn emit_exit(app: &AppHandle, s: &GameSession) {
-    // 退出码未知 ≠ 崩溃：只有拿到非 0 退出码才判定崩溃
+    // 退出码未知 ≠ 崩溃：只有拿到非 0 退出码才判定崩溃。
+    // 但玩家自己在启动器里点了「结束游戏」时，强制结束必然是非 0，
+    // 那是玩家自己的选择，报成崩溃只会吓人。
     let exit_known = s.exit_code.is_some();
-    let crashed = matches!(s.exit_code, Some(c) if c != 0);
+    let crashed = crashed(s);
     let payload = serde_json::json!({
         "sessionId": s.session_id,
         "taskId": s.task_id,
@@ -170,11 +177,36 @@ pub fn emit_exit(app: &AppHandle, s: &GameSession) {
         "exitCode": s.exit_code,
         "exitKnown": exit_known,
         "crashed": crashed,
+        "stoppedByUser": s.stopping,
         "reconciled": s.reconciled,
         "durationMs": s.duration_ms.unwrap_or(0),
         "endedAt": s.ended_at,
     });
     let _ = app.emit(EVENT, payload);
+}
+
+/// 这次退出算不算崩溃。
+///
+/// 三条：拿到退出码、退出码非 0、**而且不是玩家自己点的结束**。
+/// 强制结束必然返回非 0，那是玩家主动关的，不该弹「游戏崩溃了」。
+pub fn crashed(s: &GameSession) -> bool {
+    matches!(s.exit_code, Some(c) if c != 0) && !s.stopping
+}
+
+/// 标记「玩家正在结束这个会话」。之后的退出码非 0 不算崩溃。
+pub fn mark_stopping(session_id: &str) {
+    let mut list = store().lock().unwrap();
+    if let Some(s) = list.iter_mut().find(|s| s.session_id == session_id) {
+        s.stopping = true;
+        persist(&list);
+    }
+}
+
+/// 这个会话的进程还是不是**同一个**（比对 pid 与创建时间）。
+///
+/// `game_stop` 动手前后都要问一次，避免 pid 被系统复用后误杀别的程序。
+pub fn pid_matches(s: &GameSession) -> bool {
+    pid_alive(s.pid, s.pid_started_at)
 }
 
 /// 当前**存活**会话；期间做一次 pid 对账
@@ -278,5 +310,41 @@ mod tests {
         mark_exited(&s.session_id, Some(0));
         let st = stats_for(&id);
         assert!(st.last_played.is_some());
+    }
+
+    #[test]
+    fn user_stop_is_not_a_crash() {
+        let id = format!("inst_stop_{}", std::process::id());
+        let s = begin(&id, "task_s", 0);
+        mark_stopping(&s.session_id);
+        let ended = mark_exited(&s.session_id, Some(1)).expect("session");
+        // 强制结束必然非 0，但那是玩家自己关的，不能报成崩溃
+        assert!(ended.stopping);
+        assert!(!crashed(&ended));
+    }
+
+    #[test]
+    fn real_nonzero_exit_is_a_crash() {
+        let id = format!("inst_crash_{}", std::process::id());
+        let s = begin(&id, "task_c", 0);
+        let ended = mark_exited(&s.session_id, Some(1)).expect("session");
+        assert!(!ended.stopping);
+        assert!(crashed(&ended));
+    }
+
+    #[test]
+    fn zero_exit_is_not_a_crash() {
+        let id = format!("inst_ok_{}", std::process::id());
+        let s = begin(&id, "task_o", 0);
+        let ended = mark_exited(&s.session_id, Some(0)).expect("session");
+        assert!(!crashed(&ended));
+    }
+
+    #[test]
+    fn unknown_exit_code_is_not_a_crash() {
+        let id = format!("inst_unk_{}", std::process::id());
+        let s = begin(&id, "task_u", 0);
+        let ended = mark_exited(&s.session_id, None).expect("session");
+        assert!(!crashed(&ended));
     }
 }

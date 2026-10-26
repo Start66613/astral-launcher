@@ -10,6 +10,7 @@ mod disk_usage;
 mod error;
 mod export;
 mod game_options;
+mod game_stop;
 mod instance;
 mod java;
 mod java_audit;
@@ -604,6 +605,23 @@ fn get_active_session(instance_id: Option<String>) -> Option<GameSession> {
 #[tauri::command]
 fn list_sessions(instance_id: Option<String>, limit: Option<usize>) -> Vec<GameSession> {
     session::list(instance_id.as_deref(), limit.unwrap_or(50))
+}
+
+/// 结束正在运行的游戏。
+///
+/// 默认先发关闭消息（等于点窗口的 ×），等游戏自己存盘退出；
+/// 玩家确认「强制结束」时才真的终止进程。玩家自己关掉不算崩溃。
+#[tauri::command]
+async fn stop_game(
+    instance_id: String,
+    force: Option<bool>,
+    wait_ms: Option<u64>,
+) -> Result<game_stop::StopResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        game_stop::stop(&instance_id, force.unwrap_or(false), wait_ms)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── 存档 / 统计 ─────────────────────────────────────────────────
@@ -3347,6 +3365,7 @@ pub fn run() {
             start_game_install,
             get_active_session,
             list_sessions,
+            stop_game,
             list_saves,
             get_stats,
             net_scheduler_stats,
@@ -4544,6 +4563,76 @@ pub fn selftest() -> i32 {
                 .map(|x| x.state != "exited")
                 .unwrap_or(false)
         );
+    }
+
+    // 结束游戏：真起一个假进程来验证"只杀自己启动的那个"
+    {
+        // 没有在运行的实例，必须明确报 NOT_FOUND，不能假装成功
+        check!(
+            "stop refuses when idle",
+            game_stop::stop("inst_not_running", false, Some(100))
+                .map(|_| false)
+                .unwrap_or_else(|e| e.starts_with("NOT_FOUND|"))
+        );
+
+        // 起一个真实进程当"游戏"
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn ping");
+        let fake_pid = child.id();
+        // begin() 会记下真实创建时间，正好用来验证 pid 匹配能通过
+        let fake = session::begin("inst_fake_game", "task_fake", fake_pid);
+        session::save_for_test(vec![fake.clone()]);
+
+        let stopped = game_stop::stop("inst_fake_game", true, Some(3000));
+        check!(
+            "stop terminates the process",
+            stopped
+                .as_ref()
+                .map(|r| r.forced && !r.still_running && r.method == "force")
+                .unwrap_or(false)
+        );
+        // 进程真的没了才算数，别只看返回值
+        let _ = child.wait();
+        check!("stop process really exited", child.try_wait().is_ok());
+
+        // 玩家自己结束不算崩溃
+        let ended = session::mark_exited(&fake.session_id, Some(1));
+        check!(
+            "stop marks user stop not crash",
+            ended
+                .as_ref()
+                .map(|s| s.stopping && !session::crashed(s))
+                .unwrap_or(false)
+        );
+
+        // PID 复用：创建时间对不上时，绝不能按 pid 硬杀别人的进程
+        let mut child2 = std::process::Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn ping 2");
+        let mut hijack = session::begin("inst_hijack", "task_hijack", child2.id());
+        hijack.pid_started_at = Some(1); // 一小时多以前，肯定对不上
+        session::save_for_test(vec![hijack]);
+        let refused = game_stop::stop("inst_hijack", true, Some(500));
+        check!(
+            "stop refuses a reused pid",
+            refused
+                .map(|_| false)
+                .unwrap_or_else(|e| e.starts_with("NOT_FOUND|"))
+        );
+        // 那个进程必须还活着
+        check!(
+            "stop leaves the other process alone",
+            child2.try_wait().ok().flatten().is_none()
+        );
+        let _ = child2.kill();
+        let _ = child2.wait();
     }
 
     let save = game.join("saves").join("World1");

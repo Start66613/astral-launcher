@@ -2534,3 +2534,62 @@ renderAnalysis(result);
 - 分析结果按 `causes` / `steps` 分两块渲染，`confidence` 用颜色区分，但别把 `low` 画成红色
   （那是「判断不了」，不是「确定有问题」）。
 - `elapsedMs` 超过 20 秒时加一句「模型正在思考…」，别让玩家以为卡死。
+---
+
+## 34. 结束正在运行的游戏（V2.5 新增）
+
+启动器以前只能启动、不能停止。玩家想换实例只能开任务管理器找 `javaw.exe`，找错了还会
+误杀别的东西。这次补上「结束游戏」。
+
+### 34.1 命令
+
+```ts
+invoke<StopResult>("stop_game", {
+  instanceId: string,
+  /** 默认 false：先发关闭消息等游戏自己退；true：直接终止 */
+  force?: boolean,
+  /** 等多久（毫秒），默认 15000，最长 120000 */
+  waitMs?: number,
+})
+```
+
+### 34.2 返回类型
+
+```ts
+interface StopResult {
+  sessionId: string;
+  instanceId: string;
+  pid: number;
+  /** "graceful" = 发了关闭消息等它自己退；"force" = 直接终止 */
+  method: "graceful" | "force";
+  forced: boolean;
+  /** 从发出请求到进程消失用了多久 */
+  waitedMs: number;
+  /** true 说明没停下来，界面必须如实告诉玩家 */
+  stillRunning: boolean;
+  /** 给玩家看的一句话，可以直接显示 */
+  message: string;
+}
+```
+
+### 34.3 行为约定
+
+- **先礼后兵。** `force` 默认 `false`，只发 `WM_CLOSE`——等于玩家点窗口右上角的 ×，
+  Minecraft 会走正常关闭流程（存区块、退服务器）。只有玩家确认「强制结束」才真的终止进程。
+- **超时不替玩家做决定。** 15 秒内没退出，返回 `stillRunning: true` 加一句
+  「游戏没有在 15 秒内退出（可能在存盘，也可能卡住了）。要强制结束吗？」。
+  界面应该弹二次确认，而不是自动升级成强制。
+- **只杀自己启动的那个进程。** 动手前后都比对 pid 的**创建时间**（`pid_started_at`）。
+  Windows 会复用 pid，只按 pid 杀可能杀掉玩家别的程序。对不上就报 `NOT_FOUND`。
+- **玩家自己结束不算崩溃。** 强制结束必然返回非 0 退出码，`astral://game-exit` 事件里
+  `crashed` 会是 `false`、`stoppedByUser` 是 `true`。不要弹「游戏崩溃了」。
+- **没在跑时明确报错。** `NOT_FOUND|这个实例没有在运行`，不会假装成功。
+
+### 34.4 前端接入建议
+
+- 「启动」按钮在实例运行中时换成「结束游戏」，点一次走 `force: false`。
+- 收到 `stillRunning: true` 时弹确认框：「游戏还没退出，强制结束可能丢失未保存的进度。
+  确定吗？」确认后才带 `force: true` 再调一次。
+- 按钮进 loading 态时显示「正在等待游戏退出…」，因为优雅关闭最多要等 15 秒。
+- `astral://game-exit` 事件里现在多了 `stoppedByUser` 字段：为 `true` 时走「已结束」的
+  轻提示，别走崩溃诊断流程。
