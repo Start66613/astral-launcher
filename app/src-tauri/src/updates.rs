@@ -36,7 +36,7 @@ fn hash_of(path: &Path) -> Option<String> {
 /// 单个文件 hash → Modrinth 版本对象（GET /version_file/{hash}）
 fn version_by_hash(sha1: &str) -> Option<serde_json::Value> {
     let url = format!("{API}/version_file/{sha1}?algorithm=sha1");
-    crate::net::fetch_json(&url).ok()
+    crate::net::fetch_json_cached(&url, None).ok()
 }
 
 fn str_of(v: &serde_json::Value, key: &str) -> Option<String> {
@@ -98,7 +98,7 @@ pub fn check(
             url.push_str(&query.join("&"));
         }
 
-        let Ok(list) = crate::net::fetch_json(&url) else {
+        let Ok(list) = crate::net::fetch_json_cached(&url, None) else {
             unknown += 1;
             continue;
         };
@@ -180,7 +180,7 @@ pub fn apply_update(
     }
 
     // 取目标版本的下载信息
-    let v = crate::net::fetch_json(&format!("{API}/version/{version_id}"))?;
+    let v = crate::net::fetch_json_cached(&format!("{API}/version/{version_id}"), None)?;
     if str_of(&v, "project_id").as_deref() != Some(project_id) {
         return Err("INVALID_VALUE|版本与项目不匹配".into());
     }

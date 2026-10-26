@@ -539,3 +539,65 @@ export type Task = {
 「界面显示已取消、后台还在往磁盘写」的情况。前端不需要额外处理，
 `cancelling` → `cancelled` 的时序和以前一样，只是真的会停了。
 
+
+---
+
+## 10. 资源搜索（V2.5 新增）
+
+以前只能按项目 id 查详情，没有"找资源"的入口。现在有 `search_resources`。
+
+```ts
+export type SearchHit = {
+  projectId: string;
+  slug: string;
+  title: string;
+  description: string;
+  author: string;
+  projectType: "mod" | "modpack" | "resourcepack" | "shaderpack" | "datapack" | "plugin";
+  categories: string[];
+  displayCategories: string[];
+  downloads: number;
+  follows: number;
+  iconUrl: string | null;
+  license: string | null;
+  versions: string[];
+  gameVersions: string[];
+  loaders: string[];
+  latestVersion: string | null;
+  dateModified: string | null;
+};
+
+export type SearchResult = {
+  hits: SearchHit[];
+  totalHits: number;
+  offset: number;
+  limit: number;
+  index: string;
+  query: string;
+  source: "network" | "cache";   // 这次数据是网络来的还是本地缓存
+  stale: boolean;                // 缓存是否已过期（source === "cache" 时才可能 true）
+  ageMs: number;                 // 缓存年龄
+  networkError: string | null;   // 网络失败但用了缓存时的错误原文
+};
+
+const r = await invoke<SearchResult>("search_resources", {
+  query: "sodium",
+  kind: "mod",            // 省略默认 "mod"
+  gameVersion: "1.20.1",
+  loader: "fabric",
+  limit: 20,              // 1..100
+  offset: 0,              // 最大 10000
+  sort: "relevance",      // relevance | downloads | follows | newest | updated
+});
+```
+
+要点：
+
+- `kind` / `sort` 是白名单，传别的值会返回 `INVALID_VALUE`，不会静默改成默认值。
+- `gameVersion` / `loader` 会作为 facet 传给 Modrinth，组间是 AND。
+- 断网时如果本地有旧结果，会返回 `source: "cache"` + `stale: true` + `networkError`，
+  界面上应该提示"这是上次的结果，可能不是最新的"，不要当成实时数据。
+- 结果本身不下载任何文件；选中后照旧走
+  `get_resource_project` → `list_resource_files` → `prepare_resource_install`。
+
+界面上建议：搜索框防抖 300ms，翻页用 `offset += limit`，`totalHits` 只用来显示总数。

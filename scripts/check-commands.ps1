@@ -1,4 +1,4 @@
-# 校验：每个 #[tauri::command] 都必须在 generate_handler! 里注册。
+﻿# 校验：每个 #[tauri::command] 都必须在 generate_handler! 里注册。
 #
 # 起因：V2 开发中有 16 个命令写完却忘了注册，编译通过、自检通过，
 # 但前端 invoke 会直接报 "command not found"。这个脚本把这类错误挡在 CI 里。

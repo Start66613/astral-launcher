@@ -352,7 +352,7 @@ pub fn prepare(game: &Path, req: ModpackRequest) -> Result<ModpackPlan, String> 
     let mut issues = Vec::new();
 
     // 取版本信息（文件名与下载地址）
-    let ver = crate::net::fetch_json(&format!("{API}/version/{}", req.version_id))?;
+    let ver = crate::net::fetch_json_cached(&format!("{API}/version/{}", req.version_id), None)?;
     let file = ver
         .get("files")
         .and_then(|f| f.as_array())

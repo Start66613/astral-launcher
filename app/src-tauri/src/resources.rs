@@ -134,7 +134,7 @@ fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
 }
 
 pub fn project(project_id: &str) -> Result<ResourceProject, String> {
-    let v = crate::net::fetch_json(&format!("{API}/project/{project_id}"))?;
+    let v = crate::net::fetch_json_cached(&format!("{API}/project/{project_id}"), None)?;
     Ok(ResourceProject {
         id: str_of(&v, "id").unwrap_or_else(|| project_id.to_string()),
         title: str_of(&v, "title").unwrap_or_default(),
@@ -196,7 +196,7 @@ pub fn files(
     game_version: Option<&str>,
     loader: Option<&str>,
 ) -> Result<Vec<ResourceFile>, String> {
-    let arr = crate::net::fetch_json(&format!("{API}/project/{project_id}/version"))?;
+    let arr = crate::net::fetch_json_cached(&format!("{API}/project/{project_id}/version"), None)?;
     let list = arr
         .as_array()
         .ok_or_else(|| "INTERNAL|文件列表格式异常".to_string())?;
@@ -214,7 +214,7 @@ pub fn files(
 
 /// 版本详情 + 它所属的项目 id（用于校验请求里的 projectId）
 pub fn version_detail(version_id: &str) -> Result<(ResourceFile, Option<String>), String> {
-    let v = crate::net::fetch_json(&format!("{API}/version/{version_id}"))?;
+    let v = crate::net::fetch_json_cached(&format!("{API}/version/{version_id}"), None)?;
     let file = parse_file(&v).ok_or_else(|| "VERSION_NOT_FOUND|拿不到该文件信息".to_string())?;
     let project_id = v
         .get("project_id")

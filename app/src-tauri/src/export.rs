@@ -38,7 +38,7 @@ fn sha1_of(p: &Path) -> Option<String> {
 }
 
 fn version_file(sha1: &str) -> Option<serde_json::Value> {
-    crate::net::fetch_json(&format!("{API}/version_file/{sha1}?algorithm=sha1")).ok()
+    crate::net::fetch_json_cached(&format!("{API}/version_file/{sha1}?algorithm=sha1"), None).ok()
 }
 
 fn str_of(v: &serde_json::Value, key: &str) -> Option<String> {

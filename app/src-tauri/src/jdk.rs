@@ -44,7 +44,7 @@ fn install_inner(
 
     let url =
         format!("{API}/{major}/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse");
-    let meta = crate::net::fetch_json(&url)?;
+    let meta = crate::net::fetch_json_cached(&url, None)?;
     let first = meta
         .as_array()
         .and_then(|a| a.first())

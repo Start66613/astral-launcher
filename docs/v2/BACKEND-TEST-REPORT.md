@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 186 项全过，单元测试 91 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 189 项全过，单元测试 97 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（186 项）
+## 2. 自检覆盖（189 项）
 
 按前缀分组：
 
@@ -55,6 +55,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `update` | 6 | 历史、回滚恢复旧文件、回滚清历史、不碰其他 mod、挡 beta 升级 |
 | `trash` | 5 | 列表、冲突改名恢复、恢复后清空、只删指定项、拒绝穿越 |
 | `meta` | 5 | 新鲜缓存不发请求、断网回落、统计、修剪保留新鲜、清空需确认 |
+| `search` | 3 | 真实 HTTP 服务器验证 facets 与解析、二次命中缓存、非法过滤被拒 |
 | `retry` | 4 | 拒绝运行中、拒绝缺 spec、拒绝未知类型、接受已知类型 |
 | `loader` | 4 | 解析、空安全、兼容性、NeoForge 提示 |
 | `mod` | 4 | 列表、启用标记、禁用、启用、删除、路径守卫 |
@@ -65,7 +66,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（97 个）
+## 3. 单元测试（103 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -77,6 +78,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `world_backup` | 3 | sanitize 安全字符、Zip Slip、备份 id 前缀 |
 | `modpack` | 4 | index 解析、路径守卫、坏包拒绝、穿越 |
 | `migrate` | 3 | 类别白名单、settings only、计划 id |
+| `search` | 6 | 百分号编码、facets 分组、limit/offset 夹取、非法类型与排序、响应解析、坏响应 |
 | `java_audit` | 3 | 主版本表、Java 8 上限、短版本解析 |
 | `cache` | 2 | 哈希优先 SHA512、拒绝非 hex |
 | `update_plan` | 2 | 批次 id、历史往返 |
