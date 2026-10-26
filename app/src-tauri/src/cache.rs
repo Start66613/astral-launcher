@@ -47,6 +47,7 @@ fn object_path(key: &str) -> Option<PathBuf> {
 }
 
 /// 缓存里有没有这个文件；有就把访问时间刷新一下（LRU 依据）。
+#[allow(dead_code)]
 pub fn contains(sha1: Option<&str>, sha512: Option<&str>) -> bool {
     let Some(key) = key_for(sha1, sha512) else {
         return false;

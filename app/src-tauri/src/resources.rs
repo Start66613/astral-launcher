@@ -226,6 +226,7 @@ pub fn version_detail(version_id: &str) -> Result<(ResourceFile, Option<String>)
 }
 
 /// 无加载器实例只能选"通用"文件（不声明加载器，或声明 vanilla/minecraft）
+#[allow(dead_code)]
 pub fn vanilla_compatible(file: &ResourceFile) -> bool {
     file.loaders.is_empty()
         || file
@@ -392,83 +393,52 @@ pub fn prepare(
         None
     };
 
-    // 解析必需依赖：目标目录里已有同名文件就跳过（视为已安装）
+    // 解析依赖：递归（B1）。目标目录里已有同名文件视为已安装，跳过下载。
     let mut deps: Vec<PlannedDep> = Vec::new();
     let mut dep_urls: Vec<(String, String)> = Vec::new();
+    let mut dep_notes: Vec<String> = Vec::new();
     if needs_mc {
-        let loader_kind = inst.loader.as_ref().map(|l| l.kind.clone());
-        let mut checked = 0;
-        for d in &file.dependencies {
-            if d.kind != "required" {
-                continue;
+        let (installed, installed_unknown) = crate::deps::scan_installed(&dir);
+        let req = crate::deps::Request {
+            project_id: request.project_id.clone(),
+            version_id: request.version_id.clone(),
+            game_version: inst.game_version.clone(),
+            loader: inst.loader.as_ref().map(|l| l.kind.clone()),
+            installed,
+            installed_unknown,
+            optional: std::collections::HashSet::new(),
+        };
+        let resolved = crate::deps::resolve(
+            &crate::deps::ModrinthSource,
+            &req,
+            &crate::deps::Limits::default(),
+        );
+
+        // 冲突如实上报，不偷偷挑一个装上
+        for c in &resolved.conflicts {
+            issues.push(issue(&c.code, c.message.clone(), c.blocking));
+        }
+        if resolved.truncated {
+            dep_notes
+                .push("依赖树超过解析上限，可能还有没列出的依赖，建议改用整合包".to_string());
+        }
+        for s in &resolved.skipped {
+            if s.reason == "installed-unknown" || s.reason == "unresolved" {
+                dep_notes.push(s.detail.clone());
             }
-            if checked >= 10 {
-                break;
+        }
+
+        // 根节点在最后，前面的是依赖（已经是拓扑序：依赖在前）
+        let total_nodes = resolved.nodes.len();
+        for (idx, n) in resolved.nodes.iter().enumerate() {
+            if idx + 1 == total_nodes && n.project_id == request.project_id {
+                continue; // 根节点本体单独处理
             }
-            checked += 1;
-            let Some(pid) = &d.project_id else { continue };
-            let candidate = match &d.version_id {
-                // 指定了版本：必须确实属于这个项目，且与实例兼容
-                Some(vid) => match version_detail(vid) {
-                    Ok((df, vp)) => {
-                        if vp.as_deref().map(|p| p != pid).unwrap_or(false) {
-                            issues.push(issue(
-                                "DEPENDENCY_CONFLICT",
-                                format!("依赖版本 {vid} 不属于项目 {pid}"),
-                                true,
-                            ));
-                            continue;
-                        }
-                        let compat_ok = !needs_mc
-                            || (df.game_versions.iter().any(|g| g == &inst.game_version)
-                                && loader_kind
-                                    .as_ref()
-                                    .map(|k| df.loaders.iter().any(|l| l == k))
-                                    .unwrap_or(true));
-                        if !compat_ok {
-                            issues.push(issue(
-                                "DEPENDENCY_CONFLICT",
-                                format!(
-                                    "依赖 {pid} 的指定版本与 {} 不兼容",
-                                    inst.game_version
-                                ),
-                                true,
-                            ));
-                            continue;
-                        }
-                        Some(df)
-                    }
-                    Err(_) => None,
-                },
-                // 没指定：取兼容版本里最稳的（release > beta > alpha）
-                None => files(pid, Some(&inst.game_version), loader_kind.as_deref())
-                    .ok()
-                    .and_then(|mut v| {
-                        // 原版实例不能拿需要加载器的依赖
-                        if loader_kind.is_none() {
-                            v.retain(vanilla_compatible);
-                        }
-                        v.sort_by_key(|f| match f.channel.as_str() {
-                            "release" => 0,
-                            "beta" => 1,
-                            _ => 2,
-                        });
-                        v.into_iter().next()
-                    }),
-            };
-            let Some(df) = candidate else {
-                issues.push(issue(
-                    "DEPENDENCY_CONFLICT",
-                    format!("依赖 {pid} 找不到兼容版本，需要手动处理"),
-                    true,
-                ));
-                continue;
-            };
-            // 文件名必须是单层相对名，否则拒绝（防止写到目录外）
-            if !dep_file_name_ok(&df.file_name) {
+            // 文件名必须是单层相对名
+            if !dep_file_name_ok(&n.file_name) {
                 issues.push(issue(
                     "INVALID_PATH",
-                    format!("依赖 {pid} 的文件名不安全：{}", df.file_name),
+                    format!("依赖 {} 的文件名不安全：{}", n.project_id, n.file_name),
                     true,
                 ));
                 continue;
@@ -476,60 +446,29 @@ pub fn prepare(
             // 同名但来自不同项目 → 会互相覆盖，交给人决定
             if deps
                 .iter()
-                .any(|x| x.file_name == df.file_name && x.project_id != *pid)
+                .any(|x| x.file_name == n.file_name && x.project_id != n.project_id)
             {
                 issues.push(issue(
                     "DEPENDENCY_CONFLICT",
-                    format!("依赖文件名 {} 与另一个依赖重名，需要手动选择", df.file_name),
+                    format!("依赖文件名 {} 与另一个依赖重名，需要手动选择", n.file_name),
                     true,
                 ));
                 continue;
             }
-            // 依赖自己还有必需依赖：不递归解析，明确要求人工处理
-            let nested: Vec<String> = df
-                .dependencies
-                .iter()
-                .filter(|x| x.kind == "required")
-                .filter_map(|x| x.project_id.clone())
-                .collect();
-            if !nested.is_empty() {
-                issues.push(issue(
-                    "DEPENDENCY_CONFLICT",
-                    format!(
-                        "依赖 {pid} 自身还需要 {}，请先手动安装或改用整合包",
-                        nested.join(" / ")
-                    ),
-                    true,
-                ));
-            }
-            if dir.join(&df.file_name).exists() {
+            if dir.join(&n.file_name).exists() {
                 continue;
             }
-            if deps.iter().any(|x| x.file_name == df.file_name) {
+            if deps.iter().any(|x| x.file_name == n.file_name) {
                 continue;
             }
-            // 同一个项目被解析成两个不同版本 → 装上去会互相覆盖，直接判冲突
-            if let Some(prev) = deps.iter().find(|x| x.project_id == *pid) {
-                if prev.version_id != df.version_id {
-                    issues.push(issue(
-                        "DEPENDENCY_CONFLICT",
-                        format!(
-                            "依赖 {pid} 同时被要求 {} 与 {}，需要手动选一个",
-                            prev.version_id, df.version_id
-                        ),
-                        true,
-                    ));
-                    continue;
-                }
-            }
-            dep_urls.push((df.url.clone(), df.file_name.clone()));
+            dep_urls.push((n.url.clone(), n.file_name.clone()));
             deps.push(PlannedDep {
-                project_id: pid.clone(),
-                version_id: df.version_id.clone(),
-                file_name: df.file_name.clone(),
-                size: df.size,
-                sha1: df.sha1.clone(),
-                sha512: df.sha512.clone(),
+                project_id: n.project_id.clone(),
+                version_id: n.version_id.clone(),
+                file_name: n.file_name.clone(),
+                size: n.size,
+                sha1: n.sha1.clone(),
+                sha512: n.sha512.clone(),
             });
         }
     }

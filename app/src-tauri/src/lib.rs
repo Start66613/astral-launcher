@@ -1,6 +1,7 @@
 mod cache;
 mod components;
 mod core;
+mod deps;
 mod error;
 mod export;
 mod account;
@@ -1619,6 +1620,38 @@ fn net_scheduler_stats() -> serde_json::Value {
     net::scheduler_stats()
 }
 
+/// 只读：解析一个 Mod 的完整依赖树，不下载任何东西。
+///
+/// 前端拿它做"安装前预览"：能看到每个依赖为什么被装、会替换哪个版本、
+/// 有哪些冲突。真正安装仍然走 `prepare_resource_install`。
+#[tauri::command]
+fn resolve_mod_dependencies(
+    instance_id: String,
+    project_id: String,
+    version_id: String,
+) -> Result<deps::Resolved, String> {
+    let inst = managed_instance(&instance_id)?;
+    if !inst.managed {
+        return Err("UNSUPPORTED|兼容实例共享游戏目录，不能解析依赖".into());
+    }
+    let (installed, installed_unknown) =
+        deps::scan_installed(std::path::Path::new(&inst.dirs.mods));
+    let req = deps::Request {
+        project_id,
+        version_id,
+        game_version: inst.game_version.clone(),
+        loader: inst.loader.as_ref().map(|l| l.kind.clone()),
+        installed,
+        installed_unknown,
+        optional: std::collections::HashSet::new(),
+    };
+    Ok(deps::resolve(
+        &deps::ModrinthSource,
+        &req,
+        &deps::Limits::default(),
+    ))
+}
+
 #[tauri::command]
 fn list_mods(instance_id: String) -> Result<Vec<mods::ModFile>, String> {
     let inst = managed_instance(&instance_id)?;
@@ -1820,6 +1853,7 @@ pub fn run() {
             get_stats,
             net_scheduler_stats,
             cache_stats,
+            resolve_mod_dependencies,
             cache_enforce_budget,
             cache_clear,
             clean_partials,
@@ -2067,6 +2101,169 @@ pub fn selftest() -> i32 {
             .unwrap_or(false)
     );
     task::cancelled(&tc2.task_id);
+    // ── B1 依赖图：用假 source 验证遍历、环、缺失、上限、已装复用、可选 ──
+    {
+        struct FakeDeps {
+            by_id: std::collections::HashMap<String, (deps::Candidate, Option<String>)>,
+            by_project: std::collections::HashMap<String, Vec<deps::Candidate>>,
+        }
+        impl deps::DepSource for FakeDeps {
+            fn versions_for(
+                &self,
+                pid: &str,
+                _g: &str,
+                _l: Option<&str>,
+            ) -> Result<Vec<deps::Candidate>, String> {
+                Ok(self.by_project.get(pid).cloned().unwrap_or_default())
+            }
+            fn version_by_id(
+                &self,
+                vid: &str,
+            ) -> Result<(deps::Candidate, Option<String>), String> {
+                self.by_id
+                    .get(vid)
+                    .cloned()
+                    .ok_or_else(|| "not found".to_string())
+            }
+        }
+        fn mk(pid: &str, vid: &str, deps: Vec<deps::Dep>) -> deps::Candidate {
+            deps::Candidate {
+                project_id: pid.into(),
+                version_id: vid.into(),
+                name: pid.into(),
+                version_number: vid.into(),
+                channel: "release".into(),
+                file_name: format!("{pid}.jar"),
+                url: format!("https://cdn.modrinth.com/data/{pid}/x.jar"),
+                size: 100,
+                sha1: None,
+                sha512: None,
+                game_versions: vec!["1.20.1".into()],
+                loaders: vec!["fabric".into()],
+                dependencies: deps,
+            }
+        }
+        fn rq(pid: &str, vid: &str) -> deps::Request {
+            deps::Request {
+                project_id: pid.into(),
+                version_id: vid.into(),
+                game_version: "1.20.1".into(),
+                loader: Some("fabric".into()),
+                installed: std::collections::HashMap::new(),
+                installed_unknown: std::collections::HashSet::new(),
+                optional: std::collections::HashSet::new(),
+            }
+        }
+        fn req_dep(pid: &str) -> deps::Dep {
+            deps::Dep {
+                project_id: Some(pid.into()),
+                version_id: None,
+                kind: deps::DepKind::Required,
+            }
+        }
+        fn mk_fake(list: Vec<deps::Candidate>) -> FakeDeps {
+            let mut f = FakeDeps {
+                by_id: Default::default(),
+                by_project: Default::default(),
+            };
+            for c in list {
+                f.by_project
+                    .entry(c.project_id.clone())
+                    .or_default()
+                    .push(c.clone());
+                f.by_id.insert(
+                    c.version_id.clone(),
+                    (c.clone(), Some(c.project_id.clone())),
+                );
+            }
+            f
+        }
+
+        let f = mk_fake(vec![
+            mk("root", "r1", vec![req_dep("lib")]),
+            mk("lib", "l1", vec![req_dep("core")]),
+            mk("core", "c1", vec![]),
+        ]);
+        let r = deps::resolve(&f, &rq("root", "r1"), &deps::Limits::default());
+        check!(
+            "deps resolve nested order",
+            !r.blocking()
+                && r.nodes
+                    .iter()
+                    .map(|n| n.project_id.as_str())
+                    .collect::<Vec<_>>()
+                    == vec!["core", "lib", "root"]
+        );
+        check!(
+            "deps via chain",
+            r.nodes
+                .iter()
+                .find(|n| n.project_id == "core")
+                .map(|n| n.via == vec!["root".to_string(), "lib".to_string()] && n.depth == 2)
+                .unwrap_or(false)
+        );
+
+        let f2 = mk_fake(vec![
+            mk("a", "a1", vec![req_dep("b")]),
+            mk("b", "b1", vec![req_dep("a")]),
+        ]);
+        let r2 = deps::resolve(&f2, &rq("a", "a1"), &deps::Limits::default());
+        check!("deps detects cycle", r2.blocking() && !r2.cycles.is_empty());
+
+        let f3 = mk_fake(vec![mk("root", "r1", vec![req_dep("ghost")])]);
+        let r3 = deps::resolve(&f3, &rq("root", "r1"), &deps::Limits::default());
+        check!(
+            "deps reports missing",
+            r3.blocking() && r3.conflicts.iter().any(|c| c.project_id == "ghost")
+        );
+
+        let mut chain = Vec::new();
+        for i in 0..12 {
+            let next = if i == 11 {
+                vec![]
+            } else {
+                vec![req_dep(&format!("p{}", i + 1))]
+            };
+            chain.push(mk(&format!("p{i}"), &format!("v{i}"), next));
+        }
+        let f4 = mk_fake(chain);
+        let lim = deps::Limits {
+            max_depth: 4,
+            ..Default::default()
+        };
+        let r4 = deps::resolve(&f4, &rq("p0", "v0"), &lim);
+        check!("deps depth limit", r4.truncated && r4.nodes.len() <= 6);
+
+        let f5 = mk_fake(vec![
+            mk("root", "r1", vec![req_dep("lib"), req_dep("mystery")]),
+            mk("lib", "l1", vec![]),
+        ]);
+        let mut rq5 = rq("root", "r1");
+        rq5.installed.insert("lib".into(), "l1".into());
+        rq5.installed_unknown.insert("mystery".into());
+        let r5 = deps::resolve(&f5, &rq5, &deps::Limits::default());
+        check!(
+            "deps skips installed",
+            !r5.blocking()
+                && r5.nodes.len() == 1
+                && r5.skipped.iter().any(|s| s.reason == "installed")
+                && r5.skipped.iter().any(|s| s.reason == "installed-unknown")
+        );
+
+        let mut root6 = mk("root", "r1", vec![]);
+        root6.dependencies.push(deps::Dep {
+            project_id: Some("opt".into()),
+            version_id: None,
+            kind: deps::DepKind::Optional,
+        });
+        let f6 = mk_fake(vec![root6, mk("opt", "o1", vec![])]);
+        let r6 = deps::resolve(&f6, &rq("root", "r1"), &deps::Limits::default());
+        check!(
+            "deps optional skipped",
+            r6.nodes.len() == 1 && r6.skipped.iter().any(|s| s.reason == "optional")
+        );
+    }
+
     check!(
         "task health shape",
         task::health()["tasks"].is_number()
@@ -3696,6 +3893,7 @@ pub fn selftest() -> i32 {
             check!(
                 "cache clear empties only cache",
                 before_clear >= 1
+                    && cleared >= 1
                     && after_clear.entries == 0
                     && c1.exists()
                     && c2.exists()

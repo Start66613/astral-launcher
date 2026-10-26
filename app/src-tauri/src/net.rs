@@ -878,10 +878,6 @@ pub fn download(
     })
 }
 
-/// 下完一批之后调用：缓存超预算就按最久未使用淘汰。
-pub fn enforce_cache_budget() -> u64 {
-    crate::cache::enforce_budget(crate::cache::DEFAULT_BUDGET_BYTES)
-}
 
 /// 原子下载：先写 `<dest>.part`，校验后替换。
 pub fn download_atomic(

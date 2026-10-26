@@ -14,6 +14,7 @@ use std::sync::Arc;
 pub struct TestServer {
     pub port: u16,
     /// 已经收到多少次 `/flaky` 请求
+    #[allow(dead_code)]
     pub flaky_hits: Arc<AtomicU32>,
     /// 每个 `/data` 响应实际写出的字节数（用于判断取消是否真的截断）
     pub served: Arc<AtomicU64>,
