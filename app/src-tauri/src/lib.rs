@@ -14,6 +14,7 @@ mod modpack;
 mod mods;
 mod net;
 mod recycle;
+mod world_backup;
 mod testsrv;
 mod plan;
 mod resources;
@@ -569,6 +570,91 @@ fn list_target_worlds(instance_id: String) -> Result<Vec<worlds::WorldTarget>, S
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
     Ok(worlds::list(std::path::Path::new(&inst.dirs.saves)))
+}
+
+// ── 存档备份与恢复 ──────────────────────────────────────────────
+
+/// 列出某个实例的存档备份（只读）
+#[tauri::command]
+fn list_world_backups(instance_id: String) -> Result<Vec<world_backup::WorldBackup>, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    Ok(world_backup::list(&instance::instance_dir(&game, &inst.id)))
+}
+
+/// 备份一个存档：游戏运行中直接拒绝，不做事后无法自证一致的热备份
+#[tauri::command]
+fn backup_world(
+    instance_id: String,
+    world_id: String,
+    note: Option<String>,
+) -> Result<world_backup::WorldBackup, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let running = session::active(Some(&inst.id)).is_some();
+    world_backup::create(
+        &instance::instance_dir(&game, &inst.id),
+        std::path::Path::new(&inst.dirs.saves),
+        &world_id,
+        note.as_deref().unwrap_or(""),
+        running,
+        &*net::never_cancel(),
+        |_, _| {},
+    )
+}
+
+/// 恢复前预览（只读，不修改任何文件）
+#[tauri::command]
+fn preview_world_restore(
+    instance_id: String,
+    backup_id: String,
+) -> Result<world_backup::RestorePreview, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    world_backup::preview_restore(
+        &instance::instance_dir(&game, &inst.id),
+        std::path::Path::new(&inst.dirs.saves),
+        &backup_id,
+    )
+}
+
+/// 恢复存档：目标存在时必须显式 overwrite，覆盖前会先留一份副本
+#[tauri::command]
+fn restore_world(
+    instance_id: String,
+    backup_id: String,
+    overwrite: Option<bool>,
+) -> Result<world_backup::RestoreResult, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    if session::active(Some(&inst.id)).is_some() {
+        return error::fail(error::INSTANCE_BUSY, "游戏正在运行，先退出游戏再恢复存档");
+    }
+    world_backup::restore(
+        &instance::instance_dir(&game, &inst.id),
+        std::path::Path::new(&inst.dirs.saves),
+        &backup_id,
+        overwrite.unwrap_or(false),
+        &*net::never_cancel(),
+        |_, _| {},
+    )
+}
+
+/// 删除一个存档备份（危险操作，必须确认）
+#[tauri::command]
+fn delete_world_backup(
+    instance_id: String,
+    backup_id: String,
+    confirm: bool,
+) -> Result<u64, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    world_backup::delete(&instance::instance_dir(&game, &inst.id), &backup_id, confirm)
 }
 
 #[tauri::command]
@@ -2222,6 +2308,11 @@ pub fn run() {
             list_loader_builds,
             repair_instance,
             list_target_worlds,
+            list_world_backups,
+            backup_world,
+            preview_world_restore,
+            restore_world,
+            delete_world_backup,
             get_resource_project,
             list_resource_files,
             prepare_resource_install,
@@ -4938,6 +5029,104 @@ pub fn selftest() -> i32 {
                 let names: Vec<String> = recycle::list(&g).iter().map(|e| e.trash_name.clone()).collect();
                 let _ = names;
                 check!("trash rejects traversal", bad.is_err());
+            }
+
+            // 29) 存档备份 → 预览 → 恢复（不覆盖 / 覆盖留底）
+            {
+                let g = dl.join("world-game");
+                let saves = g.join("saves");
+                let world = saves.join("MyWorld");
+                let _ = std::fs::create_dir_all(world.join("region"));
+                let _ = std::fs::write(world.join("level.dat"), b"LEVELDATA");
+                let _ = std::fs::write(world.join("region").join("r.0.0.mca"), b"REGION");
+                let inst_dir = g.join("instances").join("inst_world");
+                let _ = std::fs::create_dir_all(&inst_dir);
+                let wid = worlds::world_id("MyWorld");
+
+                let made = world_backup::create(
+                    &inst_dir,
+                    &saves,
+                    &wid,
+                    "手动备份",
+                    false,
+                    &*net::never_cancel(),
+                    |_, _| {},
+                );
+                let bid = made.as_ref().map(|b| b.backup_id.clone()).unwrap_or_default();
+                let ok_make = made
+                    .as_ref()
+                    .map(|b| b.file_count == 2 && b.bytes > 0 && !b.sha256.is_empty())
+                    .unwrap_or(false);
+                let listed = world_backup::list(&inst_dir);
+                check!(
+                    "world backup creates zip",
+                    ok_make && listed.len() == 1 && listed[0].note == "手动备份"
+                );
+
+                // 游戏运行中不允许备份
+                let running = world_backup::create(
+                    &inst_dir,
+                    &saves,
+                    &wid,
+                    "",
+                    true,
+                    &*net::never_cancel(),
+                    |_, _| {},
+                );
+                check!("world backup rejects while running", running.is_err());
+
+                // 改掉存档内容，再从备份恢复（目标已存在 → 需要 overwrite）
+                let _ = std::fs::write(world.join("level.dat"), b"CHANGED");
+                let preview = world_backup::preview_restore(&inst_dir, &saves, &bid);
+                let blocked_without = world_backup::restore(
+                    &inst_dir,
+                    &saves,
+                    &bid,
+                    false,
+                    &*net::never_cancel(),
+                    |_, _| {},
+                );
+                let restored = world_backup::restore(
+                    &inst_dir,
+                    &saves,
+                    &bid,
+                    true,
+                    &*net::never_cancel(),
+                    |_, _| {},
+                );
+                let level = std::fs::read_to_string(world.join("level.dat")).unwrap_or_default();
+                let region = std::fs::read_to_string(world.join("region").join("r.0.0.mca"))
+                    .unwrap_or_default();
+                let kept = restored
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| r.replaced_backup.clone())
+                    .map(|p| std::path::Path::new(&p).join("level.dat").is_file())
+                    .unwrap_or(false);
+                check!(
+                    "world restore needs overwrite then restores",
+                    preview.map(|p| p.target_exists && p.blockers.is_empty()).unwrap_or(false)
+                        && blocked_without.is_err()
+                        && restored.map(|r| r.restored_files == 2).unwrap_or(false)
+                        && level == "LEVELDATA"
+                        && region == "REGION"
+                        && kept
+                );
+
+                // 备份文件被篡改后必须拒绝恢复
+                let zip_path = inst_dir
+                    .join(world_backup::BACKUP_DIR)
+                    .join(format!("{bid}.zip"));
+                let mut bytes = std::fs::read(&zip_path).unwrap_or_default();
+                if let Some(b) = bytes.last_mut() {
+                    *b ^= 0xff;
+                }
+                let _ = std::fs::write(&zip_path, &bytes);
+                let tampered = world_backup::preview_restore(&inst_dir, &saves, &bid);
+                check!(
+                    "world restore rejects corrupted backup",
+                    tampered.map(|p| !p.blockers.is_empty()).unwrap_or(false)
+                );
             }
         }
         Err(e) => {

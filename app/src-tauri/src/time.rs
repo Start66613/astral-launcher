@@ -51,6 +51,14 @@ pub fn now_iso() -> String {
     unix_ms_to_iso(now_unix_ms())
 }
 
+/// 纳秒时间戳，用于临时目录名（同一毫秒内也不重名）
+pub fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 /// 压缩时间戳，用于回收站目录名
 pub fn now_stamp() -> String {
     let iso = now_iso();
