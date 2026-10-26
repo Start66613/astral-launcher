@@ -139,10 +139,7 @@ fn extract_zip(zip_path: &Path, dest: &Path, on: &mut dyn FnMut(u32, u32)) -> Re
         if name.ends_with('/') {
             continue;
         }
-        let rel = match crate::modpack::safe_rel_path(&name) {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        };
+        let rel = crate::modpack::safe_rel_path(&name)?;
         let target = dest.join(&rel);
         if !target.starts_with(dest) {
             return Err(format!("INVALID_PATH|解压路径越界：{name}"));

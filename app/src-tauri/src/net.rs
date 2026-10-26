@@ -936,7 +936,6 @@ pub fn download_with_cancel(
     download(url, dest, &opts, cancel, on_progress)
 }
 
-/// 拉取 JSON（临时文件，不缓存），用于 Modrinth API
 // ── 元数据缓存（D1）────────────────────────────────────────────
 //
 // 目标：断网时还能浏览上次拉到的版本清单 / 加载器目录 / 项目信息，

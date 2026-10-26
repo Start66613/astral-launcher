@@ -193,7 +193,7 @@ fn forge_recommended(mc: &str) -> Option<String> {
     let text = fetch(FORGE_PROMOS).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     v.get("promos")?
-        .get(&format!("{mc}-recommended"))?
+        .get(format!("{mc}-recommended"))?
         .as_str()
         .map(|s| s.to_string())
 }

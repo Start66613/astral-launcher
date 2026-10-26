@@ -129,7 +129,7 @@ pub fn stats(range: &str, name_of: &dyn Fn(&str) -> String) -> Stats {
             playtime_ms: ms,
         })
         .collect();
-    by_instance.sort_by(|a, b| b.playtime_ms.cmp(&a.playtime_ms));
+    by_instance.sort_by_key(|b| std::cmp::Reverse(b.playtime_ms));
 
     Stats {
         range: range.to_string(),

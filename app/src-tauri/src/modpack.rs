@@ -198,7 +198,7 @@ pub fn parse_index(json: &str) -> Result<ModpackIndex, String> {
         (String::new(), None)
     };
 
-    if loader_kind.is_empty() == false && loader_version.is_none() {
+    if !loader_kind.is_empty() && loader_version.is_none() {
         return Err(format!(
             "INVALID_VALUE|整合包声明了 {loader_kind} 加载器但没有版本号"
         ));
@@ -653,10 +653,7 @@ pub fn extract_overrides(
         if rel.is_empty() || rel.ends_with('/') {
             continue;
         }
-        let safe = match safe_rel_path(rel) {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        };
+        let safe = safe_rel_path(rel)?;
         // 真正的越界检查：父目录必须落在实例目录内，且目标不能是符号链接
         let dest = crate::net::ensure_within(instance_dir, &instance_dir.join(&safe))?;
         let mut entry = zip

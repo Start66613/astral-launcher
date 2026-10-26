@@ -278,6 +278,7 @@ pub fn spawn(
 }
 
 /// 带加载器启动：`loader = Some((kind, loader_version))`
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_with(
     version: &str,
     loader: Option<(&str, &str)>,

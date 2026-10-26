@@ -1586,7 +1586,7 @@ fn run_game_install(
                     task::progress(&t2, &pr.stage, pr.label, pr.done, pr.total);
                 })?;
             }
-            task::check_cancel(&tid)?;
+            task::check_cancel(tid)?;
 
             let meta = instance::InstanceMeta {
                 id: p.target.proposed_instance_id.clone(),
@@ -1605,7 +1605,7 @@ fn run_game_install(
             created = Some(inst.id.clone());
             // 实例已存在，立刻把任务绑上去，避免安装期间被删除/改名
             task::bind_instance(tid, &inst.id);
-            task::check_cancel(&tid)?;
+            task::check_cancel(tid)?;
 
             if let Some(l) = &p.request.loader {
                 let t2 = tid.to_string();
@@ -1632,11 +1632,11 @@ fn run_game_install(
                     )?;
                 }
             }
-            task::check_cancel(&tid)?;
+            task::check_cancel(tid)?;
 
             // 计划里挑选的光影支持组件：加载器装好之后再按实例真实 id 安装
             for comp in &p.components {
-                task::check_cancel(&tid)?;
+                task::check_cancel(tid)?;
                 let req = resources::ResourceInstallRequest {
                     instance_id: inst.id.clone(),
                     kind: "mod".into(),
@@ -1667,7 +1667,7 @@ fn run_game_install(
                     );
                 })?;
             }
-            task::check_cancel(&tid)?;
+            task::check_cancel(tid)?;
 
             let fresh = instance::find(&game, &inst.id, &play_stats)
                 .ok_or_else(|| "INTERNAL|安装后读不到实例".to_string())?;
@@ -2380,6 +2380,7 @@ pub fn legacy_requires_instance(kind: &str) -> bool {
 /// - 目标路径同时校验落在实例目录（若给了实例）与游戏目录内；
 /// - 重定向每一跳都会重新过白名单，DNS 解析到内网也会被拒绝。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn download_to(
     app: AppHandle,
     url: String,
@@ -3282,9 +3283,12 @@ pub fn selftest() -> i32 {
                 .unwrap_or(false)
         );
         // 创建时间对得上时，活着的进程不能被误判为已退出
-        let mut s2 = session::begin("inst_pidalive", "task_pid2", me);
-        let real_start = s2.pid_started_at;
-        s2.pid_started_at = real_start;
+        // begin() 自己会记录真实创建时间，这里直接用它
+        let s2 = session::begin("inst_pidalive", "task_pid2", me);
+        check!(
+            "session records pid start time",
+            s2.pid_started_at.is_some()
+        );
         session::save_for_test(vec![s2]);
         session::reconcile();
         let listed2 = session::list(Some("inst_pidalive"), 1);
@@ -3563,7 +3567,7 @@ pub fn selftest() -> i32 {
 
     // 可选的真实资源安装验证：ASTRAL_LIVE_RESOURCE="gameDir"
     if let Ok(dir) = std::env::var("ASTRAL_LIVE_RESOURCE") {
-        let mut spec = dir.split(|c| c == '|');
+        let mut spec = dir.split('|');
         let game_dir = spec.next().unwrap_or("").to_string();
         let project_id = spec.next().unwrap_or("AANobbMI").to_string();
         let game = std::path::PathBuf::from(&game_dir);
@@ -4559,7 +4563,7 @@ pub fn selftest() -> i32 {
         "neoforge mc hint",
         core::neoforge_mc_hint("21.1.72") == Some("1.21.1")
             && core::neoforge_mc_hint("20.4.237") == Some("1.20.4")
-            && core::neoforge_mc_hint("99.9.9") == None
+            && core::neoforge_mc_hint("99.9.9").is_none()
     );
     // 版本不搭时在下载之前就失败，不会发出 404 请求
     let bad_forge = std::env::temp_dir().join(format!("astral-bad-forge-{}", std::process::id()));
@@ -4731,7 +4735,7 @@ pub fn selftest() -> i32 {
                 &*net::never_cancel(),
                 |_, _| {},
             )
-            .map(|r| r.bytes == size && r.reused == false)
+            .map(|r| r.bytes == size && !r.reused)
             .unwrap_or(false);
             check!(
                 "download plain + sha1",

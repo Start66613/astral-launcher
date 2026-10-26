@@ -180,7 +180,7 @@ pub fn scan(game_dir: &Path) -> Vec<JavaRuntime> {
             out.push(rt);
         }
     }
-    out.sort_by(|a, b| b.major.cmp(&a.major));
+    out.sort_by_key(|r| std::cmp::Reverse(r.major));
     out
 }
 

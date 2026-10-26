@@ -290,7 +290,7 @@ fn target_dir(
     kind: &str,
     world_id: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let base = PathBuf::from(&instance.dir);
+    let _ = &instance.dir;
     match kind {
         "mod" => Ok(PathBuf::from(&instance.dirs.mods)),
         "resourcepack" => Ok(PathBuf::from(&instance.dirs.resourcepacks)),
@@ -304,10 +304,6 @@ fn target_dir(
         }
         other => Err(format!("UNSUPPORTED|未知资源类型 {other}")),
     }
-    .map(|p| {
-        let _ = base;
-        p
-    })
 }
 
 /// 规划安装：只做校验，不下载、不写文件

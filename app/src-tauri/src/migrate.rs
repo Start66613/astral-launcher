@@ -179,7 +179,7 @@ pub fn plan_copy(
     }
     let name = target_name.trim();
     crate::instance::validate_name(name)?;
-    let src_dir = crate::instance::instance_dir(game, &instance_id);
+    let src_dir = crate::instance::instance_dir(game, instance_id);
 
     let mut items = Vec::new();
     let mut total_files = 0u64;
