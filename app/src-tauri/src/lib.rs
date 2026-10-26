@@ -21,6 +21,7 @@ mod session;
 mod stats;
 mod task;
 mod time;
+mod update_plan;
 mod updates;
 
 use core::Config;
@@ -1620,6 +1621,126 @@ fn net_scheduler_stats() -> serde_json::Value {
     net::scheduler_stats()
 }
 
+// ── B2 批量更新与回滚 ────────────────────────────────────────────
+
+/// 只读：算出这批更新到底要做什么，能更新哪些、哪些被挡住、为什么。
+#[tauri::command]
+fn plan_mod_updates(
+    instance_id: String,
+    updates: Vec<updates::ModUpdate>,
+) -> Result<update_plan::UpdatePlan, String> {
+    let inst = managed_instance(&instance_id)?;
+    let dir = PathBuf::from(&inst.dirs.mods);
+    Ok(update_plan::plan(
+        &dir,
+        &instance_id,
+        &inst.game_version,
+        inst.loader.as_ref().map(|l| l.kind.as_str()),
+        &updates,
+    ))
+}
+
+/// 执行批量更新。失败会自动整批回滚。
+#[tauri::command]
+fn apply_mod_updates(
+    app: AppHandle,
+    instance_id: String,
+    plan: update_plan::UpdatePlan,
+) -> Result<update_plan::UpdateResult, String> {
+    let cfg = core::load_config();
+    let game = PathBuf::from(&cfg.game_dir);
+    if task::has_running_kind("mod-update-batch", Some(&instance_id), None) {
+        return Err("BUSY|该实例已有批量更新在进行".into());
+    }
+    let t = task::create(
+        "mod-update-batch",
+        Some(instance_id.clone()),
+        None,
+        format!("批量更新 {} 个模组", plan.items.len()),
+    );
+    let tid = t.task_id.clone();
+    let cancel = net::cancel_from({
+        let tc = tid.clone();
+        move || task::is_cancelled(&tc)
+    });
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let inst = instance_id.clone();
+        let r = update_plan::execute(&game, &inst, &plan, &*cancel, |i, total, name| {
+            task::progress(
+                &tid,
+                "download",
+                format!("更新 {name}（{}/{total}）", i + 1),
+                i,
+                total,
+            );
+        });
+        match r {
+            Ok(res) if res.failed.is_empty() => {
+                task::finish(
+                    &tid,
+                    serde_json::json!({
+                        "kind": "mod-update-batch",
+                        "batchId": res.batch_id,
+                        "updated": res.updated,
+                    }),
+                );
+            }
+            Ok(res) => {
+                // 有失败：已经回滚过了，如实报告
+                let msg = res
+                    .failed
+                    .iter()
+                    .map(|(n, e)| format!("{n}: {}", task::decode(e).message))
+                    .collect::<Vec<_>>()
+                    .join("；");
+                let _ = app.emit(
+                    "astral://mod-update",
+                    serde_json::json!({ "instanceId": instance_id, "result": res }),
+                );
+                task::fail(
+                    &tid,
+                    format!("NETWORK|批量更新失败，已回滚|{msg}"),
+                );
+            }
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(update_plan::UpdateResult {
+        batch_id: t.task_id.clone(),
+        updated: vec![],
+        failed: vec![],
+        rolled_back: false,
+    })
+}
+
+/// 列出可回滚的更新批次
+#[tauri::command]
+fn mod_update_history(instance_id: String) -> Result<Vec<update_plan::BackupRecord>, String> {
+    let inst = managed_instance(&instance_id)?;
+    Ok(update_plan::history(std::path::Path::new(&inst.dirs.mods)))
+}
+
+/// 回滚指定批次
+#[tauri::command]
+fn rollback_mod_updates(instance_id: String, batch_id: String) -> Result<u32, String> {
+    let inst = managed_instance(&instance_id)?;
+    if task::has_running(&instance_id) {
+        return Err("INSTANCE_BUSY|实例正在执行任务，不能回滚".into());
+    }
+    update_plan::rollback(std::path::Path::new(&inst.dirs.mods), &batch_id)
+}
+
+/// 清理过期备份（只动 .astral-backup）
+#[tauri::command]
+fn prune_mod_update_backups(instance_id: String, keep_days: Option<u64>) -> Result<(u64, u64), String> {
+    let inst = managed_instance(&instance_id)?;
+    update_plan::prune(
+        std::path::Path::new(&inst.dirs.mods),
+        keep_days.unwrap_or(7).clamp(1, 365),
+    )
+}
+
 /// 只读：解析一个 Mod 的完整依赖树，不下载任何东西。
 ///
 /// 前端拿它做"安装前预览"：能看到每个依赖为什么被装、会替换哪个版本、
@@ -1854,6 +1975,11 @@ pub fn run() {
             net_scheduler_stats,
             cache_stats,
             resolve_mod_dependencies,
+            plan_mod_updates,
+            apply_mod_updates,
+            mod_update_history,
+            rollback_mod_updates,
+            prune_mod_update_backups,
             cache_enforce_budget,
             cache_clear,
             clean_partials,
@@ -2263,6 +2389,101 @@ pub fn selftest() -> i32 {
             r6.nodes.len() == 1 && r6.skipped.iter().any(|s| s.reason == "optional")
         );
     }
+    // ── B2 批量更新：备份、回滚、历史 ──
+    {
+        let mods_dir = game.join("mods");
+        let _ = std::fs::create_dir_all(&mods_dir);
+
+        // 造两个"已装模组"
+        let a = mods_dir.join("alpha-1.0.jar");
+        let b = mods_dir.join("beta-2.0.jar");
+        std::fs::write(&a, b"alpha-old").unwrap();
+        std::fs::write(&b, b"beta-old").unwrap();
+
+        // 备份目录与历史
+        check!(
+            "update history empty at start",
+            update_plan::history(&mods_dir).is_empty()
+        );
+
+        // 备份一个文件 → 历史里能看到 → 回滚恢复原内容
+        let batch = update_plan::new_batch_id_for_test();
+        let batch_path = mods_dir.join(update_plan::BACKUP_DIR).join(&batch);
+        std::fs::create_dir_all(&batch_path).unwrap();
+        std::fs::copy(&a, batch_path.join("alpha-1.0.jar.bak")).unwrap();
+        let mut rec = update_plan::BackupRecord {
+            batch_id: batch.clone(),
+            created_at: crate::time::unix_ms_to_iso(crate::time::now_unix_ms()),
+            files: std::collections::BTreeMap::new(),
+            replaced: std::collections::BTreeMap::new(),
+            note: "自检".into(),
+        };
+        rec.files.insert("alpha-1.0.jar".into(), "alpha-1.0.jar.bak".into());
+        rec.replaced.insert("alpha-1.0.jar".into(), "alpha-2.0.jar".into());
+        update_plan::save_history_for_test(&mods_dir, std::slice::from_ref(&rec));
+        check!(
+            "update history lists batch",
+            update_plan::history(&mods_dir)
+                .iter()
+                .any(|r| r.batch_id == batch)
+        );
+
+        // 模拟"更新已完成"：旧文件换成新文件
+        std::fs::write(&a, b"alpha-new").unwrap();
+        std::fs::write(mods_dir.join("alpha-2.0.jar"), b"alpha-new").unwrap();
+        std::fs::remove_file(&a).unwrap();
+        let restored = update_plan::rollback(&mods_dir, &batch).unwrap();
+        check!(
+            "update rollback restores old file",
+            restored == 1
+                && std::fs::read(&a).unwrap() == b"alpha-old"
+                && !mods_dir.join("alpha-2.0.jar").exists()
+        );
+        check!(
+            "update rollback clears history",
+            update_plan::history(&mods_dir).is_empty()
+        );
+
+        // 只动点名的文件：beta 全程没被碰过
+        check!(
+            "update rollback leaves other mods",
+            std::fs::read(&b).unwrap() == b"beta-old"
+        );
+
+        // 计划：稳定版不许被自动升成 beta
+        let item_beta = update_plan::UpdatePlanItem {
+            file_name: "alpha-1.0.jar".into(),
+            project_id: "P_alpha".into(),
+            current_version: "1.0".into(),
+            target_version: "2.0-beta".into(),
+            target_version_id: "v2b".into(),
+            target_file_name: "alpha-2.0-beta.jar".into(),
+            size: 100,
+            renames: true,
+            blocked: Some("目标版本是 beta 通道，不会把稳定版自动升成测试版".into()),
+            notes: vec![],
+        };
+        let plan = update_plan::UpdatePlan {
+            plan_id: "uplan_selftest".into(),
+            instance_id: "inst_x".into(),
+            items: vec![item_beta],
+            skipped: vec![],
+            total_bytes: 0,
+            blocking: true,
+            created_at: crate::time::unix_ms_to_iso(crate::time::now_unix_ms()),
+            expires_at: crate::time::unix_ms_to_iso(crate::time::now_unix_ms() + 60000),
+        };
+        check!(
+            "update plan blocks beta promotion",
+            plan.blocking && plan.items[0].blocked.is_some()
+        );
+
+        // 清理
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+        let _ = std::fs::remove_dir_all(mods_dir.join(update_plan::BACKUP_DIR));
+    }
+
 
     check!(
         "task health shape",

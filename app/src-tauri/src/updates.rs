@@ -3,12 +3,12 @@
 //! 用 jar 的 SHA1 去 Modrinth 反查项目与版本，再比对"当前实例版本 + 加载器"
 //! 下最新的兼容文件。全部只读，不会改动文件。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const API: &str = "https://api.modrinth.com/v2";
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ModUpdate {
     pub file_name: String,
