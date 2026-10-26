@@ -732,8 +732,54 @@ const fatal = report.issues.filter(i => i.severity === "error");
   **版本不满足是 warn**（版本号写法太多，可能只是我判断不了），
   **判断不了范围时给 info + `confidence: "low"`**，绝不冒充"确定不兼容"。
 - `version-mismatch` 的 `confidence` 是 `medium`：Modrinth 上的范围写法
-  （如 `>=1.20 <1.21`、`1.20.x`）能解析，但 Maven 风格的 `[1.20,1.21)` 目前
-  只当字符串比，判不准就给低置信度提示。
+  （如 `>=1.20 <1.21`、`1.20.x`）和 Forge/NeoForge 的 Maven 区间
+  （`[1.20,1.21)`、`(1.20,1.21]`、`[47,)`、`[1.20.1]`、多段 `[1.18,1.19.3),[1.20,1.21)`）
+  都能解析；确实解析不出来的写法（`>=abc`）才判未知并给低置信度。
 - `minecraft` / `forge` / `neoforge` / `fabric-api` 这些平台 id 不算缺失依赖。
 - 结果里 `mods` 含已禁用的（`enabled: false`），禁用的不参与依赖判定。
 - 这个接口**不会**删任何东西，删要靠 `delete_mod`。
+---
+
+## 13. 已安装 Mod 账本（V2.5 新增，内部机制）
+
+这一节没有新命令，讲的是 `resolve_mod_dependencies` 背后的一条数据：
+
+### 13.1 为什么需要
+
+`mods::list` 从 jar 里只能读到**人类可读的版本号**（`1.0.0`、`mc1.20.1-0.5.13`），
+拿不到 Modrinth 的 `version_id`。而依赖解析要判断"已装的这个 Mod 是不是依赖要的那个版本"，
+必须知道 version id。没有它，所有已装的 Mod 只能进 `unknown`——解析器会跳过安装，
+"装的是旧版、依赖要新版"这种情况永远发现不了。
+
+### 13.2 存在哪
+
+`<实例>/mods/.astral-ledger.json`：
+
+```json
+{
+  "files": {
+    "sodium-fabric-0.5.13+mc1.20.1.jar": {
+      "projectId": "AANobbMI",
+      "versionId": "abc123xy",
+      "versionNumber": "0.5.13+mc1.20.1",
+      "fileName": "sodium-fabric-0.5.13+mc1.20.1.jar",
+      "installedAt": "2026-10-27T01:20:00Z"
+    }
+  }
+}
+```
+
+### 13.3 规则（重要，前端不要依赖"所有已装 Mod 都有账本"）
+
+- **只有 Astral 自己装下来的才记账**：`prepare_resource_install` → 执行安装、
+  批量 Mod 更新。玩家手动丢进 `mods/` 的 jar **不会**有账本条目。
+- 账本跟着文件走：启用/禁用改名、删除、批量更新换文件、回滚，都会同步。
+- 文件被玩家手动删掉后，账本条目虽然还在，但**不再算已装**（`live()` 会过滤）。
+- 所以 `resolve_mod_dependencies` 的结果里，`skipped` 里的
+  `installed_unknown` 是**正常的**——那是玩家自己放的文件，不是 bug。
+- 账本写失败不影响安装成功（只影响下次解析的精度），不要把它当成致命错误。
+
+### 13.4 对前端的要求
+
+不需要读这个文件。需要展示"这个 Mod 是哪个版本"时，用 `list_mods` 的
+`version` 字段（人类可读的那个）即可；`scan_mods` 的 `mods[].version` 同理。
