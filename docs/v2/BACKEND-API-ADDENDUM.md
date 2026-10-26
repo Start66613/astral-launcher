@@ -1961,3 +1961,87 @@ const report = await invoke<ProbeReport>("probe_sources");
 
 `list_versions_cached` 返回的 `cache.source` 说的是"这份数据从网络还是缓存来的"，
 和这里的下载源 `source` 是两回事，别混。
+---
+
+## 29. 本地文件导入（V2.5 新增）
+
+### 29.1 解决什么问题
+
+玩家手上经常已经有一个从群里、从视频简介里存下来的 jar，或者一个资源包 zip。
+以前只能自己打开 `instances/<id>/mods/` 把文件拷进去 —— 大多数玩家根本找不到
+这个目录，更别说判断一个 zip 到底是资源包还是光影包。
+
+现在可以「把文件拖进来 → 先看预览 → 确认导入」。
+
+### 29.2 两个命令
+
+```ts
+interface ImportCandidate {
+  path: string;              // 玩家给的原始路径
+  fileName: string;
+  sizeBytes: number;
+  kind: "mod" | "resourcepack" | "shaderpack" | "modpack" | "datapack" | "unknown";
+  targetDir: string | null;  // 会落到哪个目录
+  targetName: string | null; // 会用的文件名（重名时这里还是原名）
+  note: string | null;       // 给人看的补充说明
+  problem: string | null;    // 不能导入的原因
+}
+
+interface ImportOutcome {
+  path: string;
+  fileName: string;
+  kind: string;
+  savedAs: string | null;    // 真正落地的文件名（重名时带序号）
+  targetPath: string | null;
+  sizeBytes: number;
+  sha1: string | null;       // 复制后回读算的，可以拿去 Modrinth 反查
+  renamed: boolean;
+  error: string | null;
+}
+
+// 只读预览：不复制任何文件
+const candidates = await invoke<ImportCandidate[]>("inspect_local_files", {
+  instanceId,
+  paths: ["D:\\下载\\sodium.jar", "D:\\下载\\好看的材质.zip"],
+});
+
+// 确认后真正导入：一个失败不影响其他文件
+const outcomes = await invoke<ImportOutcome[]>("import_local_files", {
+  instanceId,
+  paths,
+  kind: null,   // 可选：强制指定类型
+});
+```
+
+### 29.3 类型是按内容判断的，不是按扩展名
+
+`.zip` 可能是资源包、光影包、数据包，甚至整合包。判断顺序：
+
+1. `.mrpack` → 整合包，提示走「导入本地整合包」
+2. `.jar` → Mod
+3. zip 里有 `modrinth.index.json` → 整合包，同上
+4. zip 里有 `shaders/` → 光影包
+5. zip 里有 `pack.mcmeta` + `assets/` → 资源包（顺带读 `pack_format` 给出适配版本）
+6. zip 里有 `pack.mcmeta` + `data/` → 数据包（提示要放进存档的 `datapacks/`）
+7. 其余 → `unknown`，`problem` 里写清为什么
+
+`inspect_local_files` 和 `import_local_files` 用的是同一套判断，所以预览说会放到
+`resourcepacks/`，导入就一定放到那里。
+
+### 29.4 安全与不丢数据的约定
+
+- **重名不覆盖**：自动改成 `-1`、`-2`……不会悄悄盖掉玩家已有的文件
+- 先写 `.astral-import` 临时文件再改名，中途失败不会留下半个 jar 让游戏加载崩
+- 复制后回读大小并比对，不一致直接报错
+- 单个文件上限 512 MB，一批最多 64 个
+- 拒绝符号链接
+- **不碰** `options.txt`、`config/`、存档
+
+### 29.5 前端接入建议
+
+- 接 Tauri 的拖放事件（`onDragDropEvent`）拿到 `paths`，先调 `inspect_local_files` 出预览
+- 预览里按 `kind` 分组显示，`problem` 非空的置灰并显示原因
+- 玩家点「导入」后调 `import_local_files`，按 `error` 逐条显示结果
+- `sha1` 可以顺手拿去调 Modrinth 的 `/version_file/{sha1}` 反查是哪个项目，
+  查到了就能显示图标、名字，还能进账本（见 §13）
+- 导入完成后刷新 `list_mods` / `list_packs`

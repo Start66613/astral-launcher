@@ -15,6 +15,7 @@ mod jdk;
 mod ledger;
 mod live;
 mod loader;
+mod local_import;
 mod logs;
 mod migrate;
 mod modpack;
@@ -2925,6 +2926,44 @@ fn delete_pack(
     packs::delete(&dir, &kind, &file_name, confirm)
 }
 
+// ── 本地文件导入（自己下的 jar / zip）─────────────────────────────
+
+fn import_targets(instance_id: &str) -> Result<local_import::Targets, String> {
+    let inst = managed_instance(instance_id)?;
+    Ok(local_import::Targets {
+        mods: PathBuf::from(&inst.dirs.mods),
+        resourcepacks: PathBuf::from(&inst.dirs.resourcepacks),
+        shaderpacks: PathBuf::from(&inst.dirs.shaderpacks),
+    })
+}
+
+/// 只读：看看这些本地文件会被当成什么、放到哪、有没有问题。
+///
+/// 界面上先调这个显示预览，玩家确认后再调 `import_local_files`。
+#[tauri::command]
+fn inspect_local_files(
+    instance_id: String,
+    paths: Vec<String>,
+) -> Result<Vec<local_import::ImportCandidate>, String> {
+    let targets = import_targets(&instance_id)?;
+    Ok(paths
+        .iter()
+        .map(|p| local_import::inspect(std::path::Path::new(p), Some(&targets)))
+        .collect())
+}
+
+/// 把本地文件复制进实例。一个失败不影响其他文件。
+#[tauri::command]
+fn import_local_files(
+    instance_id: String,
+    paths: Vec<String>,
+    kind: Option<String>,
+) -> Result<Vec<local_import::ImportOutcome>, String> {
+    let targets = import_targets(&instance_id)?;
+    let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    Ok(local_import::import_many(&targets, &list, kind.as_deref()))
+}
+
 // ── 本地 Mod 静态扫描 ────────────────────────────────────────────
 
 /// 离线扫描实例的 mods 目录：重复 mod id、缺失依赖、版本不满足、声明的冲突。
@@ -3141,6 +3180,8 @@ pub fn run() {
             list_packs,
             set_pack_enabled,
             delete_pack,
+            inspect_local_files,
+            import_local_files,
             scan_mods,
             list_loaders,
             start_install_loader,
@@ -3508,6 +3549,119 @@ pub fn selftest() -> i32 {
     );
     let _ = std::fs::remove_dir_all(&scan_dir);
     let _ = std::fs::remove_dir_all(&clean_dir);
+
+    // 本地文件导入：按内容判断类型、重名不覆盖、一个坏文件不影响其他
+    {
+        use std::io::Write as _;
+        let imp = std::env::temp_dir().join(format!("astral-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&imp);
+        let _ = std::fs::create_dir_all(&imp);
+        let targets = local_import::Targets {
+            mods: imp.join("mods"),
+            resourcepacks: imp.join("resourcepacks"),
+            shaderpacks: imp.join("shaderpacks"),
+        };
+        let _ = std::fs::create_dir_all(&targets.mods);
+
+        // 一个资源包 zip（pack.mcmeta + assets）
+        let rp = imp.join("nice.zip");
+        {
+            let f = std::fs::File::create(&rp).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("pack.mcmeta", o).unwrap();
+            z.write_all(br#"{"pack":{"pack_format":15,"description":"nice"}}"#)
+                .unwrap();
+            z.start_file("assets/minecraft/lang/zh_cn.json", o).unwrap();
+            z.write_all(b"{}").unwrap();
+            z.finish().unwrap();
+        }
+        // 一个光影包 zip（shaders/）
+        let sp = imp.join("glow.zip");
+        {
+            let f = std::fs::File::create(&sp).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("shaders/final.fsh", o).unwrap();
+            z.write_all(b"void main(){}").unwrap();
+            z.finish().unwrap();
+        }
+        // 一个普通 jar
+        let jar = imp.join("plain.jar");
+        std::fs::write(&jar, b"just bytes").unwrap();
+
+        let cands = [
+            local_import::inspect(&rp, Some(&targets)),
+            local_import::inspect(&sp, Some(&targets)),
+            local_import::inspect(&jar, Some(&targets)),
+            local_import::inspect(&imp.join("nope.jar"), Some(&targets)),
+        ];
+        check!(
+            "local import detects kinds",
+            cands[0].kind == "resourcepack"
+                && cands[0].ok()
+                && cands[1].kind == "shaderpack"
+                && cands[1].ok()
+                && cands[2].kind == "mod"
+                && cands[2].ok()
+                && !cands[3].ok()
+        );
+
+        let first = local_import::import_one(&targets, &rp, None).unwrap();
+        check!(
+            "local import copies into the right folder",
+            first.kind == "resourcepack"
+                && !first.renamed
+                && first.sha1.is_some()
+                && targets.resourcepacks.join("nice.zip").is_file()
+        );
+
+        // 同名再导入一次：不覆盖，改加序号
+        let second = local_import::import_one(&targets, &rp, None).unwrap();
+        check!(
+            "local import renames instead of overwriting",
+            second.renamed
+                && second.saved_as.as_deref() == Some("nice-1.zip")
+                && targets.resourcepacks.join("nice.zip").is_file()
+        );
+
+        let batch = local_import::import_many(
+            &targets,
+            &[imp.join("missing.zip"), sp.clone(), jar.clone()],
+            None,
+        );
+        check!(
+            "local import batch survives a bad file",
+            batch.len() == 3
+                && batch[0].error.is_some()
+                && batch[1].error.is_none()
+                && batch[2].error.is_none()
+                && targets.shaderpacks.join("glow.zip").is_file()
+                && targets.mods.join("plain.jar").is_file()
+        );
+
+        // 指定类型：把结构不完整的 zip 当光影包收下
+        let weird = imp.join("weird.zip");
+        {
+            let f = std::fs::File::create(&weird).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("pack.mcmeta", o).unwrap();
+            z.write_all(br#"{"pack":{"pack_format":15}}"#).unwrap();
+            z.finish().unwrap();
+        }
+        let forced = local_import::import_one(&targets, &weird, Some("shaderpack")).unwrap();
+        check!(
+            "local import honors an explicit kind",
+            forced.kind == "shaderpack" && targets.shaderpacks.join("weird.zip").is_file()
+        );
+        check!(
+            "local import rejects unknown kinds",
+            local_import::import_one(&targets, &weird, Some("taco")).is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&imp);
+    }
 
     // 账本：Astral 装过的 Mod 能被依赖解析认出版本，玩家手放的仍算未知
     {
