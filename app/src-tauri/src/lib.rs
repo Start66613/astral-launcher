@@ -22,6 +22,7 @@ mod stats;
 mod task;
 mod time;
 mod update_plan;
+mod verify;
 mod updates;
 
 use core::Config;
@@ -1741,6 +1742,139 @@ fn prune_mod_update_backups(instance_id: String, keep_days: Option<u64>) -> Resu
     )
 }
 
+// ── B3 完整游戏文件检查与智能修复 ─────────────────────────────
+
+/// 只读：体检一个版本的完整性（缺失 / 损坏 / Java 兼容）。
+///
+/// `deep` 为 true 时逐个算 SHA1（慢，但能发现"大小对、内容错"）。
+#[tauri::command]
+fn check_version_files(
+    instance_id: Option<String>,
+    version: String,
+    deep: Option<bool>,
+) -> Result<verify::VersionReport, String> {
+    let game = game_root();
+    let ver = match &instance_id {
+        Some(id) => {
+            let inst = instance::find(&game, id, &play_stats)
+                .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+            inst.launch_version.unwrap_or(inst.game_version)
+        }
+        None => version,
+    };
+    let opts = verify::CheckOptions {
+        deep: deep.unwrap_or(false),
+        ..Default::default()
+    };
+    Ok(verify::check(&game, &ver, &opts))
+}
+
+/// 只读：生成修复计划，给玩家看要做什么。
+#[tauri::command]
+fn plan_version_repair(
+    instance_id: Option<String>,
+    version: String,
+    deep: Option<bool>,
+) -> Result<(verify::VersionReport, verify::RepairPlan), String> {
+    let game = game_root();
+    let (ver, kind, lver, inst_id) = match &instance_id {
+        Some(id) => {
+            let inst = instance::find(&game, id, &play_stats)
+                .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+            let kind = inst.loader.as_ref().map(|l| l.kind.clone());
+            let lver = inst.loader.as_ref().map(|l| l.version.clone());
+            (
+                inst.launch_version.unwrap_or(inst.game_version),
+                kind,
+                lver,
+                Some(id.clone()),
+            )
+        }
+        None => (version, None, None, None),
+    };
+    let opts = verify::CheckOptions {
+        deep: deep.unwrap_or(false),
+        ..Default::default()
+    };
+    let report = verify::check(&game, &ver, &opts);
+    let plan = verify::plan(
+        &game,
+        inst_id.as_deref(),
+        &ver,
+        &report,
+        kind.as_deref(),
+        lver.as_deref(),
+    );
+    Ok((report, plan))
+}
+
+/// 执行修复（后台任务）。只补缺失/损坏，不动 mods / config / saves。
+#[tauri::command]
+fn repair_version(
+    app: AppHandle,
+    instance_id: Option<String>,
+    version: String,
+    plan: verify::RepairPlan,
+    allow_replace: Option<bool>,
+) -> Result<String, String> {
+    let game = game_root();
+    let t = task::create(
+        "repair",
+        instance_id.clone(),
+        Some(version.clone()),
+        format!("修复 {version}"),
+    );
+    let tid = t.task_id.clone();
+    let out_id = tid.clone();
+    let cancel = net::cancel_from({
+        let tc = tid.clone();
+        move || task::is_cancelled(&tc)
+    });
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let r = verify::repair(
+            &game,
+            &version,
+            &plan,
+            allow_replace.unwrap_or(false),
+            &*cancel,
+            |done, total, stage| {
+                task::progress(&tid, "download", stage.to_string(), done, total);
+            },
+        );
+        match r {
+            Ok(res) => {
+                let failed = res.failed.len();
+                let payload = serde_json::to_value(&res).unwrap_or(serde_json::Value::Null);
+                if failed == 0 {
+                    task::finish(&tid, payload.clone());
+                } else {
+                    task::fail(
+                        &tid,
+                        format!(
+                            "VERIFY_FAILED|修复完成但有 {failed} 项失败|{}",
+                            res.failed
+                                .iter()
+                                .map(|(k, v)| format!("{k}: {}", task::decode(v).message))
+                                .collect::<Vec<_>>()
+                                .join("；")
+                        ),
+                    );
+                }
+                let _ = app.emit("astral://repair", payload);
+            }
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(out_id)
+}
+
+/// 列出修复备份批次
+#[tauri::command]
+fn repair_backups() -> Vec<String> {
+    verify::backups(&game_root())
+}
+
 /// 只读：解析一个 Mod 的完整依赖树，不下载任何东西。
 ///
 /// 前端拿它做"安装前预览"：能看到每个依赖为什么被装、会替换哪个版本、
@@ -1975,6 +2109,10 @@ pub fn run() {
             net_scheduler_stats,
             cache_stats,
             resolve_mod_dependencies,
+            check_version_files,
+            plan_version_repair,
+            repair_version,
+            repair_backups,
             plan_mod_updates,
             apply_mod_updates,
             mod_update_history,
@@ -2481,6 +2619,196 @@ pub fn selftest() -> i32 {
         // 清理
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    // ── B3 完整文件检查与修复计划 ──
+    {
+        let g = game.join("verify-game");
+        let ver = "1.20.1";
+        let vdir = g.join("versions").join(ver);
+        std::fs::create_dir_all(&vdir).unwrap();
+        std::fs::create_dir_all(g.join("libraries")).unwrap();
+        std::fs::create_dir_all(g.join("assets").join("indexes")).unwrap();
+
+        // 造一个"半残"的版本：json 有、jar 缺、库缺一个、资源索引缺
+        let jar_bytes = b"fake-client-jar-bytes";
+        let version_json = serde_json::json!({
+            "id": ver,
+            "javaVersion": { "majorVersion": 17 },
+            "downloads": {
+                "client": {
+                    "size": jar_bytes.len(),
+                    "sha1": "0000000000000000000000000000000000000000"
+                }
+            },
+            "assetIndex": { "id": "5" },
+            "libraries": [
+                {
+                    "name": "org.example:present:1.0",
+                    "downloads": {
+                        "artifact": {
+                            "path": "org/example/present/1.0/present-1.0.jar",
+                            "size": 3,
+                            "sha1": "1111111111111111111111111111111111111111"
+                        }
+                    }
+                },
+                {
+                    "name": "org.example:missing:1.0",
+                    "downloads": {
+                        "artifact": {
+                            "path": "org/example/missing/1.0/missing-1.0.jar",
+                            "size": 4,
+                            "sha1": "2222222222222222222222222222222222222222"
+                        }
+                    }
+                }
+            ]
+        });
+        std::fs::write(
+            vdir.join(format!("{ver}.json")),
+            serde_json::to_string_pretty(&version_json).unwrap(),
+        )
+        .unwrap();
+        let present = g
+            .join("libraries")
+            .join("org/example/present/1.0/present-1.0.jar");
+        std::fs::create_dir_all(present.parent().unwrap()).unwrap();
+        std::fs::write(&present, b"abc").unwrap();
+
+        let report = verify::check(&g, ver, &verify::CheckOptions::default());
+        check!(
+            "verify finds missing jar",
+            report.missing >= 1
+                && report
+                    .files
+                    .iter()
+                    .any(|f| f.kind == "client-jar" && !f.exists)
+        );
+        check!(
+            "verify counts missing library",
+            report
+                .files
+                .iter()
+                .any(|f| f.kind == "library" && !f.exists && f.path.contains("missing"))
+        );
+        check!(
+            "verify accepts present library by size",
+            report
+                .files
+                .iter()
+                .any(|f| f.path.contains("present") && f.exists && f.complete == Some(true))
+        );
+        check!(
+            "verify reports missing asset index",
+            report
+                .files
+                .iter()
+                .any(|f| f.kind == "asset-index" && !f.exists)
+        );
+        check!("verify report not complete", !report.complete && report.needs_repair());
+
+        // 修复计划：只读、不碰用户文件、给出 untouched 清单
+        let plan = verify::plan(&g, Some("inst_v"), ver, &report, None, None);
+        check!(
+            "verify plan targets base reinstall",
+            plan.actions.iter().any(|a| a.kind == "reinstall-base")
+        );
+        check!(
+            "verify plan lists untouched user dirs",
+            plan.untouched.iter().any(|s| s.contains("saves"))
+                && plan.untouched.iter().any(|s| s.contains("mods"))
+        );
+        check!(
+            "verify plan never overwrites user files",
+            plan.actions.iter().all(|a| !a.overwrites_user_file)
+        );
+
+        // 深度模式：大小对但内容错 → 必须被 sha1 抓出来
+        let libs_json_path = vdir.join(format!("{ver}.json"));
+        let mut v2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&libs_json_path).unwrap()).unwrap();
+        // 把 present 的 sha1 改成"正确内容 abc 的 sha1"
+        let correct = crate::net::sha1_file(&present).unwrap();
+        v2["libraries"][0]["downloads"]["artifact"]["sha1"] =
+            serde_json::Value::String(correct.clone());
+        std::fs::write(
+            &libs_json_path,
+            serde_json::to_string_pretty(&v2).unwrap(),
+        )
+        .unwrap();
+        let shallow = verify::check(&g, ver, &verify::CheckOptions::default());
+        check!(
+            "verify shallow trusts size",
+            shallow
+                .files
+                .iter()
+                .any(|f| f.path.contains("present") && f.complete == Some(true))
+        );
+        // 改内容但保持同样长度 → 浅检通过、深检必须失败
+        std::fs::write(&present, b"abd").unwrap();
+        let deep = verify::check(
+            &g,
+            ver,
+            &verify::CheckOptions {
+                deep: true,
+                ..Default::default()
+            },
+        );
+        check!(
+            "verify deep detects corrupt content",
+            deep.files
+                .iter()
+                .any(|f| f.path.contains("present") && f.complete == Some(false))
+                && deep.corrupt >= 1
+        );
+
+        // 修好一个文件后报告要跟着变（幂等，不缓存旧结论）
+        std::fs::write(&present, b"abc").unwrap();
+        let fixed = verify::check(
+            &g,
+            ver,
+            &verify::CheckOptions {
+                deep: true,
+                ..Default::default()
+            },
+        );
+        check!(
+            "verify recheck reflects fix",
+            fixed
+                .files
+                .iter()
+                .any(|f| f.path.contains("present") && f.complete == Some(true))
+        );
+
+        // 完整版本：不报任何修复动作
+        let ok_dir = g.join("versions").join("2.0");
+        std::fs::create_dir_all(&ok_dir).unwrap();
+        std::fs::write(ok_dir.join("2.0.jar"), b"x").unwrap();
+        std::fs::write(
+            ok_dir.join("2.0.json"),
+            serde_json::json!({ "id": "2.0" }).to_string(),
+        )
+        .unwrap();
+        let ok_report = verify::check(&g, "2.0", &verify::CheckOptions::default());
+        check!(
+            "verify clean version has no actions",
+            verify::plan(&g, None, "2.0", &ok_report, None, None)
+                .actions
+                .is_empty()
+        );
+
+        // 备份目录：覆盖前备份能落盘
+        std::fs::write(g.join("probe.txt"), b"keep-me").unwrap();
+        let bdir = g.join(verify::BACKUP_DIR).join("rep_test");
+        std::fs::create_dir_all(&bdir).unwrap();
+        std::fs::copy(g.join("probe.txt"), bdir.join("probe.txt")).unwrap();
+        check!(
+            "verify backups listed",
+            verify::backups(&g).iter().any(|b| b == "rep_test")
+        );
+
+        let _ = std::fs::remove_dir_all(&g);
+    }
+
         let _ = std::fs::remove_dir_all(mods_dir.join(update_plan::BACKUP_DIR));
     }
 
