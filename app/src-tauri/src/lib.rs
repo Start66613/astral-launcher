@@ -14,6 +14,7 @@ mod logs;
 mod migrate;
 mod modpack;
 mod mods;
+mod modscan;
 mod net;
 mod packs;
 mod plan;
@@ -2411,6 +2412,18 @@ fn delete_pack(
     packs::delete(&dir, &kind, &file_name, confirm)
 }
 
+// ── 本地 Mod 静态扫描 ────────────────────────────────────────────
+
+/// 离线扫描实例的 mods 目录：重复 mod id、缺失依赖、版本不满足、声明的冲突。
+///
+/// 只读，不下载也不修改任何文件；和 `resolve_mod_dependencies`（联网递归解析）
+/// 互补：那个回答"装之前要下什么"，这个回答"现在这一堆为什么起不来"。
+#[tauri::command]
+fn scan_mods(instance_id: String) -> Result<modscan::ModScanReport, String> {
+    let inst = managed_instance(&instance_id)?;
+    Ok(modscan::scan(std::path::Path::new(&inst.dirs.mods)))
+}
+
 // ── legacy（阻塞语义，保持不变）──────────────────────────────────
 
 #[tauri::command]
@@ -2614,6 +2627,7 @@ pub fn run() {
             list_packs,
             set_pack_enabled,
             delete_pack,
+            scan_mods,
             list_loaders,
             start_install_loader,
             list_loader_builds,
@@ -2865,6 +2879,93 @@ pub fn selftest() -> i32 {
             && packs::delete(&pack_dir, "resourcepack", "../x.zip", true).is_err()
     );
     let _ = std::fs::remove_dir_all(&pack_dir);
+
+    // 本地 Mod 静态扫描：重复 id / 缺依赖 / 版本不满足 / 干净目录保持安静
+    let scan_dir = std::env::temp_dir().join(format!("astral-scan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scan_dir);
+    let _ = std::fs::create_dir_all(&scan_dir);
+    {
+        use std::io::Write as _;
+        let mk = |name: &str, body: &str| {
+            let f = std::fs::File::create(scan_dir.join(name)).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            zw.start_file("fabric.mod.json", opts).unwrap();
+            zw.write_all(body.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        };
+        // alpha 装了两份（重复 id），并要求 beta >=2.0 与一个根本没装的 mod
+        mk(
+            "alpha.jar",
+            r#"{"id":"alpha","name":"Alpha","version":"1.0.0","depends":{"minecraft":">=1.20","beta":">=2.0","ghostlib":">=1.0"}}"#,
+        );
+        mk(
+            "alpha-copy.jar",
+            r#"{"id":"alpha","name":"Alpha","version":"1.0.0"}"#,
+        );
+        mk(
+            "beta.jar",
+            r#"{"id":"beta","name":"Beta","version":"1.0.0"}"#,
+        );
+    }
+    let scan_report = modscan::scan(&scan_dir);
+    check!(
+        "modscan finds duplicate id",
+        scan_report.counts.total == 3
+            && scan_report.issues.iter().any(|i| i.code == "duplicate-id"
+                && i.mod_id.as_deref() == Some("alpha")
+                && i.severity == "error")
+    );
+    check!(
+        "modscan finds missing dependency",
+        scan_report
+            .issues
+            .iter()
+            .any(|i| i.code == "missing-dependency"
+                && i.mod_id.as_deref() == Some("ghostlib")
+                && i.severity == "error")
+    );
+    check!(
+        "modscan flags version mismatch",
+        scan_report
+            .issues
+            .iter()
+            .any(|i| i.code == "version-mismatch"
+                && i.mod_id.as_deref() == Some("beta")
+                && i.severity == "warn")
+    );
+    check!(
+        "modscan counts and summary",
+        scan_report.counts.enabled == 3
+            && scan_report.counts.errors >= 2
+            && scan_report.counts.warnings >= 1
+            && scan_report.summary.is_some()
+    );
+    // 干净目录必须一条问题都不报（避免"什么都报警"的假阳性）
+    let clean_dir = std::env::temp_dir().join(format!("astral-scan-ok-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&clean_dir);
+    let _ = std::fs::create_dir_all(&clean_dir);
+    {
+        use std::io::Write as _;
+        let f = std::fs::File::create(clean_dir.join("solo.jar")).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        zw.start_file("fabric.mod.json", opts).unwrap();
+        zw.write_all(
+            br#"{"id":"solo","name":"Solo","version":"1.0.0","depends":{"minecraft":">=1.20"}}"#,
+        )
+        .unwrap();
+        zw.finish().unwrap();
+    }
+    let clean_report = modscan::scan(&clean_dir);
+    check!(
+        "modscan quiet on clean dir",
+        clean_report.issues.is_empty()
+            && clean_report.summary.is_none()
+            && clean_report.counts.errors == 0
+    );
+    let _ = std::fs::remove_dir_all(&scan_dir);
+    let _ = std::fs::remove_dir_all(&clean_dir);
 
     check!(
         "instance delete to trash",

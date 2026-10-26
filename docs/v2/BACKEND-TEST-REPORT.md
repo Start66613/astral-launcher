@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 194 项全过，单元测试 103 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 199 项全过，单元测试 110 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（194 项）
+## 2. 自检覆盖（199 项）
 
 按前缀分组：
 
@@ -60,6 +60,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `loader` | 4 | 解析、空安全、兼容性、NeoForge 提示 |
 | `mod` | 4 | 列表、启用标记、禁用、启用、删除、路径守卫 |
 | `packs` | 5 | 解析 `pack.mcmeta` 的 pack_format 与描述、禁用/启用改名、删除需确认、非法类型与危险文件名被拒 |
+| `modscan` | 5 | 重复 mod id、缺失依赖、版本不满足、计数与结论、干净目录保持安静 |
 | `cache` | 3 | 第二次走缓存、统计与淘汰、只清缓存不动文件 |
 | `diagnosis` | 3 | 结构化报告、干净日志保持安静、脱敏 |
 | `installer` | 3 | Forge/NeoForge 下载地址 |
@@ -67,10 +68,12 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（109 个）
+## 3. 单元测试（116 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
+| `packs` | 6 | 文件名拆分、pack_format 对照表、description 文本组件、危险文件名、扩展名过滤、删除需确认 |
+| `modscan` | 7 | 版本比较、常见范围、乱写范围判未知、Forge TOML 依赖、平台 id 白名单、重复+版本不满足、干净目录 |
 | `deps` | 9 | 嵌套顺序、环、双版本冲突、深度/节点上限、已装跳过、release 优先、缺失、via 链 |
 | `verify` | 5 | 相对路径、需要修复、干净不需、计划不碰玩家文件、空计划 |
 | `logs` | 6 | 脱敏（邮箱/IP/token/用户目录）、常见故障分类、cause/confidence、新规则、干净日志 |

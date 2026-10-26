@@ -666,3 +666,74 @@ await invoke<void>("delete_pack", {
 - 光影包靠包里有没有 `shaders/` 目录判断，没有的话 `note` 会提示"可能不是光影包"。
 - 这些命令都不会去改 `options.txt` 里的启用顺序——那是游戏自己管的，
   替玩家改顺序出问题的概率远大于收益。
+
+---
+
+## 12. 本地 Mod 静态扫描（V2.5 新增）
+
+和 `resolve_mod_dependencies` 的分工要分清：
+
+| | `resolve_mod_dependencies` | `scan_mods` |
+|---|---|---|
+| 联网 | 是（Modrinth） | **否** |
+| 回答 | "装这个之前还要下什么" | "现在这堆 mod 为什么起不来" |
+| 会不会改文件 | 不会（只出计划） | 不会（纯只读） |
+
+### 12.1 数据结构
+
+```ts
+interface ScannedId { modId: string; name: string; version: string; loader: string }
+interface ScannedDep { modId: string; versionRange: string | null; mandatory: boolean }
+
+interface ScannedMod {
+  fileName: string;
+  enabled: boolean;
+  sizeBytes: number;
+  ids: ScannedId[];          // 一个 jar 可能有多个 mod id（jar-in-jar 之类）
+  depends: ScannedDep[];
+  conflicts: ScannedDep[];   // fabric 的 breaks / forge 的 type="breaks"
+  error: string | null;      // 读不出来时的原因
+}
+
+interface ModIssue {
+  code: "duplicate-id" | "missing-dependency" | "version-mismatch"
+      | "broken-jar" | "no-metadata" | "declared-conflict" | "disabled-duplicate";
+  severity: "error" | "warn" | "info";
+  fileName: string | null;
+  modId: string | null;
+  message: string;
+  detail: string | null;
+  confidence: "high" | "medium" | "low";
+}
+
+interface ModScanReport {
+  mods: ScannedMod[];
+  issues: ModIssue[];
+  counts: { total: number; enabled: number; disabled: number;
+            readable: number; unreadable: number; errors: number; warnings: number };
+  summary: string | null;   // 没问题时是 null，不硬编"一切正常"
+}
+```
+
+### 12.2 调用
+
+```ts
+const report = await invoke<ModScanReport>("scan_mods", { instanceId: "inst_xxx" });
+
+// 只显示需要处理的
+const fatal = report.issues.filter(i => i.severity === "error");
+```
+
+要点：
+
+- **纯离线**，断网也能用；读的是 jar 里的 `fabric.mod.json` / `quilt.mod.json` /
+  `META-INF/mods.toml` / `META-INF/mcmod.info`。
+- `severity` 分级是保守的：**重复 mod id 是 error**（几乎必然崩），
+  **版本不满足是 warn**（版本号写法太多，可能只是我判断不了），
+  **判断不了范围时给 info + `confidence: "low"`**，绝不冒充"确定不兼容"。
+- `version-mismatch` 的 `confidence` 是 `medium`：Modrinth 上的范围写法
+  （如 `>=1.20 <1.21`、`1.20.x`）能解析，但 Maven 风格的 `[1.20,1.21)` 目前
+  只当字符串比，判不准就给低置信度提示。
+- `minecraft` / `forge` / `neoforge` / `fabric-api` 这些平台 id 不算缺失依赖。
+- 结果里 `mods` 含已禁用的（`enabled: false`），禁用的不参与依赖判定。
+- 这个接口**不会**删任何东西，删要靠 `delete_mod`。

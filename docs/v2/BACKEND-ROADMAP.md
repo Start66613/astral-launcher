@@ -10,7 +10,7 @@
 
 A1–A5、B1–B4、C1–C4、D1–D2 已完成并有自动化测试；D3 的测试矩阵已随各功能逐项落地；
 D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发布检查清单与自动更新
-签名方案尚未完成。共 102 个 Tauri 命令、194 项自检、109 个 Rust 单元测试（103 通过 6 忽略）。
+签名方案尚未完成。共 103 个 Tauri 命令、199 项自检、116 个 Rust 单元测试（110 通过 6 忽略）。
 
 ---
 
@@ -92,6 +92,7 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 |---|---|---|---|
 | E1 | Modrinth 资源搜索 | ✅ | `search.rs` + `search_resources`，标准百分号编码、白名单校验、离线回退 |
 | E2 | 资源包/光影包文件管理 | ✅ | `packs.rs` + `list_packs`/`set_pack_enabled`/`delete_pack`，解析 `pack_format` 并给出适配版本区间 |
+| E3 | 本地 Mod 静态扫描 | ✅ | `modscan.rs` + `scan_mods`，离线查重复 mod id、缺失依赖、版本不满足、声明冲突；不联网、不改文件 |
 
 ---
 
@@ -117,10 +118,10 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 ## 3. 测试策略
 
 - **单元测试**：纯逻辑（解析、分类、命名、路径校验、状态机）放 `#[cfg(test)]`。
-  当前 109 个，103 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
+  当前 116 个，110 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
 - **自检（`--selftest`）**：所有需要真实文件系统、真实 HTTP、真实进程的检查都放这里。
   用 `testsrv.rs` 起一个只监听 `127.0.0.1` 的临时服务器，能确定性制造 503、慢速、
-  重定向、Range 响应。当前 194 项。
+  重定向、Range 响应。当前 199 项。
 - **为什么不依赖 `cargo test` 跑全部**：本机 `cargo test` 的测试二进制在仓库目录里
   运行会因路径 ACL 报"拒绝访问"（见 `10-cargo-test-调查.md`），所以 `scripts/run-tests.ps1`
   会先把二进制复制到 `%TEMP%` 再跑。CI 上没有这个问题。
