@@ -182,7 +182,12 @@ pub fn redact(input: &str) -> (String, u32) {
         let mut l = line.to_string();
         let lower = l.to_lowercase();
 
-        // 常见的凭证关键字：整行只保留键名
+        // 常见的凭证关键字：从键名往后整段换成占位符
+        //
+        // 这里曾经有一道 `if !head.contains('[')` 的保护，本意是别把方括号里的结构改坏。
+        // 但 Minecraft 的每一行日志都以 `[12:00:03] [main/INFO]:` 开头，
+        // 这道保护等于让所有真实日志里的 token 都漏掉，正好漏在最该脱敏的地方。
+        // 现在改成：只要出现凭证键名，就把它后面的内容全部替换掉。
         for key in [
             "access_token",
             "accessToken",
@@ -195,10 +200,8 @@ pub fn redact(input: &str) -> (String, u32) {
             if lower.contains(&key.to_lowercase()) {
                 if let Some(pos) = l.to_lowercase().find(&key.to_lowercase()) {
                     let head = &l[..pos];
-                    if !head.contains('[') {
-                        l = format!("{head}{key}=<redacted>");
-                        count += 1;
-                    }
+                    l = format!("{head}{key}=<redacted>");
+                    count += 1;
                 }
                 break;
             }

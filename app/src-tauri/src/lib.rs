@@ -33,6 +33,7 @@ mod server;
 mod servers;
 mod session;
 mod stats;
+mod support;
 mod task;
 mod testsrv;
 mod time;
@@ -2214,6 +2215,30 @@ fn read_crash_report(
     let inst = managed_instance(&instance_id)?;
     crash::read(std::path::Path::new(&inst.dir), log_id.as_deref())
 }
+
+/// 诊断包预览：只读。告诉玩家这个 zip 里会有什么、多大，再决定要不要出。
+#[tauri::command]
+fn plan_support_bundle(instance_id: String) -> Result<support::BundlePlan, String> {
+    let game = game_root();
+    support::plan(&game, &instance_id, &play_stats)
+}
+
+/// 导出诊断包：日志 + 崩溃报告 + 体检 + Java + Mod 清单，本机脱敏后打成 zip。
+/// 除了这个 zip 不改动游戏目录里的任何文件。
+#[tauri::command]
+async fn export_support_bundle(
+    instance_id: String,
+    include_logs: Option<bool>,
+) -> Result<support::BundleResult, String> {
+    let game = game_root();
+    let with_logs = include_logs.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || {
+        support::export(&game, &instance_id, with_logs, &play_stats)
+    })
+    .await
+    .map_err(|e| format!("INTERNAL|后台任务异常|{e}"))?
+}
+
 // ── 加载器 ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -3040,6 +3065,8 @@ pub fn run() {
             refresh_servers,
             diagnose_instance,
             read_crash_report,
+            plan_support_bundle,
+            export_support_bundle,
             install_version,
             launch_version,
             download_to
@@ -6607,6 +6634,181 @@ Caused by: java.lang.IllegalStateException: bad state\n";
                             .map(|i| i.override_entries == 4)
                             .unwrap_or(false)
                 );
+            }
+
+            // 28) 诊断包：收集 → 本机脱敏 → 打包，报告如实写清哪段没收到
+            {
+                let g = dl.join("support-bundle-game");
+                let _ = std::fs::create_dir_all(&g);
+                let meta = instance::InstanceMeta {
+                    id: instance::new_id(),
+                    name: "诊断包测试".into(),
+                    game_version: "1.20.1".into(),
+                    loader_kind: Some("fabric".into()),
+                    loader_version: Some("0.16.9".into()),
+                    launch_version: None,
+                    memory_mb: Some(2048),
+                    jvm_args: vec![],
+                    java_path: None,
+                    cover: None,
+                    created_at: time::now_iso(),
+                };
+                let inst = instance::create(&g, &meta).unwrap();
+                let idir = std::path::Path::new(&inst.dir);
+                std::fs::create_dir_all(idir.join("logs")).unwrap();
+                // 用配置里的真实用户名写日志，才能验证"用户名会被替换掉"
+                let cfg_user = core::load_config().username;
+                std::fs::write(
+                    idir.join("logs/latest.log"),
+                    format!(
+                        "[12:00:00] [main/INFO]: 启动于 {}\n\
+                         [12:00:01] [main/INFO]: 玩家 {} 登录，邮箱 steve@example.com\n\
+                         [12:00:02] [main/ERROR]: java.lang.NoClassDefFoundError: net/fabricmc/api/EnvType\n\
+                         [12:00:03] [main/INFO]: access_token=abcd1234\n\
+                         [12:00:04] [main/INFO]: 连接 192.168.1.7:25565\n",
+                        inst.dir, cfg_user
+                    ),
+                )
+                .unwrap();
+                std::fs::create_dir_all(idir.join("crash-reports")).unwrap();
+                std::fs::write(
+                    idir.join("crash-reports/crash-2024-01-01_12.00.00-client.txt"),
+                    "---- Minecraft Crash Report ----\n\
+                     // Oh dear\n\n\
+                     Time: 2024-01-01 12:00:00\n\
+                     Description: Initializing game\n\n\
+                     java.lang.NoClassDefFoundError: net/fabricmc/api/EnvType\n\
+                     \tat net.fabricmc.loader.impl.FabricLoaderImpl.load(FabricLoaderImpl.java:1)\n\n\
+                     A detailed walkthrough is available at: https://help.minecraft.net/x\n",
+                )
+                .unwrap();
+
+                let p = support::plan(&g, &inst.id, &play_stats).unwrap();
+                let has = |k: &str| p.sections.iter().any(|s| s.key == k);
+                check!(
+                    "bundle plan lists every section",
+                    has("report")
+                        && has("instance")
+                        && has("logs")
+                        && has("crash")
+                        && has("mods")
+                        && p.sections
+                            .iter()
+                            .find(|s| s.key == "logs")
+                            .map(|s| s.files == 1)
+                            .unwrap_or(false)
+                        && p.sections
+                            .iter()
+                            .find(|s| s.key == "crash")
+                            .map(|s| s.files == 1)
+                            .unwrap_or(false)
+                        && p.estimated_bytes > 0
+                        && !p.blocking
+                        && p.free_bytes.map(|f| f > 0).unwrap_or(false)
+                );
+                check!(
+                    "bundle plan is read only",
+                    !std::path::Path::new(&p.target_path).exists()
+                        && p.target_path.ends_with(".zip")
+                );
+
+                let r = support::export(&g, &inst.id, true, &play_stats).unwrap();
+                check!(
+                    "bundle export writes a zip",
+                    r.bytes > 0
+                        && std::path::Path::new(&r.path).is_file()
+                        && r.path.contains("diagnostics")
+                        && r.redactions > 0
+                );
+
+                // 解回来逐条核对：脱敏、报告齐全、日志与崩溃都在
+                let zip_file = std::fs::File::open(&r.path).unwrap();
+                let mut z = zip::ZipArchive::new(zip_file).unwrap();
+                let mut names: Vec<String> = (0..z.len())
+                    .map(|i| {
+                        z.by_index(i)
+                            .unwrap()
+                            .name()
+                            .map(|n| n.to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                names.sort();
+                let read_entry = |z: &mut zip::ZipArchive<std::fs::File>, name: &str| -> String {
+                    let mut s = String::new();
+                    use std::io::Read;
+                    z.by_name(name)
+                        .map(|mut f| f.read_to_string(&mut s).ok())
+                        .ok();
+                    s
+                };
+                let report = read_entry(&mut z, "report.txt");
+                let log = read_entry(&mut z, "logs/latest.log");
+                let json = read_entry(&mut z, "bundle.json");
+                check!(
+                    "bundle has the expected entries",
+                    names.iter().any(|n| n == "report.txt")
+                        && names.iter().any(|n| n == "instance.json")
+                        && names.iter().any(|n| n == "bundle.json")
+                        && names.iter().any(|n| n == "mods.txt")
+                        && names.iter().any(|n| n.starts_with("logs/"))
+                        && names.iter().any(|n| n.starts_with("crash/"))
+                );
+                check!(
+                    "bundle report explains the situation",
+                    report.contains("Astral Launcher 诊断包")
+                        && report.contains("诊断包测试")
+                        && report.contains("1.20.1")
+                        && report.contains("fabric 0.16.9")
+                        && !report.contains("没有崩溃报告")
+                        && report.contains("<game>")
+                        && !report.contains("D:\\")
+                );
+                check!(
+                    "bundle log is scrubbed",
+                    log.contains("NoClassDefFoundError")
+                        && !log.contains("access_token=abcd1234")
+                        && !log.contains("steve@example.com")
+                        && !log.contains("192.168.1.7")
+                        && !log.contains(&cfg_user)
+                        && log.contains("<game>")
+                );
+                check!(
+                    "bundle json carries the facts",
+                    json.contains("\"schema\": 1")
+                        && json.contains("\"apiVersion\"")
+                        && json.contains("\"instance\"")
+                        && json.contains("\"gameDir\": \"<game>\"")
+                        && json.contains("\"verify\"")
+                        && json.contains("\"java\"")
+                );
+
+                // 不带日志时如实标注，而不是假装收全了
+                let r2 = support::export(&g, &inst.id, false, &play_stats).unwrap();
+                let f2 = std::fs::File::open(&r2.path).unwrap();
+                let mut z2 = zip::ZipArchive::new(f2).unwrap();
+                let mut n2: Vec<String> = (0..z2.len())
+                    .map(|i| {
+                        z2.by_index(i)
+                            .unwrap()
+                            .name()
+                            .map(|n| n.to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                n2.sort();
+                check!(
+                    "bundle can skip logs and says so",
+                    !n2.iter().any(|n| n.starts_with("logs/"))
+                        && r2
+                            .sections
+                            .iter()
+                            .find(|s| s.key == "logs")
+                            .and_then(|s| s.note.clone())
+                            .map(|n| n.contains("没有收集日志"))
+                            .unwrap_or(false)
+                );
+                let _ = std::fs::remove_dir_all(&g);
             }
 
             // D1：元数据缓存（离线可用 + 如实标注数据时间）
