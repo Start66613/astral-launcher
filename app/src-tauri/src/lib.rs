@@ -28,6 +28,7 @@ mod mods;
 mod modscan;
 mod nbt;
 mod net;
+mod pack_apply;
 mod pack_update;
 mod packs;
 mod plan;
@@ -1371,6 +1372,136 @@ async fn plan_modpack_update(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 执行整合包更新：先备份再改，失败整批回滚。
+///
+/// `plan_id` 必须来自 `plan_modpack_update`；对不上说明实例变了，会要求重新预览。
+#[tauri::command]
+async fn apply_modpack_update(
+    app: AppHandle,
+    instance_id: String,
+    version_id: String,
+    plan_id: String,
+) -> Result<Task, String> {
+    if task::has_running_kind("modpack-update", Some(&instance_id), None) {
+        return Err("BUSY|这个实例已有整合包更新在进行".into());
+    }
+    if session::active(Some(&instance_id)).is_some() {
+        return Err("INSTANCE_BUSY|游戏正在运行，先退出游戏再更新整合包".into());
+    }
+    let game = game_root();
+    // 先同步算一次计划，把明显的错误挡在任务创建之前
+    let preview = pack_update::plan(&game, &instance_id, &version_id)?;
+    if preview.plan_id != plan_id {
+        return Err("PLAN_EXPIRED|更新计划已过期，请重新检查更新".into());
+    }
+    if let Some(first) = preview.issues.iter().find(|i| i.blocking) {
+        return Err(format!("{}|{}", first.code, first.message));
+    }
+
+    let t = task::create(
+        "modpack-update",
+        Some(instance_id.clone()),
+        None,
+        format!(
+            "更新整合包 {} → {}",
+            preview.from_version_name, preview.to_version_name
+        ),
+    );
+    let tid = t.task_id.clone();
+    task::set_retry_spec(
+        &tid,
+        serde_json::json!({
+            "kind": "modpack-update",
+            "instanceId": instance_id,
+            "versionId": version_id,
+            "planId": plan_id,
+        }),
+    );
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        let t2 = tid.clone();
+        let tc = tid.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let cancel = net::cancel_from(move || task::is_cancelled(&tc));
+            let running = session::active(Some(&instance_id)).is_some();
+            pack_apply::apply(
+                &game,
+                &instance_id,
+                &version_id,
+                &plan_id,
+                running,
+                &*cancel,
+                move |stage, label, done, total, bytes, total_bytes| {
+                    task::progress_bytes(
+                        &t2,
+                        stage,
+                        format!("{label}（{done}/{total}）"),
+                        done,
+                        total,
+                        bytes,
+                        total_bytes,
+                    );
+                },
+            )
+        }))
+        .unwrap_or_else(|_| Err("INTERNAL|后台任务异常|更新线程崩溃".to_string()));
+
+        match result {
+            Ok(out) => {
+                emit_instance_changed(&instance_id, "modpack-updated");
+                let _ = app2.emit(
+                    "astral://modpack-updated",
+                    serde_json::json!({
+                        "instanceId": out.instance_id,
+                        "batchId": out.batch_id,
+                        "fromVersionId": out.from_version_id,
+                        "toVersionId": out.to_version_id,
+                        "added": out.added,
+                        "changed": out.changed,
+                        "removed": out.removed,
+                    }),
+                );
+                task::finish(
+                    &tid,
+                    serde_json::json!({
+                        "kind": "modpack-update",
+                        "batchId": out.batch_id,
+                        "added": out.added,
+                        "changed": out.changed,
+                        "removed": out.removed,
+                        "bytes": out.bytes,
+                    }),
+                );
+            }
+            Err(e) => task::fail(&tid, e),
+        }
+    });
+    Ok(t)
+}
+
+/// 可回滚的整合包更新记录（最新的在前）
+#[tauri::command]
+fn pack_update_history(instance_id: String) -> Result<Vec<pack_apply::PackUpdateRecord>, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    Ok(pack_apply::history(&dir))
+}
+
+/// 回滚一次整合包更新
+#[tauri::command]
+fn rollback_modpack_update(instance_id: String, batch_id: String) -> Result<u32, String> {
+    if task::has_running(&instance_id) {
+        return Err("INSTANCE_BUSY|实例正在执行任务，不能回滚".into());
+    }
+    if session::active(Some(&instance_id)).is_some() {
+        return Err("INSTANCE_BUSY|游戏正在运行，先退出游戏再回滚".into());
+    }
+    let game = game_root();
+    let n = pack_apply::rollback(&game, &instance_id, &batch_id)?;
+    emit_instance_changed(&instance_id, "modpack-rolled-back");
+    Ok(n)
 }
 
 /// 导出回读校验：把导出的 .mrpack 重新解析一遍，确认 index 与 overrides 都能读
@@ -3635,6 +3766,9 @@ pub fn run() {
             modpack_installed_versions,
             check_modpack_update,
             plan_modpack_update,
+            apply_modpack_update,
+            pack_update_history,
+            rollback_modpack_update,
             verify_exported_modpack,
             check_mod_updates,
             start_mod_update,
@@ -5594,6 +5728,163 @@ pub fn selftest() -> i32 {
         );
 
         let _ = std::fs::remove_dir_all(&pu);
+    }
+
+    // 整合包更新执行：先备份再改，失败整批回滚
+    if let Ok(srv) = testsrv::TestServer::start() {
+        let base_url = srv.base();
+        let pa = std::env::temp_dir().join(format!("astral-pa-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&pa);
+        let _ = std::fs::create_dir_all(instance::instances_root(&pa));
+        let pa_meta = instance::InstanceMeta {
+            id: "pa_selftest".into(),
+            name: "执行测试".into(),
+            game_version: "1.20.1".into(),
+            loader_kind: Some("fabric".into()),
+            loader_version: Some("0.16.9".into()),
+            launch_version: None,
+            memory_mb: None,
+            jvm_args: vec![],
+            java_path: None,
+            cover: None,
+            created_at: time::now_iso(),
+        };
+        let pa_ok = instance::create(&pa, &pa_meta).is_ok();
+        let pa_dir = instance::instance_dir(&pa, "pa_selftest");
+
+        // 文件内容来自本地测试服务器，哈希能对上；旧版有 keep + gone，新版有 keep + fresh
+        let keep_url = srv.data_url(10, 1024, 0);
+        let gone_url = srv.data_url(20, 1024, 0);
+        let fresh_url = srv.data_url(40, 1024, 0);
+        let keep_sha = testsrv::expected_sha1(10);
+        let gone_sha = testsrv::expected_sha1(20);
+        let fresh_sha = testsrv::expected_sha1(40);
+        let pv1 = format!(
+            r#"{{"name":"Pack","dependencies":{{"minecraft":"1.20.1","fabric-loader":"0.16.9"}},"files":[
+                {{"path":"mods/keep.jar","downloads":["{keep_url}"],"fileSize":10,"hashes":{{"sha1":"{keep_sha}"}}}},
+                {{"path":"mods/gone.jar","downloads":["{gone_url}"],"fileSize":20,"hashes":{{"sha1":"{gone_sha}"}}}}]}}"#
+        );
+        let pv2 = format!(
+            r#"{{"name":"Pack","dependencies":{{"minecraft":"1.20.1","fabric-loader":"0.16.9"}},"files":[
+                {{"path":"mods/keep.jar","downloads":["{keep_url}"],"fileSize":10,"hashes":{{"sha1":"{keep_sha}"}}}},
+                {{"path":"mods/fresh.jar","downloads":["{fresh_url}"],"fileSize":40,"hashes":{{"sha1":"{fresh_sha}"}}}}]}}"#
+        );
+        let pa_made =
+            pack_update::write_test_pack(&pack_update::cache_path(&pa, "pack-v1.mrpack"), &pv1)
+                .is_ok()
+                && pack_update::write_test_pack(
+                    &pack_update::cache_path(&pa, "pack-v2.mrpack"),
+                    &pv2,
+                )
+                .is_ok();
+        // 先把旧版文件摆好：keep.jar 与 gone.jar
+        let _ = std::fs::create_dir_all(pa_dir.join("mods"));
+        let _ = std::fs::write(pa_dir.join("mods/keep.jar"), {
+            let mut v = Vec::new();
+            for i in 0..10u64 {
+                v.push(((i * 31 + 7) % 251) as u8);
+            }
+            v
+        });
+        let _ = std::fs::write(pa_dir.join("mods/gone.jar"), b"old-gone");
+        let pa_prov = pa_made
+            && modpack::write_provenance(
+                &pa_dir,
+                &modpack::PackProvenance {
+                    project_id: "testpack".into(),
+                    version_id: "ver_old".into(),
+                    version_name: "1.0.0".into(),
+                    source: "modrinth".into(),
+                    pack_name: "Pack".into(),
+                    installed_at: time::now_iso(),
+                },
+            )
+            .is_ok();
+
+        let plan = pack_update::plan_at(&base_url, &pa, "pa_selftest", "ver_new");
+        let plan_id = plan.as_ref().map(|p| p.plan_id.clone()).unwrap_or_default();
+
+        // 计划对不上时必须拒绝，不能用旧计划硬套
+        let stale_req = pack_apply::ApplyRequest {
+            base: &base_url,
+            instance_id: "pa_selftest",
+            version_id: "ver_new",
+            plan_id: "uplan_deadbeefdeadbeef",
+            running: false,
+        };
+        check!(
+            "pack apply rejects a stale plan",
+            pa_ok
+                && pa_prov
+                && pack_apply::apply_at(
+                    &stale_req,
+                    &pa,
+                    &*net::never_cancel(),
+                    |_, _, _, _, _, _| {},
+                )
+                .is_err()
+        );
+
+        let good_req = pack_apply::ApplyRequest {
+            base: &base_url,
+            instance_id: "pa_selftest",
+            version_id: "ver_new",
+            plan_id: &plan_id,
+            running: false,
+        };
+        let applied = pack_apply::apply_at(
+            &good_req,
+            &pa,
+            &*net::never_cancel(),
+            |_, _, _, _, _, _| {},
+        );
+        check!(
+            "pack apply downloads and removes files",
+            applied
+                .as_ref()
+                .map(|o| o.added == 1 && o.changed == 0 && o.removed == 1 && o.bytes == 40)
+                .unwrap_or(false)
+                && pa_dir.join("mods/fresh.jar").is_file()
+                && !pa_dir.join("mods/gone.jar").exists()
+                && pa_dir.join("mods/keep.jar").is_file()
+        );
+        check!(
+            "pack apply keeps a backup",
+            applied
+                .as_ref()
+                .map(|o| {
+                    let dir = std::path::PathBuf::from(&o.backup_dir);
+                    // 只有真要动的文件才备份：这里 gone.jar 会被删，所以必须留底；
+                    // keep.jar 两边一样，不该被备份（备份不是整目录复制）
+                    dir.join("files").join("mods").join("gone.jar").is_file()
+                        && !dir.join("files").join("mods").join("keep.jar").exists()
+                })
+                .unwrap_or(false)
+        );
+        check!(
+            "pack apply updates provenance",
+            modpack::read_provenance(&pa_dir)
+                .map(|p| p.version_id == "ver_new" && p.version_name == "2.0.0")
+                .unwrap_or(false)
+                && pack_apply::history(&pa_dir).len() == 1
+        );
+
+        let rolled = applied
+            .as_ref()
+            .map(|o| pack_apply::rollback(&pa, "pa_selftest", &o.batch_id))
+            .unwrap_or_else(|_| Ok(0));
+        check!(
+            "pack apply rollback restores files",
+            rolled.is_ok()
+                && pa_dir.join("mods/gone.jar").is_file()
+                && !pa_dir.join("mods/fresh.jar").exists()
+                && modpack::read_provenance(&pa_dir)
+                    .map(|p| p.version_id == "ver_old")
+                    .unwrap_or(false)
+                && pack_apply::history(&pa_dir).is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(&pa);
     }
 
     let st = stats::stats("7d", &|id| id.to_string());

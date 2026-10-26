@@ -253,6 +253,14 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// 一段文本的短指纹（SHA1 前 8 字节），用于把计划内容变成稳定 id
+pub fn short_hash(text: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(text.as_bytes());
+    hex(&h.finalize())[..16].to_string()
+}
+
 /// 文件的 SHA1（小写十六进制）
 pub fn sha1_file(path: &Path) -> Result<String, String> {
     use sha1::{Digest, Sha1};

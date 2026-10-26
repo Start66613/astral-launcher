@@ -12,7 +12,7 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-const API: &str = "https://api.modrinth.com/v2";
+pub const API: &str = "https://api.modrinth.com/v2";
 
 /// 整合包文件大小上限（正常 .mrpack 远小于此）
 pub const MAX_PACK: u64 = 512 * 1024 * 1024;
@@ -227,6 +227,15 @@ fn fetch_index(
     game: &Path,
     version_id: &str,
 ) -> Result<crate::modpack::ModpackIndex, String> {
+    Ok(resolve_pack(base, game, version_id)?.1)
+}
+
+/// 把 .mrpack 下到本地缓存，返回 (包路径, 解析出来的 index)
+fn resolve_pack(
+    base: &str,
+    game: &Path,
+    version_id: &str,
+) -> Result<(PathBuf, crate::modpack::ModpackIndex), String> {
     let cache = game.join(".astral").join("modpacks");
     std::fs::create_dir_all(&cache).map_err(|e| format!("PERMISSION|创建缓存目录失败|{e}"))?;
 
@@ -258,7 +267,24 @@ fn fetch_index(
     if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_PACK {
         return Err("INVALID_VALUE|整合包文件异常大，已拒绝".into());
     }
-    crate::modpack::read_index(&path)
+    let index = crate::modpack::read_index(&path)?;
+    Ok((path, index))
+}
+
+/// 供执行阶段用：拿到这个版本的 .mrpack 本地路径（必要时下载）
+#[doc(hidden)]
+pub fn pack_path_for(base: &str, game: &Path, version_id: &str) -> Result<PathBuf, String> {
+    Ok(resolve_pack(base, game, version_id)?.0)
+}
+
+/// 供执行阶段用：拿到这个版本解析后的 index
+#[doc(hidden)]
+pub fn fetch_index_at(
+    base: &str,
+    game: &Path,
+    version_id: &str,
+) -> Result<crate::modpack::ModpackIndex, String> {
+    fetch_index(base, game, version_id)
 }
 
 /// 新旧两个 index 的差异
@@ -414,8 +440,30 @@ pub fn plan_at(
     }
     let blocking = issues.iter().any(|i| i.blocking);
 
+    // plan_id 是计划内容的指纹：同一份计划重复预览得到同一个 id，
+    // 实例或整合包变了就变。执行阶段用它判断"玩家看的是不是同一份计划"。
+    let mut fp = String::new();
+    fp.push_str(instance_id);
+    fp.push('|');
+    fp.push_str(&prov.version_id);
+    fp.push('|');
+    fp.push_str(version_id);
+    for c in &d.added {
+        fp.push_str("|+");
+        fp.push_str(&c.path);
+    }
+    for c in &d.changed {
+        fp.push_str("|~");
+        fp.push_str(&c.path);
+    }
+    for c in &d.removed {
+        fp.push_str("|-");
+        fp.push_str(&c.path);
+    }
+    let plan_id = format!("uplan_{}", crate::net::short_hash(&fp));
+
     Ok(PackUpdatePlan {
-        plan_id: format!("uplan_{:x}", crate::time::now_nanos()),
+        plan_id,
         instance_id: instance_id.to_string(),
         pack_name: if prov.pack_name.is_empty() {
             meta.name.clone()

@@ -3153,3 +3153,75 @@ export interface JoinTarget {
   进服，个别服务端可能需要在多人游戏里手动确认一次。"
 - **不要**把 `args` 直接拿去自己拼命令行 —— 启动走 `start_launch_*` 命令，
   参数由后端统一处理。
+
+## 40. 整合包更新执行（V2.5 新增）
+
+E26 只解决了「有没有新版本、新版本会动哪些文件」，这一节补上「真去更新」。
+
+### 40.1 命令一览
+
+| 命令 | 参数 | 返回 | 说明 |
+| --- | --- | --- | --- |
+| `apply_modpack_update` | `instanceId`, `versionId`, `planId` | `Task` | 建一个 `modpack-update` 任务并在后台执行 |
+| `pack_update_history` | `instanceId` | `PackUpdateRecord[]` | 可回滚的更新记录，最新的在前 |
+| `rollback_modpack_update` | `instanceId`, `batchId` | `number` | 回滚一次更新，返回动过的文件数 |
+
+`apply_modpack_update` 与其它安装命令一致：**立刻返回 Task**，进度靠 `astral://task` 事件推。完成后额外发一个 `astral://modpack-updated`。
+
+### 40.2 类型
+
+```ts
+interface PackUpdateRecord {
+  batchId: string;
+  instanceId: string;
+  fromVersionId: string;
+  fromVersionName: string;
+  toVersionId: string;
+  toVersionName: string;
+  createdAt: string;        // ISO 时间
+  backedUp: string[];       // 备份下来的旧文件（相对实例目录）
+  added: string[];          // 本次新增（回滚时删掉）
+  removed: string[];        // 本次删除（回滚时从备份恢复）
+}
+```
+
+### 40.3 调用示例
+
+```ts
+// 1) 先预览（E26），拿到 planId
+const plan = await invoke<PackUpdatePlan>("plan_modpack_update", {
+  instanceId,
+  versionId: latestVersionId,
+});
+
+// 2) 玩家确认后执行
+const task = await invoke<Task>("apply_modpack_update", {
+  instanceId,
+  versionId: latestVersionId,
+  planId: plan.planId,
+});
+
+// 3) 想看能不能反悔
+const history = await invoke<PackUpdateRecord[]>("pack_update_history", { instanceId });
+await invoke<number>("rollback_modpack_update", {
+  instanceId,
+  batchId: history[0].batchId,
+});
+```
+
+### 40.4 行为约定
+
+- **计划指纹**：`planId` 是计划内容的哈希，不是随机数。执行前会重新算一遍计划，对不上直接 `PLAN_EXPIRED|更新计划已过期，请重新检查更新`，不会拿旧计划硬套到变了样的实例上。
+- **先备份再改**：备份目录是实例内的 `.astral-pack-update/<batchId>/`，只备份**真要动的文件**（新增、变更、删除的那几个），不是整目录复制。来源记录 `.astral-pack.json` 也留一份。
+- **失败整批回滚**：下载失败、解压失败、磁盘满、取消，都会把新增的删掉、备份的还原回去、来源记录还原。回滚干净时连备份目录一起删掉，不留垃圾。
+- **回滚记录留 5 份**（`MAX_HISTORY = 5`），更早的连目录一起清掉。
+- **不碰存档**：计划里固定 `keepsWorlds: true`、`touchesSaves: false`，执行的每一步只处理计划列出的 `mods/`、`config/` 等路径。
+- **运行中拒绝**：游戏在跑时 `INSTANCE_BUSY`，避免改到一半的文件被游戏读。
+- **本地导入的包查不了**（E26 已定），自然也没法更新。
+
+### 40.5 前端接入建议
+
+- 「有新版本」横幅上的按钮直接串 `plan_modpack_update` → 弹计划确认框 → `apply_modpack_update`。
+- 确认框里务必展示 `plan.added/removed/changed` 的数量与 `downloadBytes`，并提示「有 N 个配置文件会被覆盖」。
+- 任务进度用现成的任务列表组件（`stage` 是 `download` / `extract`，`label` 带当前文件路径）。
+- 更新完在「更新历史」里给一个「回滚」按钮，调 `rollback_modpack_update`。回滚是不可逆操作，需要二次确认。
