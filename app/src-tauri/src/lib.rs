@@ -33,6 +33,7 @@ mod search;
 mod server;
 mod servers;
 mod session;
+mod source_probe;
 mod stats;
 mod support;
 mod task;
@@ -2567,6 +2568,16 @@ fn net_scheduler_stats() -> serde_json::Value {
     net::scheduler_stats()
 }
 
+/// 给每个下载源测一下连接延迟，并建议用哪个。
+///
+/// 只做 TCP 连接，不下文件（详见 `source_probe` 模块注释）。
+#[tauri::command]
+async fn probe_sources() -> Result<source_probe::ProbeReport, String> {
+    tauri::async_runtime::spawn_blocking(source_probe::probe_all)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── B2 批量更新与回滚 ────────────────────────────────────────────
 
 /// 只读：算出这批更新到底要做什么，能更新哪些、哪些被挡住、为什么。
@@ -3108,6 +3119,7 @@ pub fn run() {
             list_saves,
             get_stats,
             net_scheduler_stats,
+            probe_sources,
             cache_stats,
             resolve_mod_dependencies,
             check_version_files,
@@ -7415,6 +7427,71 @@ Caused by: java.lang.IllegalStateException: bad state\n";
                     && s["retries"].is_number()
                     && s["hosts"].is_object()
             );
+
+            // 21b) 下载源测速：只测连接延迟，不真下文件
+            {
+                // 本地开一个端口当"通的源"，再开一个立刻释放的端口当"不通的源"
+                let live = std::net::TcpListener::bind("127.0.0.1:0").ok();
+                let live_port = live
+                    .as_ref()
+                    .and_then(|l| l.local_addr().ok())
+                    .map(|a| a.port());
+                let dead_port = {
+                    let l = std::net::TcpListener::bind("127.0.0.1:0").ok();
+                    l.and_then(|l| l.local_addr().ok()).map(|a| a.port())
+                };
+                if let (Some(lp), Some(dp)) = (live_port, dead_port) {
+                    let (ok_reachable, ok_dns, ok_conn, _) =
+                        source_probe::probe_addr("127.0.0.1", lp, 1000, 2);
+                    check!(
+                        "source probe reaches an open port",
+                        ok_reachable && ok_dns.is_some() && ok_conn.is_some()
+                    );
+                    let (bad_reachable, _, _, bad_err) =
+                        source_probe::probe_addr("127.0.0.1", dp, 400, 1);
+                    check!(
+                        "source probe reports a closed port",
+                        !bad_reachable && bad_err.is_some()
+                    );
+                } else {
+                    check!("source probe reaches an open port", false);
+                    check!("source probe reports a closed port", false);
+                }
+                // 建议逻辑：差得不多优先官方源，全不通给 null
+                let mk = |src: &str, up: bool, ms: Option<u64>| source_probe::SourceProbe {
+                    source: src.into(),
+                    label: src.into(),
+                    host: "example.com".into(),
+                    reachable: up,
+                    dns_ms: Some(1),
+                    connect_ms: ms,
+                    samples: 1,
+                    error: None,
+                };
+                let close = vec![
+                    mk("official", true, Some(100)),
+                    mk("bmclapi", true, Some(95)),
+                ];
+                let far = vec![
+                    mk("official", true, Some(400)),
+                    mk("bmclapi", true, Some(30)),
+                ];
+                let dead = vec![mk("official", false, None), mk("bmclapi", false, None)];
+                check!(
+                    "source probe suggests a source",
+                    source_probe::pick(&close).as_deref() == Some("official")
+                        && source_probe::pick(&far).as_deref() == Some("bmclapi")
+                        && source_probe::pick(&dead).is_none()
+                );
+                // 真跑一次完整探测（外网不通也得有结论，不能 panic）
+                let report = source_probe::probe_all();
+                check!(
+                    "source probe covers every source",
+                    report.sources.len() == source_probe::SOURCES.len()
+                        && report.sources.iter().all(|s| !s.label.is_empty())
+                        && !report.note.is_empty()
+                );
+            }
 
             // 27) 回收站：删除 → 列表 → 恢复（id 冲突改名）→ 永久删除
             {
