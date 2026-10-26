@@ -1159,3 +1159,91 @@ JSON 的 `parse_index` 不再对空 `files` 报错（它看不到 overrides）�
 2. `blocking` 为 true 时禁用"开始导出"，把 `issues` 逐条显示。
 3. `exists` 为 true 时让玩家改版本号，不要自动覆盖。
 4. 导出完成后再调 `verify_exported_modpack` 回读校验，把 `issues` 展示出来。
+
+---
+
+## 19. 存档管理：改名 / 复制 / 删除到回收站（V2.5 新增）
+
+以前只有"备份 / 恢复"，玩家想给存档改个名字、留一份副本、或者删掉一个玩腻
+的存档，都得自己去文件管理器里折腾。现在这四件事都能在启动器里做，而且
+**默认不丢东西**。
+
+### 19.1 命令一览
+
+| 命令 | 作用 | 会不会动文件 |
+|---|---|---|
+| `rename_world` | 改存档目录名 | 改（重命名） |
+| `duplicate_world` | 复制一份存档 | 新增一份副本 |
+| `delete_world` | 删除存档 | **只移到回收站** |
+| `list_deleted_worlds` | 列出回收站 | 只读 |
+| `restore_deleted_world` | 从回收站恢复 | 移回 saves |
+| `purge_deleted_world` | 永久删除 | 真删（需 `confirm`） |
+
+### 19.2 改名 / 复制
+
+```ts
+invoke<[string, string]>("rename_world", { instanceId, worldId, newName: "新名字" });
+// 返回 [新的 worldId, 新目录名]
+
+invoke<[string, string, number]>("duplicate_world", {
+  instanceId, worldId, newName: "副本"
+});
+// 返回 [新的 worldId, 新目录名, 复制了多少字节]
+```
+
+- 名字按 **Windows 规则**校验：不能有空/控制字符/`<>:"/\|?*`，不能以点或空格
+  结尾，不能用 `CON`、`NUL`、`COM1` 这类保留名。报 `INVALID_NAME|…`。
+- 目标同名已存在一律 `FILE_EXISTS|已经有一个叫「X」的存档了`，**不覆盖**。
+- 复制不跟随符号链接 / junction，上限 8 GB 与 20 万条；先复制到
+  `saves/.copy-<纳秒>`，成功再改名，失败不留半个存档。
+- 改名后 `worldId` 会变（它由目录名派生），前端要拿返回值刷新列表。
+
+### 19.3 删除 / 回收站 / 恢复
+
+```ts
+interface DeletedWorld {
+  trashName: string;   // 回收站内目录名，恢复与永久删除都用它
+  worldName: string;   // 原来的存档目录名
+  deletedAt: string;   // ISO8601
+  bytes: number;
+  fileCount: number;
+}
+
+const entry = await invoke<DeletedWorld>("delete_world", { instanceId, worldId });
+await invoke<DeletedWorld[]>("list_deleted_worlds", { instanceId });
+
+const [newWorldId, name, replaced] = await invoke<[string, string, string | null]>(
+  "restore_deleted_world",
+  { instanceId, trashName: entry.trashName, overwrite: false }
+);
+```
+
+要点：
+
+- 删除是 `std::fs::rename` 进 `<实例>/.astral-worlds/deleted/del_<纳秒>`，
+  **同一个盘上瞬间完成，不复制字节**。索引写在 `deleted.json`。
+- 索引写失败会把目录**搬回去**，绝不留下"文件在回收站、列表里没有"的孤儿。
+- 恢复时目标同名存在：
+  - `overwrite: false`（默认）→ `FILE_EXISTS|…先改名或选择覆盖`
+  - `overwrite: true` → 先把现有存档改名成 `<名字>-replaced-<纳秒>` 留底，
+    再把回收站那份搬回去。**留底不会自动删**，玩家自己决定要不要清。
+- 恢复失败（移动出错）会把留底的目录改回原名，不会两头空。
+- `purge_deleted_world` 是独立的危险命令：不传 `confirm: true` 直接
+  `UNSUPPORTED|永久删除存档需要明确确认`。返回删掉了多少字节。
+- 回收站**永不自动清空**，也不参与磁盘清理。
+
+### 19.4 什么时候会拒绝
+
+游戏正在运行（`session::active`）时，改名 / 复制 / 删除 / 恢复全部报
+`INSTANCE_BUSY|…先退出游戏…`。原因很实在：跑着的存档是写了一半的状态，
+这时候复制出来的东西没法自证一致，改名还会让游戏自己写丢文件。
+
+### 19.5 前端接入建议
+
+1. 存档卡片上给"改名 / 复制 / 删除"三个入口，删除后 toast 提示
+   "已移到回收站，可在存档页的回收站里恢复"。
+2. 回收站做成折叠区，显示 `worldName` + `deletedAt` + 大小，每条给
+   "恢复"和"永久删除"。
+3. 永久删除要二次确认弹窗，文案里写明"这一步不能撤销"。
+4. 覆盖恢复时先调 `restore_deleted_world` 拿 `FILE_EXISTS`，再弹
+   "已有同名存档，是否覆盖（会先留一份备份）"。
