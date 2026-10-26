@@ -3,6 +3,7 @@ mod cache;
 mod components;
 mod core;
 mod cover;
+mod crash;
 mod deps;
 mod error;
 mod export;
@@ -2203,6 +2204,16 @@ fn diagnose_instance(
         max_lines.unwrap_or(5000).min(20000),
     )
 }
+
+/// 崩溃报告结构化解析：按报告自身格式拆出时间/描述/异常/原因链/系统详情
+#[tauri::command]
+fn read_crash_report(
+    instance_id: String,
+    log_id: Option<String>,
+) -> Result<crash::CrashView, String> {
+    let inst = managed_instance(&instance_id)?;
+    crash::read(std::path::Path::new(&inst.dir), log_id.as_deref())
+}
 // ── 加载器 ──────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -3028,6 +3039,7 @@ pub fn run() {
             reorder_servers,
             refresh_servers,
             diagnose_instance,
+            read_crash_report,
             install_version,
             launch_version,
             download_to
@@ -4733,6 +4745,67 @@ pub fn selftest() -> i32 {
             && preview.text.contains("<ip>")
             && preview.text.contains("<redacted>")
     );
+
+    // 崩溃报告：按报告自己的格式拆，读不出来就说读不出来，不猜
+    {
+        let crash_dir = std::env::temp_dir().join(format!("astral-crash-{}", time::now_nanos()));
+        let reports = crash_dir.join("crash-reports");
+        let _ = std::fs::create_dir_all(&reports);
+        let sample = "---- Minecraft Crash Report ----\n\
+// Don't be sad, have a hug!\n\
+\n\
+Time: 2026-10-26 12:00:00\n\
+Description: Rendering overlay\n\
+\n\
+java.lang.NullPointerException: Cannot invoke \"String.length()\" because \"s\" is null\n\
+\tat net.minecraft.client.renderer.GameRenderer.render(GameRenderer.java:900)\n\
+\tat com.example.mymod.RenderHook.onRender(RenderHook.java:42)\n\
+\n\
+-- System Details --\n\
+\tMinecraft Version: 1.20.1\n\
+\tJava Version: 17.0.8, Microsoft\n\
+\n\
+Caused by: java.lang.IllegalStateException: bad state\n";
+        let _ = std::fs::write(reports.join("crash-2026-10-26_12.00.00-client.txt"), sample);
+
+        let view = crash::read(&crash_dir, None);
+        check!(
+            "crash report parsed",
+            view.as_ref()
+                .map(|v| v.report.is_crash_report
+                    && v.report.description.as_deref() == Some("Rendering overlay")
+                    && v.report.time.as_deref() == Some("2026-10-26 12:00:00"))
+                .unwrap_or(false)
+        );
+        check!(
+            "crash report carries system details",
+            view.as_ref()
+                .map(|v| v
+                    .report
+                    .system
+                    .get("Minecraft Version")
+                    .map(|s| s == "1.20.1")
+                    .unwrap_or(false)
+                    && v.report.cause_chain.len() == 1)
+                .unwrap_or(false)
+        );
+        check!(
+            "crash report marks inferred packages",
+            view.as_ref()
+                .map(|v| v.report.suspects_source == "none"
+                    && v.report
+                        .inferred_packages
+                        .iter()
+                        .any(|p| p == "com.example.mymod"))
+                .unwrap_or(false)
+        );
+        check!(
+            "crash report without any report is an error",
+            crash::read(&crash_dir.join("empty"), None).is_err()
+        );
+        let _ = std::fs::remove_dir_all(&crash_dir);
+    }
+
     // 实时跟随：只给完整行、按 offset 续读、日志被重写时自愈
     {
         let live_id = logs::list(&log_dir)
