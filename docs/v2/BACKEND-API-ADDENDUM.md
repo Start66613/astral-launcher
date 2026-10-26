@@ -3225,3 +3225,79 @@ await invoke<number>("rollback_modpack_update", {
 - 确认框里务必展示 `plan.added/removed/changed` 的数量与 `downloadBytes`，并提示「有 N 个配置文件会被覆盖」。
 - 任务进度用现成的任务列表组件（`stage` 是 `download` / `extract`，`label` 带当前文件路径）。
 - 更新完在「更新历史」里给一个「回滚」按钮，调 `rollback_modpack_update`。回滚是不可逆操作，需要二次确认。
+
+## 41. 日志搜索与级别筛选（V2.5 新增）
+
+日志窗口原来只能「读最后 N 行」，玩家要把整屏往下翻才能找到报错。这一节补上搜索。
+
+### 41.1 命令
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `search_log` | `instanceId`, `logId`, `query`, `level?`, `caseSensitive?`, `limit?` | `LogSearchResult` |
+
+`level` 传 `error` / `warn` / `info` / `debug` / `trace`（也接受 `warning`），空或不传表示不过滤。`limit` 默认 200，最大 2000。
+
+### 41.2 类型
+
+```ts
+interface LevelCounts {
+  error: number;
+  warn: number;
+  info: number;
+  debug: number;
+  trace: number;
+  other: number;   // 堆栈、原始输出这类没有级别的行
+}
+
+interface LogMatch {
+  lineNo: number;          // 从 1 开始
+  level: string | null;    // error | warn | info | debug | trace | null
+  text: string;
+}
+
+interface LogSearchResult {
+  id: string;
+  name: string;
+  query: string;
+  level: string | null;
+  caseSensitive: boolean;
+  totalMatches: number;    // 扫到的命中总数
+  returned: number;        // 实际返回条数
+  skipped: number;         // 因为 limit 没返回的旧条数
+  matches: LogMatch[];
+  levelCounts: LevelCounts;
+  scannedLines: number;
+  scannedBytes: number;
+  scannedTailOnly: boolean;
+  note: string | null;
+}
+```
+
+### 41.3 调用示例
+
+```ts
+// 搜索关键词
+const r = await invoke<LogSearchResult>("search_log", {
+  instanceId,
+  logId,
+  query: "fabric",
+});
+
+// 只看错误，带级别统计做筛选栏徽标
+const errs = await invoke<LogSearchResult>("search_log", {
+  instanceId,
+  logId,
+  query: "",
+  level: "error",
+});
+// errs.levelCounts.error / .warn / ... 可以直接显示在按钮上
+```
+
+### 41.4 行为约定
+
+- **级别识别**：只认行首 200 字符内的 `[...]` 标签，取斜杠后面那一段，所以 `[main/INFO]`、`[Render thread/ERROR]`、`[WARNING]` 都能认；`FATAL`/`SEVERE` 归到 error，`FINE` 归 debug，`FINEST` 归 trace。正文里出现的 `[FATAL]` 不会被误判。
+- **级别过滤不影响统计**：`levelCounts` 永远是整段扫描结果的统计，方便前端在过滤状态下仍能显示「共 3 个错误」。
+- **命中太多只返最近的**：`skipped` 是被丢掉的旧条数，`matches` 里是最后 `limit` 条。排查问题基本都在看最后发生了什么。
+- **超大日志只扫尾部**：超过 16 MB 只扫最后 16 MB，此时 `scannedTailOnly: true`、`note` 里会写明「行号从这一段开头算起」，不会假装是全文行号。`.gz` 归档日志照样能搜（解压上限 64 MB）。
+- **只读**：不写文件、不联网、不上传。

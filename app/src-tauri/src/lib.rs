@@ -21,6 +21,7 @@ mod ledger;
 mod live;
 mod loader;
 mod local_import;
+mod log_search;
 mod logs;
 mod migrate;
 mod modpack;
@@ -2252,6 +2253,30 @@ fn tail_log(
     live::tail(&dir, &id, offset.unwrap_or(0), max_bytes)
 }
 
+/// 在日志里搜关键词、按级别筛选，顺带统计各级别条数。
+///
+/// `level` 传 `error` / `warn` / `info` / `debug` / `trace`（空表示不过滤）；
+/// 命中太多时只返回最近的 `limit` 条，`skipped` 告诉前端漏了多少旧条。
+#[tauri::command]
+fn search_log(
+    instance_id: String,
+    log_id: String,
+    query: String,
+    level: Option<String>,
+    case_sensitive: Option<bool>,
+    limit: Option<u32>,
+) -> Result<log_search::LogSearchResult, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    log_search::search(
+        &dir,
+        &log_id,
+        &query,
+        level.as_deref(),
+        case_sensitive.unwrap_or(false),
+        limit,
+    )
+}
+
 /// 查询 Minecraft 服务器的在线状态（服务器列表协议）。
 ///
 /// 地址可以写成 `example.com` 或 `example.com:25566`。
@@ -3802,6 +3827,7 @@ pub fn run() {
             ai_analyze,
             ai_clear_cache,
             tail_log,
+            search_log,
             ping_server,
             list_servers,
             add_server,
@@ -5832,12 +5858,8 @@ pub fn selftest() -> i32 {
             plan_id: &plan_id,
             running: false,
         };
-        let applied = pack_apply::apply_at(
-            &good_req,
-            &pa,
-            &*net::never_cancel(),
-            |_, _, _, _, _, _| {},
-        );
+        let applied =
+            pack_apply::apply_at(&good_req, &pa, &*net::never_cancel(), |_, _, _, _, _, _| {});
         check!(
             "pack apply downloads and removes files",
             applied
@@ -6542,6 +6564,51 @@ Caused by: java.lang.IllegalStateException: bad state\n";
         check!(
             "live log holds back partial line",
             c5.text == "whole\n" && !c5.eof
+        );
+
+        // 日志搜索：关键词、级别过滤、各级别统计
+        let sample = "[10:00:01] [main/INFO]: Loading Minecraft 1.20.1\n\
+[10:00:02] [main/WARN]: Option not found\n\
+[10:00:03] [Render thread/ERROR]: Failed to load fabric api\n\
+[10:00:04] [Worker-1/ERROR]: Another fabric problem\n\
+[10:00:05] [main/INFO]: Done\n\
+java.lang.RuntimeException: boom\n";
+        let _ = std::fs::write(log_dir.join("logs/latest.log"), sample);
+        let sr = log_search::search(&log_dir, &live_id, "fabric", None, false, None);
+        check!(
+            "log search finds keywords",
+            sr.as_ref()
+                .map(|r| r.total_matches == 2
+                    && r.returned == 2
+                    && r.matches[0].line_no == 3
+                    && r.level_counts.error == 2
+                    && r.level_counts.warn == 1
+                    && r.level_counts.info == 2
+                    && r.level_counts.other == 1
+                    && !r.scanned_tail_only)
+                .unwrap_or(false)
+        );
+        let se = log_search::search(&log_dir, &live_id, "", Some("error"), false, None);
+        check!(
+            "log search filters by level",
+            se.as_ref()
+                .map(|r| r.returned == 2
+                    && r.matches
+                        .iter()
+                        .all(|m| m.level.as_deref() == Some("error")))
+                .unwrap_or(false)
+        );
+        let sc = log_search::search(&log_dir, &live_id, "FABRIC", None, true, None);
+        let sl = log_search::search(&log_dir, &live_id, "FABRIC", None, false, None);
+        check!(
+            "log search respects case",
+            sc.map(|r| r.total_matches == 0).unwrap_or(false)
+                && sl.map(|r| r.total_matches == 2).unwrap_or(false)
+        );
+        let sb = log_search::search(&log_dir, &live_id, "", Some("verbose"), false, None);
+        check!(
+            "log search rejects bad level",
+            sb.is_err() && log_search::search(&log_dir, "log_nope", "", None, false, None).is_err()
         );
     }
     let _ = std::fs::remove_dir_all(&log_dir);
