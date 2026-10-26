@@ -235,6 +235,11 @@ impl TestServer {
         self.base()
     }
 
+    /// 模拟 DeepSeek API 的基地址（AI 诊断测试用）
+    pub fn ai_base(&self) -> String {
+        self.base()
+    }
+
     pub fn flaky_url(&self, fails: u32, size: u64) -> String {
         format!("{}/flaky?fails={fails}&size={size}", self.base())
     }
@@ -365,6 +370,52 @@ fn handle(
              \"latest_version\":\"1.0.0\",\"date_modified\":\"2025-01-01T00:00:00Z\"}}],\
              \"total_hits\":1,\"offset\":0,\"limit\":20,\"index\":\"relevance\"}}"
         );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        served.fetch_add(body.len() as u64, Ordering::SeqCst);
+        stream.write_all(resp.as_bytes())?;
+        return Ok(());
+    }
+
+    // 模拟 DeepSeek `/chat/completions`：返回一份结构化诊断，带 usage
+    if path == "/chat/completions" {
+        // ?broken=1 时返回一段不是 JSON 的废话（验证不会被假成功骗）
+        if query_int(query, "broken", 0) == 1 {
+            let body = serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "抱歉，我看不出问题在哪。" }
+                }]
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            served.fetch_add(body.len() as u64, Ordering::SeqCst);
+            stream.write_all(resp.as_bytes())?;
+            return Ok(());
+        }
+        let analysis = "{\"summary\":\"日志里有 Fabric API 缺失的迹象\",\
+             \"confidence\":\"medium\",\"causes\":[{\"title\":\"缺少 Fabric API\",\
+             \"detail\":\"日志里出现 net.fabricmc.api 相关的 NoClassDefFoundError\",\
+             \"confidence\":\"high\"}],\"steps\":[{\"title\":\"装上 Fabric API\",\
+             \"detail\":\"在资源页搜索 Fabric API 并装到同一实例\"}],\"need_more\":false}";
+        let body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "model": "deepseek-chat",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": analysis },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290 }
+        })
+        .to_string();
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
              Connection: close\r\n\r\n{body}",

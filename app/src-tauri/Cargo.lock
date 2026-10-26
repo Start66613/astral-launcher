@@ -64,6 +64,8 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "portablemc",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha1 0.10.7",
@@ -71,7 +73,9 @@ dependencies = [
  "sysinfo",
  "tauri",
  "tauri-build",
+ "tokio",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

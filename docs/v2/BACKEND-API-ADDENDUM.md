@@ -2375,3 +2375,162 @@ for (const h of r.hints) showHint(h);
 - 分类用横向条形图，实例用可展开的列表
 - `safeToClean` 为 `false` 的分类，按钮换成「查看」，点了跳转到对应页面（比如实例列表）
 - `truncated` 为 `true` 时在页面底部加一行小字说明数字是下限
+
+---
+
+## 33. AI 崩溃诊断（BYOK，V2.5 新增）
+
+项目立项时的差异化功能：本地规则先跑一遍，剩下看不懂的再交给大模型。**密钥由玩家自己提供**，
+存在本机，不上传、不进前端。
+
+### 33.1 六个命令
+
+| 命令 | 作用 | 会不会花钱 |
+| --- | --- | --- |
+| `ai_key_status` | 查密钥状态（有没有配、末四位、模型名、加密方式） | 不会 |
+| `ai_set_key` | 存密钥（先校验格式，再用 Windows DPAPI 加密） | 不会 |
+| `ai_clear_key` | 删密钥，顺带清掉分析缓存 | 不会 |
+| `ai_preview` | 生成「将要发送的内容」预览 | 不会 |
+| `ai_analyze` | 真的发出去分析 | **会** |
+| `ai_clear_cache` | 清掉分析结果缓存，返回清掉几条 | 不会 |
+
+### 33.2 类型
+
+```ts
+interface KeyStatus {
+  configured: boolean;
+  /** 末四位，形如 "…6789"；没配时为 null */
+  hint: string | null;
+  /** 固定是 "deepseek-chat" */
+  model: string;
+  /** 界面上说明用，如 "Windows DPAPI（绑当前用户…）" */
+  storage: string;
+}
+
+interface AiPreview {
+  instanceId: string;
+  /** 参与分析的日志名 */
+  logs: string[];
+  /** 本地规则已经命中的结论（也会一起发给模型，减少幻觉） */
+  findings: string[];
+  /** 真正要发送的文本（已脱敏、已裁剪） */
+  prompt: string;
+  /** 发送的字符数 */
+  chars: number;
+  /** 是否因为太长被截断 */
+  truncated: boolean;
+  /** 脱敏了多少处 */
+  redactions: number;
+  /** 发送前必须让玩家知道的话 */
+  warnings: string[];
+  model: string;
+  /** 目标地址，写死在 Rust 里，前端传不了 */
+  endpoint: string;
+}
+
+interface AiCause {
+  title: string;
+  detail: string;
+  /** "high" | "medium" | "low" */
+  confidence: string;
+}
+
+interface AiStep {
+  title: string;
+  detail: string;
+}
+
+interface AiAnalysis {
+  summary: string;
+  confidence: string;
+  causes: AiCause[];
+  steps: AiStep[];
+  needMore: boolean;
+}
+
+interface AiResult {
+  analysis: AiAnalysis;
+  model: string;
+  /** "network" 这次真的请求了；"cache" 命中了上次的结果 */
+  source: "network" | "cache";
+  /** 本地规则命中了几条 */
+  ruleFindings: number;
+  promptChars: number;
+  truncated: boolean;
+  redactions: number;
+  /** 模型报的 token 用量，拿不到时为 null */
+  promptTokens: number | null;
+  completionTokens: number | null;
+  elapsedMs: number;
+  /** ISO 时间 */
+  at: string;
+}
+```
+
+### 33.3 调用示例
+
+```ts
+// 1) 进来先看有没有配
+const status = await invoke<KeyStatus>("ai_key_status");
+if (!status.configured) showSetupHint();
+
+// 2) 存密钥（只在设置页做）
+await invoke<KeyStatus>("ai_set_key", { key: "sk-xxxxxxxx" });
+
+// 3) 点「分析崩溃」→ 先出预览，让玩家看清楚要发什么
+const preview = await invoke<AiPreview>("ai_preview", {
+  instanceId,
+  logIds: [latestLogId],
+  maxLines: 300,
+});
+showPreviewDialog(preview);
+
+// 4) 玩家点「确认发送」才真的走网络
+const result = await invoke<AiResult>("ai_analyze", {
+  instanceId,
+  logIds: [latestLogId],
+  maxLines: 300,
+});
+renderAnalysis(result);
+```
+
+### 33.4 行为约定（前端必须知道的）
+
+- **密钥永远不进前端。** `ai_key_status` 只回末四位；`ai_preview` / `ai_analyze` 的返回值里
+  没有任何密钥字段。前端也不该把密钥存到 `localStorage`。
+- **DPAPI 绑当前 Windows 用户。** 换了用户或换了机器，旧密钥解不开——这时候
+  `ai_key_status.configured` 会是 `false`，界面应该提示重新填，而不是报错崩掉。
+- **先预览再发送。** 这是隐私底线：日志里可能有服务器地址、玩家名，玩家有权先看一眼。
+  界面上「发送」按钮不要做成默认高亮。
+- **没配 Key 时 `ai_analyze` 报 `AUTH_REQUIRED`。** 前端应该引导去设置页，不要显示
+  「分析中…」然后超时。
+- **`source === "cache"` 说明没花钱。** 同样的日志 + 同样的模型会命中上次结果（最多存 20 条）。
+  界面上可以标一句「上次的分析结果」。
+- **模型乱答时明确报错。** 返回不是 JSON、或者 JSON 里没有任何结论，都会报 `INTERNAL`。
+  不会编一个结论糊弄玩家。
+- **`redactions` / `truncated` 要显示出来。** 「已隐藏 3 处敏感信息」「日志太长，只发了最后
+  24000 字」这两句话能让玩家信任这个功能。
+- **`endpoint` 写死在 Rust 里**（`https://api.deepseek.com/chat/completions`），前端传不了，
+  也不该让玩家改——改了就等于把密钥发给别人。
+
+### 33.5 错误码
+
+| 场景 | 错误码 | 前端该做什么 |
+| --- | --- | --- |
+| 没配 Key | `AUTH_REQUIRED` | 引导到设置页填 Key |
+| Key 格式不对 | `INVALID_VALUE` | 就地提示，不要清空输入框 |
+| 网络不通 / 超时 | `NETWORK` | 提示稍后再试，日志内容还在 |
+| 401 | `NETWORK` | 「API Key 不对或已失效」，引导重填 |
+| 402 | `NETWORK` | 「DeepSeek 账户余额不足」 |
+| 429 | `NETWORK` | 「请求太频繁」，建议等一会儿 |
+| 5xx | `NETWORK` | 「DeepSeek 服务暂时不可用」 |
+| 模型乱答 | `INTERNAL` | 「这次没得到有效结论，可以再试一次」 |
+
+### 33.6 前端接入建议
+
+- `AiDrawer.tsx` 现在按钮是写死 `disabled` 的：把 `disabled` 改成 `!status.configured`，
+  文案从「分析服务尚未连接」改成「配置 DeepSeek API Key 后可分析」。
+- 「确认发送」对话框里把 `preview.prompt` 放进可滚动的 `<pre>`，`warnings` 用黄色条列在上面。
+- 分析结果按 `causes` / `steps` 分两块渲染，`confidence` 用颜色区分，但别把 `low` 画成红色
+  （那是「判断不了」，不是「确定有问题」）。
+- `elapsedMs` 超过 20 秒时加一句「模型正在思考…」，别让玩家以为卡死。

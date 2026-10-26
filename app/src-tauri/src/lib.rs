@@ -1,4 +1,5 @@
 mod account;
+mod ai;
 mod cache;
 mod components;
 mod core;
@@ -2055,6 +2056,68 @@ fn prepare_diagnosis(
     logs::prepare(&dir, &log_ids, max_lines.unwrap_or(300))
 }
 
+// ── AI 诊断（BYOK，DeepSeek） ───────────────────────────────────
+
+/// 密钥状态：只回「有没有配」和末四位，明文永远不出后端
+#[tauri::command]
+fn ai_key_status() -> ai::KeyStatus {
+    ai::status()
+}
+
+/// 存密钥。存之前校验格式，存的时候用 DPAPI 加密。
+#[tauri::command]
+fn ai_set_key(key: String) -> Result<ai::KeyStatus, String> {
+    ai::save_key(&key)
+}
+
+#[tauri::command]
+fn ai_clear_key() -> Result<ai::KeyStatus, String> {
+    ai::clear_key()
+}
+
+/// 生成要发送的内容预览。**不发请求**，玩家确认后才走 ai_analyze。
+#[tauri::command]
+fn ai_preview(
+    instance_id: String,
+    log_ids: Vec<String>,
+    max_lines: Option<u32>,
+) -> Result<ai::AiPreview, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    ai::preview(
+        &dir,
+        &instance_id,
+        &log_ids,
+        max_lines.unwrap_or(300).min(5000),
+    )
+}
+
+/// 真的发出去。没有 Key 时明确报 AUTH_REQUIRED，不假装分析过。
+#[tauri::command]
+async fn ai_analyze(
+    instance_id: String,
+    log_ids: Vec<String>,
+    max_lines: Option<u32>,
+) -> Result<ai::AiResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = instance_dir_of(&instance_id)?;
+        ai::analyze(
+            &dir,
+            &instance_id,
+            &log_ids,
+            max_lines.unwrap_or(300).min(5000),
+            None,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 清掉分析结果缓存，返回清掉几条
+#[tauri::command]
+fn ai_clear_cache() -> u64 {
+    ai::clear_cache()
+}
+
 // ── 安装计划 ────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -3379,6 +3442,12 @@ pub fn run() {
             list_logs,
             read_log,
             prepare_diagnosis,
+            ai_key_status,
+            ai_set_key,
+            ai_clear_key,
+            ai_preview,
+            ai_analyze,
+            ai_clear_cache,
             tail_log,
             ping_server,
             list_servers,
@@ -5333,6 +5402,128 @@ pub fn selftest() -> i32 {
             && preview.text.contains("<ip>")
             && preview.text.contains("<redacted>")
     );
+
+    // AI 诊断（BYOK）：密钥加密存本机、只发脱敏内容、没配 Key 不假装分析
+    {
+        let ai_dir = std::env::temp_dir().join(format!("astral-ai-{}", time::now_nanos()));
+        let _ = std::fs::create_dir_all(&ai_dir);
+        std::env::set_var("ASTRAL_AI_DIR", &ai_dir);
+
+        check!("ai starts unconfigured", !ai::status().configured);
+        check!(
+            "ai rejects bad keys",
+            ai::save_key("").is_err()
+                && ai::save_key("nope").is_err()
+                && ai::save_key("sk-abc def").is_err()
+        );
+
+        let real_key = "sk-selftest-0123456789abcdef0123456789";
+        let saved = ai::save_key(real_key).expect("save key");
+        check!(
+            "ai key saved with hint",
+            saved.configured && saved.hint.as_deref() == Some("…6789")
+        );
+        // DPAPI 加密过：磁盘上不能出现明文
+        let on_disk = std::fs::read(ai_dir.join("ai.key")).unwrap_or_default();
+        let plain_bytes = real_key.as_bytes();
+        check!(
+            "ai key is not plaintext on disk",
+            !on_disk.is_empty() && !on_disk.windows(plain_bytes.len()).any(|w| w == plain_bytes)
+        );
+        check!(
+            "ai key reads back",
+            ai::load_key().as_deref() == Some(real_key)
+        );
+
+        // 预览只读、脱敏、不发请求
+        let listed = logs::list(&log_dir);
+        let log_ids: Vec<String> = listed.iter().map(|l| l.id.clone()).collect();
+        let pv = ai::preview(&log_dir, "selftest", &log_ids, 50).expect("ai preview");
+        check!(
+            "ai preview is redacted",
+            pv.prompt.contains("<email>")
+                && pv.prompt.contains("<redacted>")
+                && !pv.prompt.contains("steve@example.com")
+                && pv.endpoint.starts_with("https://")
+        );
+
+        // 没 Key 时必须明确报 AUTH_REQUIRED，不能假装分析过
+        let no_key = ai::analyze_with_key(&log_dir, "selftest", &log_ids, 50, None, Some(""));
+        check!(
+            "ai refuses without key",
+            no_key.map(|_| false).unwrap_or_else(
+                |e| e.starts_with("AUTH_REQUIRED|") || e.starts_with("INVALID_VALUE|")
+            )
+        );
+
+        // 打本地假服务：能解析出结构化结论
+        if let Ok(srv) = testsrv::TestServer::start() {
+            let _ = ai::clear_cache();
+            let got = ai::analyze_with_key(
+                &log_dir,
+                "selftest",
+                &log_ids,
+                50,
+                Some(&srv.ai_base()),
+                Some(real_key),
+            );
+            let ok = got
+                .as_ref()
+                .map(|r| {
+                    r.source == "network"
+                        && r.analysis.summary.contains("Fabric API")
+                        && r.analysis.causes.len() == 1
+                        && r.analysis.steps.len() == 1
+                        && r.prompt_tokens == Some(1234)
+                        && r.completion_tokens == Some(56)
+                })
+                .unwrap_or(false);
+            check!("ai analyzes a real response", ok);
+
+            // 同样的日志第二次应该直接命中缓存，不再发请求
+            let served_before = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+            let again = ai::analyze_with_key(
+                &log_dir,
+                "selftest",
+                &log_ids,
+                50,
+                Some(&srv.ai_base()),
+                Some(real_key),
+            );
+            let served_after = srv.served.load(std::sync::atomic::Ordering::SeqCst);
+            check!(
+                "ai reuses cached analysis",
+                again.map(|r| r.source == "cache").unwrap_or(false)
+                    && served_before == served_after
+            );
+
+            // 模型回一堆不是 JSON 的话，必须报错而不是编一个结论
+            let _ = ai::clear_cache();
+            let broken_url = format!("{}/chat/completions?broken=1", srv.ai_base());
+            let broken = ai::analyze_with_key(
+                &log_dir,
+                "selftest",
+                &log_ids,
+                50,
+                Some(&broken_url),
+                Some(real_key),
+            );
+            check!(
+                "ai rejects a non json answer",
+                broken
+                    .map(|_| false)
+                    .unwrap_or_else(|e| e.starts_with("INTERNAL|"))
+            );
+        }
+
+        let cleared = ai::clear_key().expect("clear key");
+        check!(
+            "ai clears key",
+            !cleared.configured && !ai_dir.join("ai.key").exists()
+        );
+        let _ = std::fs::remove_dir_all(&ai_dir);
+        std::env::remove_var("ASTRAL_AI_DIR");
+    }
 
     // 归档日志（.gz）：Minecraft 会把旧日志压成 .log.gz，以前整个跳过，
     // 玩家点开"历史日志"什么也看不到。现在能列出来也能读。
