@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 239 项全过，单元测试 166 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 243 项全过，单元测试 172 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（239 项）
+## 2. 自检覆盖（243 项）
 
 按前缀分组：
 
@@ -67,12 +67,13 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `live` | 5 | 只给完整行、无新内容不重复、追加增量、重写后 reset、半行留到下次 |
 | `server` | 6 | 本地假 MC 服务器跑真实握手、颜色代码剥离、favicon 保留、host:port 写法、离线不报错、非法地址才 Err |
 | `servers` | 8 | 增删改查、重复与非法地址、选择性更新、重排、批量刷新各自独立、lastSeen 只记成功、id 过滤、删除只删记录 |
+| `screenshots` | 4 | 列表带尺寸、data URL 可显示、非法名被拒、删除需确认 |
 | `installer` | 3 | Forge/NeoForge 下载地址 |
 | 其余 | 30+ | 时间、错误编解码、URL 白名单、路径越界、用户名规则、账户、组件目录、调度器、磁盘用量、导出回环、阶段标签、平台规则等 |
 
 ---
 
-## 3. 单元测试（172 个）
+## 3. 单元测试（178 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -87,6 +88,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `nbt` | 9 | 标量与数组往返、LevelInfo 解析、缺字段保持 null、截断数据被拒、荒谬长度被拒、非 compound 根被拒、未压缩文件可读 |
 | `worlds` | +4 | 详情读全、坏 level.dat 只丢信息、未知 id 报错、列表带版本 |
 | `save_manage` | 9 | 改名、重名拒绝、非法名、复制、删除进回收站、恢复、恢复冲突、覆盖留底、永久删除需确认、运行中拒绝 |
+| `screenshots` | 6 | base64 补齐、PNG 尺寸、只列图片、data URL、路径穿越与非图片被拒、删除需确认 |
 | `export` | +4 | 递归收集顺序稳定、缺目录为空、条数与字节上限、slug 化 |
 | `servers` | 9 | 增删改查、重复与非法地址、选择性更新、改回自己地址不算冲突、重排、lastSeen、坏文件读成空、名字截断 |
 | `net` | 5 | 白名单、非法 URL、公网 IP 判定、`.part` 路径、磁盘满判定 |

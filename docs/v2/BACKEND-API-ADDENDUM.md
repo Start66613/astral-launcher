@@ -1247,3 +1247,77 @@ const [newWorldId, name, replaced] = await invoke<[string, string, string | null
 3. 永久删除要二次确认弹窗，文案里写明"这一步不能撤销"。
 4. 覆盖恢复时先调 `restore_deleted_world` 拿 `FILE_EXISTS`，再弹
    "已有同名存档，是否覆盖（会先留一份备份）"。
+
+---
+
+## 20. 截图浏览（V2.5 新增）
+
+游戏截图以前在启动器里完全看不到，玩家只能自己去翻 `screenshots/`
+目录。现在有三件事：列出来（带尺寸）、读出来显示、删掉。
+
+### 20.1 命令
+
+| 命令 | 作用 |
+|---|---|
+| `list_screenshots` | 列出实例 `screenshots/` 下的图片（按修改时间倒序） |
+| `read_screenshot` | 读一张，返回可直接塞进 `<img src>` 的 data URL |
+| `delete_screenshot` | 删除一张（必须 `confirm: true`） |
+
+```ts
+interface Screenshot {
+  fileName: string;
+  path: string;          // 完整路径，给"在文件夹中显示"用
+  sizeBytes: number;
+  modifiedAt: string;    // ISO8601
+  width: number | null;  // 读不出尺寸时是 null
+  height: number | null;
+  note: string | null;   // 例如"不是 PNG，读不出尺寸"
+}
+
+interface ScreenshotData {
+  fileName: string;
+  mime: string;          // image/png | image/jpeg
+  sizeBytes: number;
+  dataUrl: string;       // data:image/png;base64,...
+}
+
+const shots = await invoke<Screenshot[]>("list_screenshots", { instanceId });
+const data = await invoke<ScreenshotData>("read_screenshot", {
+  instanceId, fileName: shots[0].fileName
+});
+```
+
+### 20.2 为什么用 data URL 而不是 asset 协议
+
+Tauri 的 `asset://` 需要在 `tauri.conf.json` 里静态声明允许访问的目录。
+但游戏目录是玩家可以随便改的配置项，静态 scope 只有两种选择：写死一个
+路径（玩家改了就失效），或者放得太宽（等于没限制）。走 IPC 一次读一张
+图片，配合 CSP 里已有的 `img-src data:` 就够用，也不用动安全配置。
+
+代价是图片要过一次 IPC 和 base64 编码（体积约 1.33 倍）。所以设了
+**单张 8 MB 上限**——MC 截图通常 1–4 MB，4K 也够。超了会报
+`INVALID_VALUE|图片太大（N MB），请用系统看图工具打开`，而不是硬塞。
+
+### 20.3 尺寸怎么来的
+
+直接读 PNG 文件头里的 IHDR 块（8 字节签名 + 4 字节长度 + `IHDR` + 宽高），
+**不解码像素**。列 200 张截图只读每张前 24 字节，不会因为解码卡住界面。
+
+不是 PNG 的文件（比如 `.jpg`）尺寸返回 `null`，`note` 里说明原因。文件头
+损坏的 PNG 也一样，只是少个尺寸，不影响它出现在列表里。
+
+### 20.4 安全约束
+
+- 只接受**纯文件名**：含 `/`、`\`、`:`、以 `.` 开头、`..`、超 200 字符
+  一律 `INVALID_NAME|…`。
+- 只认 `.png` / `.jpg` / `.jpeg`（大小写不敏感）。
+- 读取和删除都拒符号链接 / junction（`INVALID_PATH|…`）。
+- 删除必须 `confirm: true`，否则 `UNSUPPORTED|删除截图需要明确确认`。
+
+### 20.5 前端接入建议
+
+1. 截图墙用 `grid`，每格先显示占位，点击时再调 `read_screenshot` 拿大图，
+   不要一次读全部（IPC 传 base64 有成本）。
+2. 列表里已经有 `width`/`height`，可以按比例排瀑布流，不用等图片加载完。
+3. 删除做二次确认；删完重新拉一次 `list_screenshots`。
+4. "在文件夹中显示"直接用返回的 `path`，不用自己拼。
