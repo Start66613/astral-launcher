@@ -5,6 +5,7 @@ mod core;
 mod cover;
 mod crash;
 mod deps;
+mod disk_usage;
 mod error;
 mod export;
 mod game_options;
@@ -2662,6 +2663,33 @@ fn disk_usage() -> serde_json::Value {
     cache::disk_usage(std::path::Path::new(&cfg.game_dir))
 }
 
+/// 磁盘占用分析：钱花在哪个文件夹上了。
+///
+/// 比 `disk_usage` 细：按实例拆开，每个实例再按 mods/saves/资源包拆开，
+/// 还会列出最大的几个文件。**只读**，不删任何东西。
+#[tauri::command]
+async fn analyze_disk_usage() -> Result<disk_usage::DiskReport, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let cfg = core::load_config();
+        let game = PathBuf::from(&cfg.game_dir);
+        let list: Vec<(String, String, String, PathBuf)> = instance::discover(&game, &play_stats)
+            .into_iter()
+            .filter(|i| i.managed)
+            .map(|i| {
+                (
+                    i.id.clone(),
+                    i.name.clone(),
+                    i.game_version.clone(),
+                    PathBuf::from(&i.dir),
+                )
+            })
+            .collect();
+        disk_usage::report(&game, &list)
+    })
+    .await
+    .map_err(|e| format!("INTERNAL|统计任务异常|{e}"))
+}
+
 /// 下载调度器的实时状态：并发数、每个域名的占用、累计下载量。
 ///
 /// 前端可以轮询它显示"正在同时下载 N 个文件"，不需要自己维护计数。
@@ -3275,6 +3303,7 @@ pub fn run() {
             cache_clear,
             clean_partials,
             disk_usage,
+            analyze_disk_usage,
             list_mods,
             set_mod_enabled,
             delete_mod,
@@ -7861,6 +7890,80 @@ Caused by: java.lang.IllegalStateException: bad state\n";
                     check!("game servers broken file is reported", false);
                 }
                 let _ = std::fs::remove_dir_all(&sd);
+            }
+
+            // 20c) 磁盘占用分析：只读，按分类和实例拆开
+            {
+                let dg =
+                    std::env::temp_dir().join(format!("astral-disk-self-{}", time::now_nanos()));
+                let ok = std::fs::create_dir_all(&dg).is_ok();
+                if ok {
+                    let w = |rel: &str, n: usize| {
+                        let p = dg.join(rel);
+                        if let Some(parent) = p.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&p, vec![0u8; n]);
+                    };
+                    w("assets/objects/aa/x", 300);
+                    w("libraries/lib.jar", 100);
+                    w("cache/objects/bb/y", 500);
+                    w("instances/one/mods/a.jar", 700);
+                    w("instances/one/saves/w/level.dat", 40);
+                    w("instances/two/mods/b.jar", 60);
+
+                    let list = vec![
+                        (
+                            "one".to_string(),
+                            "第一个".to_string(),
+                            "1.20.1".to_string(),
+                            dg.join("instances/one"),
+                        ),
+                        (
+                            "two".to_string(),
+                            "第二个".to_string(),
+                            "1.21.1".to_string(),
+                            dg.join("instances/two"),
+                        ),
+                    ];
+                    let r = disk_usage::report(&dg, &list);
+                    let cat = |k: &str| r.categories.iter().find(|c| c.kind == k).cloned();
+                    check!(
+                        "disk report ranks categories",
+                        r.categories.len() == 8
+                            && cat("cache").map(|c| c.bytes) == Some(500)
+                            && cat("assets").map(|c| c.bytes) == Some(300)
+                            && r.categories[0].kind == "instances"
+                            && r.total_bytes >= 1700
+                    );
+                    check!(
+                        "disk report splits instances",
+                        r.instances.len() == 2
+                            && r.instances[0].id == "one"
+                            && r.instances[0].bytes == 740
+                            && r.instances[1].bytes == 60
+                            && r.instances[0].largest.first().map(|f| f.path.as_str())
+                                == Some("mods/a.jar")
+                    );
+                    check!(
+                        "disk report marks cleanable honestly",
+                        cat("cache").map(|c| c.safe_to_clean) == Some(true)
+                            && cat("instances").map(|c| c.safe_to_clean) == Some(false)
+                            && cat("assets").map(|c| c.safe_to_clean) == Some(false)
+                    );
+                    // 只读：扫完目录里文件一个不少
+                    let after = disk_usage::measure(&dg);
+                    check!(
+                        "disk report does not delete anything",
+                        after.0 >= 1700 && after.1 == 6
+                    );
+                } else {
+                    check!("disk report ranks categories", false);
+                    check!("disk report splits instances", false);
+                    check!("disk report marks cleanable honestly", false);
+                    check!("disk report does not delete anything", false);
+                }
+                let _ = std::fs::remove_dir_all(&dg);
             }
 
             // 21) 调度统计字段齐全，前端能直接用

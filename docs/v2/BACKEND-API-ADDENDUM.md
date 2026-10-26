@@ -2253,3 +2253,125 @@ if (r.skipped.length) showSkipped(r.skipped);
 - `note` 非空 → 黄色提示条显示那句话，列表为空
 - 列表按 `hidden` 分组，隐藏的默认不勾
 - 导入成功后刷新收藏列表（`list_servers`），并提示 `skipped` 里的内容
+
+## 32. 磁盘占用分析（V2.5 新增）
+
+一个整合包实例动辄几 GB，`assets` 又单独几 GB，缓存、备份、回收站里还各躺着一堆
+看不见的东西。玩家只会看到「C 盘红了」，不知道该删什么。
+
+`analyze_disk_usage` 把游戏目录按类量一遍，再按实例拆开，告诉界面这几个 GB 花在哪。
+**只读**，不删任何东西——真正的清理仍然走各自已有的命令，每个都有自己的确认要求。
+
+### 32.1 命令
+
+| 命令 | 参数 | 返回 |
+|---|---|---|
+| `analyze_disk_usage` | 无 | `DiskReport` |
+
+和旧的 `disk_usage` 的区别：旧命令只给几个顶层文件夹的总数（`folders` 是一个
+`Record<string, number>`）；这个会按实例拆开、列最大文件、给出可清理标记和提醒。
+两个都留着，旧的不动。
+
+### 32.2 类型
+
+```ts
+interface DirUsage {
+  /** 相对游戏目录的路径，"" 表示根 */
+  path: string;
+  /** 界面显示用的名字，比如「下载缓存」 */
+  label: string;
+  /** assets | libraries | versions | instances | cache | java | logs | meta
+   *  或实例内部的 mods | saves | config | resourcepacks | shaderpacks
+   *  | screenshots | logs | backups */
+  kind: string;
+  bytes: number;
+  files: number;
+  exists: boolean;
+  /** 数到上限了，bytes 是下限不是准确值 */
+  truncated: boolean;
+  /** 用对应命令清理不会丢玩家数据 */
+  safeToClean: boolean;
+  /** 一句话说明这是干什么的 */
+  note: string;
+}
+
+interface FileUsage {
+  /** 相对实例目录 */
+  path: string;
+  bytes: number;
+}
+
+interface InstanceUsage {
+  id: string;
+  name: string;
+  gameVersion: string;
+  bytes: number;
+  files: number;
+  /** 只列存在的子目录 */
+  parts: DirUsage[];
+  /** 最大的 5 个文件 */
+  largest: FileUsage[];
+}
+
+interface DiskReport {
+  gameDir: string;
+  totalBytes: number;
+  /** 按大小倒序 */
+  categories: DirUsage[];
+  /** 按大小倒序 */
+  instances: InstanceUsage[];
+  freeBytes: number | null;
+  totalDiskBytes: number | null;
+  /** 值得提醒的话，不是错误 */
+  hints: string[];
+  /** 数到上限了，报告不完整 */
+  truncated: boolean;
+}
+```
+
+### 32.3 调用示例
+
+```ts
+const r = await invoke<DiskReport>("analyze_disk_usage");
+
+// 顶部：总量与磁盘剩余
+showTotal(r.totalBytes, r.freeBytes, r.totalDiskBytes);
+
+// 分类条形图，safeToClean 的项才放「清理」按钮
+for (const c of r.categories) {
+  renderBar(c.label, c.bytes, c.safeToClean, c.note);
+}
+
+// 实例列表：点开看 parts 与 largest
+for (const i of r.instances) {
+  renderInstance(i.name, i.bytes, i.parts, i.largest);
+}
+
+// hints 用黄色提示条，别当错误弹窗
+for (const h of r.hints) showHint(h);
+```
+
+### 32.4 行为约定
+
+- **只读。** 扫完目录里一个文件都不会少。想清理就调 `cache_clear` /
+  `purge_trash` / `prune_mod_update_backups` / `remove_managed_java` 等各自的命令，
+  每个都有自己的确认要求。
+- **`safeToClean` 是诚实的。** `cache` / `meta` / `logs` / `jvm` / `screenshots` /
+  实例内的 `backups` 是 `true`；`assets` / `libraries` / `versions` / `instances` /
+  `saves` / `mods` / `config` 一律 `false`。宁可让界面少放一个按钮，也不能让玩家
+  一键把存档删了。
+- **只统计托管实例。** 兼容实例（`versions/<ver>/` 里现成的版本）不在这里算，
+  它们和共享的 `versions` 目录重叠，重复算会让总数虚高。
+- **符号链接与 Windows 重解析点不跟。** 否则可能绕圈或者跳到别的盘上。
+- **有上限。** 单个目录最多进 8 层、最多数 40 万个文件。到上限时 `truncated` 为
+  `true`，这时 `bytes` 是下限——界面上应该说「至少 X GB」，不要说成准确值。
+- **`hints` 不是每次都念。** 只在磁盘剩不到 2 GB、缓存超过 1 GB、某个实例超过 4 GB、
+  更新备份超过 512 MB 时才会出现。
+
+### 32.5 前端接入建议
+
+- 「存储管理」页面进来先调一次，别做成每次切页面都扫（大目录要几百毫秒）
+- 扫描期间显示「正在统计…」，用 skeleton 占位
+- 分类用横向条形图，实例用可展开的列表
+- `safeToClean` 为 `false` 的分类，按钮换成「查看」，点了跳转到对应页面（比如实例列表）
+- `truncated` 为 `true` 时在页面底部加一行小字说明数字是下限
