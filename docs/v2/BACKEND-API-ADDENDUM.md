@@ -3069,3 +3069,87 @@ running / tasks / username / files / java / memory / jvm / mods
 - 保存时如果收到 `INVALID_VALUE`，按 `|` 切开把第二段直接显示在对应输入框下方。
 - 可以在实例卡片上显示一个警告角标：调一次 `check_instance_jvm`，`!ok` 就标红。
 - **不要**在内存输入框里也允许写 `-Xmx`；两个入口会互相打架。
+
+---
+
+## 39. 一键进服：启动就直接进服务器（V2.5 新增）
+
+以前只能"启动游戏"，进服务器还得自己在多人游戏里点。玩家收藏了服务器，
+每次却要重新找一遍。现在可以从收藏列表直接点进去，也可以临时输个地址。
+
+### 39.1 命令
+
+| 命令 | 参数 | 返回 |
+|---|---|---|
+| `start_launch_server` | `{ instanceId, serverId }` | `Task` |
+| `start_launch_address` | `{ instanceId, address }` | `Task` |
+| `preview_server_join` | `{ instanceId, serverId?, address? }` | `JoinTarget` |
+
+`preview_server_join` 是**只读**的，用来在按钮上显示"将进入 mc.example.com"，
+以及让玩家在启动前确认参数对不对。`serverId` 和 `address` 传一个即可，
+都传时优先 `serverId`。
+
+### 39.2 类型
+
+```ts
+export interface JoinTarget {
+  /** 来自收藏时是服务器 id，临时地址是 null */
+  serverId: string | null;
+  /** 显示用的名字（收藏的名字，或地址本身） */
+  name: string;
+  host: string;
+  port: number;
+  /** 显示用地址，端口是 25565 时不带端口 */
+  address: string;
+  /** "quickPlay"（1.20+）或 "legacy"（1.19 及更早） */
+  mode: "quickPlay" | "legacy";
+  /** 实际追加到游戏命令行的参数 */
+  args: string[];
+}
+```
+
+### 39.3 两种模式
+
+| 游戏版本 | 追加的参数 | 说明 |
+|---|---|---|
+| 1.20 及以上 | `--quickPlayMultiplayer host:port` | 官方 quick play 参数，进游戏直接连 |
+| 1.19 及更早 | `--server host --port port` | 老参数，效果一样 |
+
+**版本号读不出来时走老参数**：老参数从 1.6 就有，覆盖面比新参数广，
+猜错时它是更安全的一边。`1.20.1-forge-47.2.0` 这种带后缀的版本号也能识别
+（只看前缀数字段）。
+
+### 39.4 地址校验
+
+| 情况 | 结果 |
+|---|---|
+| 空 / 全是空格 | `INVALID_VALUE|服务器地址不能为空` |
+| 超过 253 字符 | `INVALID_VALUE|服务器地址太长了` |
+| 含空格 / 换行 / 控制字符 | `INVALID_VALUE|服务器地址里不能有空格或换行` |
+| 含 `/` 或 `\` | `INVALID_VALUE|服务器地址里不能有斜杠` |
+| 端口 0 | `INVALID_VALUE|端口必须在 1-65535 之间` |
+
+地址解析复用 `server::split_address`，所以 `mc.example.com`、
+`mc.example.com:25566`、`[::1]:25565` 都能用。
+
+### 39.5 行为约定
+
+- **不修改任何文件**：进服参数只是启动时加在命令行后面，不写进实例配置，
+  也不会改游戏的 `servers.dat`。
+- 收藏列表里没有这个 id → `NOT_FOUND|收藏列表里没有这个服务器`。
+- 实例正在运行 / 有任务时和普通启动一样报 `INSTANCE_BUSY` / `BUSY`。
+- 任务标题会写成「启动 1.20.1 生存 并进入 mc.example.com」，玩家在任务面板
+  能看出这次是带地址启动的。
+- 进服参数在**加载器分支和原版分支都生效**（Fabric/Quilt/Forge/NeoForge 都一样）。
+
+### 39.6 前端接入建议
+
+- 服务器卡片上加一个"进入游戏"按钮，调 `start_launch_server`；实例没选时先让
+  玩家选实例（或直接用 `getActiveInstance`）。
+- 多人游戏页的"直接连接"输入框可以配 `start_launch_address`，玩家输一次地址
+  就能进，不用先收藏。
+- 按钮 hover 时可以调 `preview_server_join` 把 `address` 显示成 tooltip。
+- 老版本（`mode === "legacy"`）可以在界面上加一句说明："这个版本用老参数
+  进服，个别服务端可能需要在多人游戏里手动确认一次。"
+- **不要**把 `args` 直接拿去自己拼命令行 —— 启动走 `start_launch_*` 命令，
+  参数由后端统一处理。

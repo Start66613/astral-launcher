@@ -305,6 +305,37 @@ pub fn spawn_with(
     java_path: Option<&Path>,
     on: impl FnMut(Progress),
 ) -> Result<std::process::Child, String> {
+    spawn_with_join(
+        version,
+        loader,
+        main_dir,
+        mc_dir,
+        username,
+        memory_mb,
+        extra_args,
+        java_path,
+        &[],
+        on,
+    )
+}
+
+/// 带加载器 + 带"进服参数"启动。
+///
+/// `game_args` 追加在游戏自己那串参数后面，用来实现"启动就进服务器"
+/// （`--quickPlayMultiplayer` 或老的 `--server/--port`）。
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_with_join(
+    version: &str,
+    loader: Option<(&str, &str)>,
+    main_dir: &Path,
+    mc_dir: Option<&Path>,
+    username: &str,
+    memory_mb: Option<u32>,
+    extra_args: &[String],
+    java_path: Option<&Path>,
+    game_args: &[String],
+    on: impl FnMut(Progress),
+) -> Result<std::process::Child, String> {
     portablemc::mirror::set_mirror(source_is_mirror(&load_config().source));
 
     // 自定义 Java：显式指定后不再自动探测/下载 JVM
@@ -358,6 +389,9 @@ pub fn spawn_with(
                 .install(Fwd(on))
                 .map_err(|e| format!("INTERNAL|加载器启动失败|{e:?}"))?;
             let mut cmd = game.command();
+            if !game_args.is_empty() {
+                cmd.args(game_args);
+            }
             cmd.spawn()
                 .map_err(|e| format!("JAVA_MISSING|无法启动 Java|{e}"))
         }
@@ -380,6 +414,9 @@ pub fn spawn_with(
                 .install(Fwd(on))
                 .map_err(|e| format!("INTERNAL|启动失败|{e:?}"))?;
             let mut cmd = game.command();
+            if !game_args.is_empty() {
+                cmd.args(game_args);
+            }
             cmd.spawn()
                 .map_err(|e| format!("JAVA_MISSING|无法启动 Java|{e}"))
         }

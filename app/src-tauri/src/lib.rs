@@ -32,6 +32,7 @@ mod pack_update;
 mod packs;
 mod plan;
 mod preflight;
+mod quick_join;
 mod recycle;
 mod resources;
 mod save_manage;
@@ -508,6 +509,68 @@ fn run_install(tid: &str, game_version: String) {
 
 #[tauri::command]
 async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, String> {
+    launch_impl(app, instance_id, None)
+}
+
+/// 启动游戏并直接进服务器（从收藏列表里选一条）。
+#[tauri::command]
+async fn start_launch_server(
+    app: AppHandle,
+    instance_id: String,
+    server_id: String,
+) -> Result<Task, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let entry = servers::list(&game)
+        .into_iter()
+        .find(|s| s.id == server_id)
+        .ok_or_else(|| "NOT_FOUND|收藏列表里没有这个服务器".to_string())?;
+    let target = quick_join::target_from_entry(&inst.game_version, &entry)?;
+    launch_impl(app, instance_id, Some((target.args, target.address)))
+}
+
+/// 启动游戏并直接进服务器（临时输一个地址，不要求先收藏）。
+#[tauri::command]
+async fn start_launch_address(
+    app: AppHandle,
+    instance_id: String,
+    address: String,
+) -> Result<Task, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let target = quick_join::target_from_address(&inst.game_version, &address, None)?;
+    launch_impl(app, instance_id, Some((target.args, target.address)))
+}
+
+/// 预览"这个实例点这条服务器会怎么启动"（只读，不启动）。
+#[tauri::command]
+fn preview_server_join(
+    instance_id: String,
+    server_id: Option<String>,
+    address: Option<String>,
+) -> Result<quick_join::JoinTarget, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    if let Some(id) = server_id.as_deref().filter(|s| !s.trim().is_empty()) {
+        let entry = servers::list(&game)
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "NOT_FOUND|收藏列表里没有这个服务器".to_string())?;
+        return quick_join::target_from_entry(&inst.game_version, &entry);
+    }
+    let raw = address.unwrap_or_default();
+    quick_join::target_from_address(&inst.game_version, &raw, None)
+}
+
+/// 启动的公共部分：`join = Some((游戏参数, 地址))` 时启动后直接进服。
+fn launch_impl(
+    app: AppHandle,
+    instance_id: String,
+    join: Option<(Vec<String>, String)>,
+) -> Result<Task, String> {
     let game = game_root();
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
@@ -521,11 +584,15 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
         return error::fail(error::BUSY, "该实例有进行中的任务");
     }
 
+    let label = match &join {
+        Some((_, addr)) => format!("启动 {} 并进入 {addr}", inst.name),
+        None => format!("启动 {}", inst.name),
+    };
     let t = task::create(
         "launch",
         Some(instance_id.clone()),
         Some(inst.game_version.clone()),
-        format!("启动 {}", inst.name),
+        label,
     );
     let tid = t.task_id.clone();
     let app2 = app.clone();
@@ -563,9 +630,10 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
             Some(p) => Some(std::path::PathBuf::from(p)),
             None => core::auto_java_for(&main_dir, &version),
         };
+        let game_args = join.map(|(a, _)| a).unwrap_or_default();
         let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             task::progress(&tid, "validate", "检查实例与版本文件", 0, 0);
-            core::spawn_with(
+            core::spawn_with_join(
                 &version,
                 loader.as_ref().map(|(k, v)| (k.as_str(), v.as_str())),
                 &main_dir,
@@ -574,6 +642,7 @@ async fn start_launch(app: AppHandle, instance_id: String) -> Result<Task, Strin
                 inst.memory_mb,
                 &inst.jvm_args,
                 auto_java.as_deref(),
+                &game_args,
                 move |p| {
                     task::progress_bytes(
                         &t2,
@@ -3480,6 +3549,9 @@ pub fn run() {
             retry_task,
             start_install,
             start_launch,
+            start_launch_server,
+            start_launch_address,
+            preview_server_join,
             start_create_instance,
             prepare_game_install,
             start_game_install,
@@ -8592,6 +8664,52 @@ Caused by: java.lang.IllegalStateException: bad state\n";
                     check!("game servers broken file is reported", false);
                 }
                 let _ = std::fs::remove_dir_all(&sd);
+            }
+
+            // 20b-2) 一键进服：算出该加哪些参数，地址要校验
+            {
+                let t = quick_join::target_from_address("1.21.4", "mc.example.com:25566", None)
+                    .expect("地址应该能解析");
+                check!(
+                    "join uses quick play on new versions",
+                    t.mode == "quickPlay"
+                        && t.args == vec!["--quickPlayMultiplayer", "mc.example.com:25566"]
+                        && t.port == 25566
+                );
+                let old = quick_join::target_from_address("1.19.4", "mc.example.com", None)
+                    .expect("地址应该能解析");
+                check!(
+                    "join falls back to server args on old versions",
+                    old.mode == "legacy"
+                        && old.args == vec!["--server", "mc.example.com", "--port", "25565"]
+                        && old.address == "mc.example.com"
+                );
+                check!(
+                    "join rejects junk addresses",
+                    quick_join::target_from_address("1.21", "", None).is_err()
+                        && quick_join::target_from_address("1.21", "a b", None).is_err()
+                        && quick_join::target_from_address("1.21", "a/b", None).is_err()
+                );
+                // 收藏里的条目走同一条路，名字与 id 要带上
+                let jg =
+                    std::env::temp_dir().join(format!("astral-join-self-{}", time::now_nanos()));
+                let ok = std::fs::create_dir_all(&jg).is_ok();
+                if ok {
+                    let entry = servers::add(&jg, "我的服", "play.example.com", Some(25570), "")
+                        .expect("加收藏应该成功");
+                    let target = quick_join::target_from_entry("1.21.4", &entry)
+                        .expect("收藏条目应该能算出进服参数");
+                    check!(
+                        "join builds from a saved server",
+                        target.server_id.as_deref() == Some(entry.id.as_str())
+                            && target.name == "我的服"
+                            && target.port == 25570
+                            && target.address == "play.example.com:25570"
+                    );
+                } else {
+                    check!("join builds from a saved server", false);
+                }
+                let _ = std::fs::remove_dir_all(&jg);
             }
 
             // 20c) 磁盘占用分析：只读，按分类和实例拆开
