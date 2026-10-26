@@ -1567,3 +1567,113 @@ const view = await invoke<CrashView>("read_crash_report", {
    一块并明确标"推断"。
 5. `text` 已经是脱敏后的原文，可以直接放进 `<pre>` 里滚动显示，
    不需要前端再脱敏一遍。
+
+---
+
+## 24. 诊断包（V2.5 新增）
+
+玩家说"我的游戏坏了"，最麻烦的从来不是修，而是先把材料收齐：日志在哪、崩溃报告是哪一份、
+Java 是不是对、Mod 有没有冲突、上次安装卡在哪一步。这些信息后端其实都已经能拿到，
+但散在 7 个命令里，前端要一个个点、一个个贴，玩家还得自己压缩成 zip。
+
+`support.rs` 把这件事做成一个动作：**打一个包**。
+
+### 24.1 两个命令
+
+| 命令 | 作用 | 会写盘吗 |
+|---|---|---|
+| `plan_diagnostic_bundle` | 预览：包里会有哪几节、各多少个文件、多大、有没有问题 | 不会 |
+| `export_diagnostic_bundle` | 真的生成 zip | 会 |
+
+```ts
+interface BundleSection {
+  key: string;          // report / instance / logs / crash / mods / java / tasks
+  label: string;        // 给玩家看的中文名
+  files: number;
+  bytes: number;
+  redactions: number;   // 这一节里脱敏了多少处
+  note?: string | null; // 为什么是空的、为什么被截断
+}
+
+interface BundlePlan {
+  instanceId: string;
+  instanceName: string;
+  fileName: string;
+  targetPath: string;
+  exists: boolean;         // 同名包已存在，导出会覆盖
+  sections: BundleSection[];
+  estimatedBytes: number;
+  freeBytes: number | null;
+  issues: string[];        // 人话提示
+  blocking: boolean;       // true = 导不出来
+  collectedAt: string;
+}
+
+interface BundleResult {
+  path: string;
+  bytes: number;
+  sections: BundleSection[];
+  redactions: number;
+  warnings: string[];
+}
+```
+
+```ts
+// 1) 先预览，把 sections 摊开给玩家看
+const plan = await invoke<BundlePlan>("plan_diagnostic_bundle", {
+  instanceId: id,
+});
+if (plan.blocking) {
+  showIssues(plan.issues);
+  return;
+}
+
+// 2) 确认后再导出（日志量大，这一步会慢几秒）
+const result = await invoke<BundleResult>("export_diagnostic_bundle", {
+  instanceId: id,
+  includeLogs: true,
+});
+showToast(`诊断包已生成：${result.path}（脱敏 ${result.redactions} 处）`);
+```
+
+`includeLogs = false` 时包里不带日志，`report` 里会**明说**"这次没有收集日志"，
+不会让拿到包的人以为日志是空的。
+
+### 24.2 包里有什么
+
+| 小节 | 内容 | 上限 |
+|---|---|---|
+| `report` | 一份中文说明：实例信息、体检结论、Java、Mod 扫描、崩溃诊断 | — |
+| `instance` | `instance.json`、`options.txt` 等实例元数据 | — |
+| `logs` | 最近 5 份日志，每份最多读 512 KB（留尾部） | 5 份 |
+| `crash` | 最近 2 份崩溃报告 | 2 份 |
+| `mods` | `mods/` 的文件清单（只有名字和大小，不含 jar 内容） | — |
+| `java` | Java 检查结果 | — |
+| `tasks` | 最近的任务记录 | — |
+| `bundle.json` | 机器可读的那一份，字段稳定，留给以后接 AI 分析 | — |
+
+整个包上限 **32 MB**，超了 `plan` 会标 `blocking`，`export` 直接报
+`INVALID_VALUE`。生成位置固定在 `<游戏目录>/diagnostics/astral-diag-<实例 id>-<时间>.zip`，
+先写 `.zip.part` 再改名，中途失败不会留半个包。
+
+### 24.3 脱敏在本地做完，不上传
+
+这一点必须说清楚，因为它关系到玩家敢不敢点这个按钮：
+
+- 日志、崩溃报告、`bundle.json` 里的文本，**全部**先过一遍 `logs::redact`
+  （token、邮箱、IPv4、`\Users\<名字>`），再补两处它管不到的：
+  游戏目录本身换成 `<game>`、玩家自己起的离线用户名换成 `<user>`。
+- 顺序是先换路径再脱敏。反过来的话，`redact` 会先把路径里的用户名换成 `<user>`，
+  整条路径就跟真实目录对不上了，后面再想替换就找不到 —— 这个顺序有专门的回归测试盯着。
+- 每一节的 `redactions` 是实数，前端可以直接显示"已在本机脱敏 N 处"。
+- 后端**没有**任何上传代码。包就在本地，给不给别人由玩家决定。
+
+### 24.4 前端接入建议
+
+1. 崩溃诊断页 / 设置页放一个"生成诊断包"按钮，先调 `plan` 弹预览，
+   把 `sections` 列成清单（哪几节、多少文件、多大），`blocking` 时只显示问题不让点确认。
+2. 导出后不要自己拼路径，直接用 `result.path`，并给一个"打开所在文件夹"的按钮。
+3. `warnings` 里有内容时原样显示 —— 比如"日志太大只留了尾部"，
+   这种信息比一个成功提示有用。
+4. 想要"发给别人"时，前端只负责把 `result.path` 交给系统（复制路径 / 打开资源管理器），
+   不要自己做上传。
