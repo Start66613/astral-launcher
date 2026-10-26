@@ -23,6 +23,7 @@ mod packs;
 mod plan;
 mod recycle;
 mod resources;
+mod save_manage;
 mod search;
 mod server;
 mod servers;
@@ -683,6 +684,93 @@ fn delete_world_backup(
         &backup_id,
         confirm,
     )
+}
+
+// ── 存档管理（重命名 / 复制 / 删除到回收站）────────────────────
+
+fn saves_and_dir(game: &std::path::Path, id: &str) -> Result<(PathBuf, PathBuf), String> {
+    let inst = instance::find(game, id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let inst_dir = instance::instance_dir(game, &inst.id);
+    let saves = PathBuf::from(&inst.dirs.saves);
+    Ok((inst_dir, saves))
+}
+
+fn world_running(id: &str) -> bool {
+    session::active(Some(id)).is_some()
+}
+
+/// 改存档名字（游戏运行中拒绝）
+#[tauri::command]
+fn rename_world(
+    instance_id: String,
+    world_id: String,
+    new_name: String,
+) -> Result<(String, String), String> {
+    let game = game_root();
+    let (_inst_dir, saves) = saves_and_dir(&game, &instance_id)?;
+    save_manage::rename(&saves, &world_id, &new_name, world_running(&instance_id))
+}
+
+/// 复制一份存档（游戏运行中拒绝）
+#[tauri::command]
+fn duplicate_world(
+    instance_id: String,
+    world_id: String,
+    new_name: String,
+) -> Result<(String, String, u64), String> {
+    let game = game_root();
+    let (_inst_dir, saves) = saves_and_dir(&game, &instance_id)?;
+    save_manage::duplicate(&saves, &world_id, &new_name, world_running(&instance_id))
+}
+
+/// 删除存档：只移到回收站，不永久删除
+#[tauri::command]
+fn delete_world(
+    instance_id: String,
+    world_id: String,
+) -> Result<save_manage::DeletedWorld, String> {
+    let game = game_root();
+    let (inst_dir, saves) = saves_and_dir(&game, &instance_id)?;
+    save_manage::delete(&inst_dir, &saves, &world_id, world_running(&instance_id))
+}
+
+/// 列出回收站里的存档（只读）
+#[tauri::command]
+fn list_deleted_worlds(instance_id: String) -> Result<Vec<save_manage::DeletedWorld>, String> {
+    let game = game_root();
+    let (inst_dir, _saves) = saves_and_dir(&game, &instance_id)?;
+    Ok(save_manage::list_deleted(&inst_dir))
+}
+
+/// 从回收站恢复存档；目标同名存在时必须显式 overwrite（会先留底）
+#[tauri::command]
+fn restore_deleted_world(
+    instance_id: String,
+    trash_name: String,
+    overwrite: Option<bool>,
+) -> Result<(String, String, Option<String>), String> {
+    let game = game_root();
+    let (inst_dir, saves) = saves_and_dir(&game, &instance_id)?;
+    save_manage::restore(
+        &inst_dir,
+        &saves,
+        &trash_name,
+        overwrite.unwrap_or(false),
+        world_running(&instance_id),
+    )
+}
+
+/// 永久删除回收站里的存档（不可恢复，必须确认）
+#[tauri::command]
+fn purge_deleted_world(
+    instance_id: String,
+    trash_name: String,
+    confirm: bool,
+) -> Result<u64, String> {
+    let game = game_root();
+    let (inst_dir, _saves) = saves_and_dir(&game, &instance_id)?;
+    save_manage::purge(&inst_dir, &trash_name, confirm)
 }
 
 // ── 版本复制 / 导入 / 迁移 ──────────────────────────────────────
@@ -2770,6 +2858,12 @@ pub fn run() {
             preview_world_restore,
             restore_world,
             delete_world_backup,
+            rename_world,
+            duplicate_world,
+            delete_world,
+            list_deleted_worlds,
+            restore_deleted_world,
+            purge_deleted_world,
             get_resource_project,
             list_resource_files,
             search_resources,
@@ -3817,6 +3911,140 @@ pub fn selftest() -> i32 {
                 .map(|e| e.starts_with("WORLD_NOT_FOUND|"))
                 .unwrap_or(false)
         );
+    }
+
+    // 存档管理：改名 / 复制 / 删除到回收站 / 恢复 / 永久删除。
+    // 全部在 `%TEMP%` 下的隔离目录里做，不碰真实存档。
+    {
+        let base = std::env::temp_dir().join(format!("astral-save-mgmt-{}", time::now_nanos()));
+        let inst = base.join("inst");
+        let saves = inst.join("saves");
+        let _ = std::fs::create_dir_all(&saves);
+        let mk = |name: &str, extra: &str| {
+            let d = saves.join(name);
+            let _ = std::fs::create_dir_all(d.join("region"));
+            let _ = std::fs::write(
+                d.join("level.dat"),
+                nbt::sample_level_dat("1.20.1", 0, false),
+            );
+            let _ = std::fs::write(d.join("region").join("r.0.0.mca"), extra);
+        };
+        mk("Alpha", "aaaa");
+        mk("Beta", "bbbb");
+
+        let alpha = worlds::world_id("Alpha");
+        let renamed = save_manage::rename(&saves, &alpha, "Alpha2", false);
+        check!(
+            "world rename moves the directory",
+            renamed
+                .as_ref()
+                .map(|(id, n)| *id == worlds::world_id("Alpha2") && n == "Alpha2")
+                == Ok(true)
+                && saves.join("Alpha2").join("level.dat").is_file()
+                && !saves.join("Alpha").exists()
+        );
+
+        let alpha2 = worlds::world_id("Alpha2");
+        check!(
+            "world rename refuses an existing name",
+            save_manage::rename(&saves, &alpha2, "Beta", false)
+                .err()
+                .map(|e| e.starts_with("FILE_EXISTS|"))
+                .unwrap_or(false)
+        );
+
+        let dup = save_manage::duplicate(&saves, &alpha2, "Alpha3", false);
+        check!(
+            "world duplicate copies region files",
+            dup.as_ref()
+                .map(|(_, n, b)| n == "Alpha3" && *b > 4)
+                .unwrap_or(false)
+                && saves
+                    .join("Alpha3")
+                    .join("region")
+                    .join("r.0.0.mca")
+                    .is_file()
+        );
+
+        let deleted = save_manage::delete(&inst, &saves, &alpha2, false);
+        check!(
+            "world delete moves to trash",
+            deleted
+                .as_ref()
+                .map(|d| d.world_name == "Alpha2" && d.file_count > 0 && d.bytes > 0)
+                .unwrap_or(false)
+                && !saves.join("Alpha2").exists()
+                && save_manage::list_deleted(&inst).len() == 1
+        );
+
+        let trash_name = deleted
+            .as_ref()
+            .map(|d| d.trash_name.clone())
+            .unwrap_or_default();
+        check!(
+            "world restore brings it back",
+            save_manage::restore(&inst, &saves, &trash_name, false, false)
+                .map(|(_, n, replaced)| n == "Alpha2" && replaced.is_none())
+                == Ok(true)
+                && saves.join("Alpha2").join("level.dat").is_file()
+                && save_manage::list_deleted(&inst).is_empty()
+        );
+
+        let again = save_manage::delete(&inst, &saves, &alpha2, false);
+        let name2 = again
+            .as_ref()
+            .map(|d| d.trash_name.clone())
+            .unwrap_or_default();
+        mk("Alpha2", "cccc");
+        check!(
+            "world restore refuses to overwrite",
+            save_manage::restore(&inst, &saves, &name2, false, false)
+                .err()
+                .map(|e| e.starts_with("FILE_EXISTS|"))
+                .unwrap_or(false)
+                && saves
+                    .join("Alpha2")
+                    .join("region")
+                    .join("r.0.0.mca")
+                    .is_file()
+        );
+        let over = save_manage::restore(&inst, &saves, &name2, true, false);
+        let kept = over.as_ref().ok().and_then(|(_, _, r)| r.clone());
+        check!(
+            "world restore with overwrite keeps the old copy",
+            over.as_ref()
+                .map(|(_, n, r)| n == "Alpha2" && r.is_some())
+                .unwrap_or(false)
+                && saves
+                    .join(kept.unwrap_or_default())
+                    .join("region")
+                    .join("r.0.0.mca")
+                    .is_file()
+        );
+
+        let again2 = save_manage::delete(&inst, &saves, &worlds::world_id("Alpha3"), false);
+        let name3 = again2
+            .as_ref()
+            .map(|d| d.trash_name.clone())
+            .unwrap_or_default();
+        check!(
+            "world purge requires confirm",
+            save_manage::purge(&inst, &name3, false)
+                .err()
+                .map(|e| e.starts_with("UNSUPPORTED|"))
+                .unwrap_or(false)
+                && save_manage::list_deleted(&inst).len() == 1
+                && save_manage::purge(&inst, &name3, true).is_ok()
+        );
+
+        check!(
+            "world rename rejects bad names",
+            ["", "..", "a/b", "CON", "x."]
+                .iter()
+                .all(|n| save_manage::validate_name(n).is_err())
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     let st = stats::stats("7d", &|id| id.to_string());
