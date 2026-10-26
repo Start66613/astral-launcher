@@ -185,8 +185,6 @@ fn find_java_exe(dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn java_range_guard() {
         // 只验证边界判断，不触发网络

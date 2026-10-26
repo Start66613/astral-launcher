@@ -779,25 +779,35 @@ mod tests {
 
     #[test]
     fn rejects_two_versions_of_same_project() {
-        let mut f = Fake::new();
-        f.add(cand("root", "v1", vec![req_dep("lib")], "release"));
-        f.add(cand("lib", "v2", vec![], "release"));
-        f.add(cand("other", "v9", vec![], "release"));
-        // root 还要 other，other 要 lib 的另一个版本
-        let mut root = f.by_id.get("v1").unwrap().0.clone();
-        root.dependencies.push(req_dep("other"));
-        f.add(root);
-        let mut other = f.by_id.get("v9").unwrap().0.clone();
-        other.dependencies.push(Dep {
+        // lib 被两条路径要求了不同版本：root 直接要 lib（自动挑 v2），
+        // other 又要 lib 的 v2b。这种时候必须报冲突，不能悄悄装两个。
+        let pinned_lib = Dep {
             project_id: Some("lib".into()),
             version_id: Some("v2b".into()),
             kind: DepKind::Required,
-        });
-        f.add(other);
+        };
+        let mut f = Fake::new();
+        f.add(cand(
+            "root",
+            "v1",
+            vec![req_dep("lib"), req_dep("other")],
+            "release",
+        ));
+        f.add(cand("lib", "v2", vec![], "release"));
         f.add(cand("lib", "v2b", vec![], "release"));
+        f.add(cand("other", "v9", vec![pinned_lib], "release"));
 
         let r = resolve(&f, &request("root", "v1"), &Limits::default());
-        assert!(r.blocking(), "同项目两个版本必须报冲突");
+        assert!(r.blocking(), "同项目两个版本必须报冲突：{:?}", r.conflicts);
+        assert!(r
+            .conflicts
+            .iter()
+            .any(|c| c.code == "DEPENDENCY_CONFLICT" && c.project_id == "lib"));
+        // 冲突不能变成"两个版本都装上"
+        assert!(!r
+            .nodes
+            .iter()
+            .any(|n| n.project_id == "lib" && n.version_id == "v2b"));
     }
 
     #[test]

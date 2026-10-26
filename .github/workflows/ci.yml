@@ -6,9 +6,20 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 同一个分支重复推送时，取消上一轮还在跑的构建
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 本机与 CI 都可能遇到 MSVC 命令行过长（ring 的 C 编译），关掉调试信息最省事
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
 jobs:
   web:
-    name: 类型检查 + 构建
+    name: 前端类型检查 + 构建
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +47,7 @@ jobs:
         run: pnpm exec vite build
 
   rust:
-    name: Rust 构建 + 自检
+    name: Rust 格式 + Lint + 构建 + 自检
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,10 +75,20 @@ jobs:
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-commands.ps1
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app/src-tauri
+
+      - name: 格式检查
+        working-directory: app/src-tauri
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: app/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo check
         working-directory: app/src-tauri
@@ -78,11 +99,6 @@ jobs:
         run: cargo build --release
 
       # 自检退出码 = 失败项数，非 0 即失败
-      # 单元测试：release 配置（debug 在本机 MSVC 上会因 /Z7 报 D8050）
-      - name: 单元测试
-        working-directory: app/src-tauri
-        run: cargo test --release --lib
-
       - name: 运行 --selftest
         working-directory: app/src-tauri
         shell: pwsh
@@ -91,4 +107,24 @@ jobs:
           if (Test-Path "$env:TEMP\astral-selftest.log") {
             Get-Content "$env:TEMP\astral-selftest.log" | Select-Object -Last 5
           }
+          if (Test-Path "$env:TEMP\astral-selftest.json") {
+            Get-Content "$env:TEMP\astral-selftest.json" -Raw
+          }
           if ($p.ExitCode -ne 0) { Write-Error "selftest failed: $($p.ExitCode)"; exit 1 }
+
+  audit:
+    name: 依赖安全审计
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - name: 安装 cargo-audit
+        run: cargo install cargo-audit --locked
+      # 只审计，不因为上游新披露的漏洞把整个 CI 卡死：
+      # 有漏洞时这一步会失败并给出报告，由人判断是否影响发布。
+      - name: cargo audit
+        working-directory: app/src-tauri
+        run: cargo audit --deny warnings

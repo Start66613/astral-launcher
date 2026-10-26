@@ -108,11 +108,18 @@ fn sanitize(name: &str) -> String {
             out.push('_');
         }
     }
-    let t = out.trim_matches('_').to_string();
+    // 下划线和点都不能留在首尾：`..`、`.hidden` 这类名字在 Windows 上
+    // 要么非法，要么会被当成相对路径，绝不能用来建目录
+    let t = out.trim_matches(|c| c == '_' || c == '.').to_string();
     if t.is_empty() {
+        return "world".to_string();
+    }
+    let capped: String = t.chars().take(48).collect();
+    let capped = capped.trim_matches(|c| c == '_' || c == '.').to_string();
+    if capped.is_empty() {
         "world".to_string()
     } else {
-        t.chars().take(48).collect()
+        capped
     }
 }
 
@@ -562,7 +569,11 @@ mod tests {
     #[test]
     fn sanitize_keeps_safe_chars() {
         assert_eq!(sanitize("我的世界 World_1"), "我的世界_World_1");
-        assert_eq!(sanitize("../../etc"), "_etc");
+        // 上跳与隐藏名一律被削掉，不能出现 `..` 这种目录名
+        assert_eq!(sanitize("../../etc"), "etc");
+        assert_eq!(sanitize(".."), "world");
+        assert_eq!(sanitize(".hidden"), "hidden");
+        assert_eq!(sanitize("..."), "world");
         assert_eq!(sanitize(""), "world");
     }
 
