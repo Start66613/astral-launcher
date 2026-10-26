@@ -1321,3 +1321,100 @@ Tauri 的 `asset://` 需要在 `tauri.conf.json` 里静态声明允许访问的�
 2. 列表里已经有 `width`/`height`，可以按比例排瀑布流，不用等图片加载完。
 3. 删除做二次确认；删完重新拉一次 `list_screenshots`。
 4. "在文件夹中显示"直接用返回的 `path`，不用自己拼。
+
+---
+
+## 21. 游戏设置：读与改 options.txt（V2.5 新增）
+
+Minecraft 把玩家的图形/声音/操作设置存在实例根目录的 `options.txt` 里，
+一行一个 `键:值`。以前启动器完全不管这个文件，玩家想调渲染距离、界面缩放、
+语言，都得先进游戏。
+
+现在有两条命令，但**只动白名单里的键**。
+
+### 21.1 命令
+
+```ts
+interface OptionChoice { value: string; label: string; }
+
+interface OptionField {
+  key: string;
+  label: string;              // 中文名，例如"渲染距离"
+  group: string;              // 画面 / 界面 / 性能 / 窗口 / 声音 / 操作
+  kind: "bool" | "int" | "float" | "enum";
+  min: number | null;         // int / float 有
+  max: number | null;
+  choices: OptionChoice[];    // enum 有，值是文件里存的原始字符串
+  value: string | null;       // 文件里的当前值；文件里没这个键就是 null
+  default: string;
+  note: string | null;        // 一句人话说明
+  invalid: boolean;           // 文件里有值但不合法（被改坏了）
+}
+
+interface GameOptions {
+  path: string;
+  exists: boolean;
+  modifiedAt: string | null;
+  fields: OptionField[];
+  otherKeys: number;          // 不在白名单的键有多少个（原样保留，不动）
+  rawLines: number;
+}
+
+interface OptionsWrite {
+  path: string;
+  changed: string[];          // 实际变了的键
+  backup: string | null;      // 备份文件路径；新建文件时没有
+  backupDir: string;
+}
+
+const opts = await invoke<GameOptions>("get_game_options", { instanceId });
+
+const result = await invoke<OptionsWrite>("set_game_options", {
+  instanceId,
+  changes: { renderDistance: "16", lang: "zh_cn" }
+});
+```
+
+### 21.2 为什么是白名单
+
+`options.txt` 里有几类键**不能随便写**：
+
+- `version` —— 游戏用它判断设置文件版本，写错了整份设置会被重置；
+- `key_key.*` / `key_key.*` —— 玩家一个一个按出来的按键绑定；
+- `lastServer`、`resourcePacks`、`incompatibleResourcePacks` —— 游戏自己维护。
+
+所以后端只认 30 个确定语义的键（渲染距离、模拟距离、画质预设、平滑光照、
+云、粒子、贴图模糊、实体阴影、视角摇晃、视场角、亮度、界面缩放、最大帧率、
+垂直同步、全屏、窗口宽高、失焦暂停、主音量/音乐/方块/敌对生物音量、
+鼠标灵敏度、反转 Y 轴、自动跳跃、潜行切换、语言、字幕、聊天可见性、
+简化调试信息、旁白）。改别的直接报
+`INVALID_VALUE|不支持修改「lastServer」，只允许改白名单里的设置项`。
+
+### 21.3 改文件时的三条保证
+
+1. **其余行原样保留**。注释、空行、读不懂的坏行、键的顺序，全部照原样写回，
+   只替换目标行。文件里没有的键追加到末尾。
+2. **先整批校验再动手**。传 `{renderDistance: "16", guiScale: "9"}` 会因为
+   `guiScale` 越界整批拒绝，不会出现"改了一半"。
+3. **改之前备份**。复制到 `<实例>/.astral-options/options-<时间戳>.txt`，
+   只保留最近 10 份。写文件先落 `options.txt.part` 再替换。
+
+### 21.4 什么时候会拒绝
+
+游戏正在运行时 `set_game_options` 报
+`INSTANCE_BUSY|游戏正在运行，先退出游戏再改设置（游戏退出时会覆盖这个文件）`。
+这不是保守 —— 游戏退出时会把内存里的设置整份写回 `options.txt`，运行期间
+改了等于白改，还会让玩家以为设置没生效。
+
+`get_game_options` 是纯读，运行中也能调。
+
+### 21.5 前端接入建议
+
+1. 按 `group` 分组渲染（画面/界面/性能/窗口/声音/操作），每组一个折叠面板。
+2. `kind` 决定控件：`bool` 用开关，`int`/`float` 用滑块（`min`/`max` 就是
+   合法范围），`enum` 用下拉（`choices` 里 `label` 是给人看的，`value` 是
+   要传回去的原始字符串）。
+3. `value === null` 表示文件里没这个键，控件显示 `default` 但**不要**在保存时
+   一并写回 —— 只提交用户真正改过的键。
+4. `invalid: true` 的项高亮提示"这个值游戏不认，要不要重置成默认"。
+5. 保存成功后提示"已备份到 <backupDir>"，给个"打开备份目录"的入口。
