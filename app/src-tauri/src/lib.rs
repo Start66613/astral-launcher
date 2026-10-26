@@ -33,6 +33,7 @@ mod screenshots;
 mod search;
 mod server;
 mod servers;
+mod servers_dat;
 mod session;
 mod source_probe;
 mod stats;
@@ -1995,6 +1996,53 @@ async fn refresh_servers(
         .map_err(|e| format!("INTERNAL|查询任务异常|{e}"))
 }
 
+/// 读游戏自己的 `servers.dat`，看看玩家已经在游戏里存了哪些服。
+///
+/// 只读，不改 `servers.dat` 一个字节。
+#[tauri::command]
+fn scan_game_servers(instance_id: String) -> Result<servers_dat::GameServerScan, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    Ok(servers_dat::scan(&dir))
+}
+
+/// 把游戏里存的服务器收进启动器的收藏列表。
+///
+/// `addresses` 是玩家勾选的那些 `ip`（`host` 或 `host:port`）。
+/// 已经在收藏里的跳过不算错，返回 `(收进来的, 跳过的)`。
+#[tauri::command]
+fn import_game_servers(
+    instance_id: String,
+    addresses: Vec<String>,
+) -> Result<servers::ImportResult, String> {
+    if addresses.is_empty() {
+        return Err("INVALID_VALUE|没有勾选任何服务器".to_string());
+    }
+    let dir = instance_dir_of(&instance_id)?;
+    let scan = servers_dat::scan(&dir);
+    let game = game_root();
+    let mut added = Vec::new();
+    let mut skipped = Vec::new();
+    for addr in addresses {
+        let Some(found) = scan.found.iter().find(|f| f.ip == addr) else {
+            skipped.push(format!("{addr}：游戏列表里没有这一条"));
+            continue;
+        };
+        let name = if found.name.trim().is_empty() {
+            found.ip.clone()
+        } else {
+            found.name.clone()
+        };
+        match servers::add(&game, &name, &found.ip, None, "") {
+            Ok(entry) => added.push(entry),
+            Err(e) => {
+                let err = task::decode(&e);
+                skipped.push(format!("{}：{}", found.ip, err.message));
+            }
+        }
+    }
+    Ok(servers::ImportResult { added, skipped })
+}
+
 /// 只生成脱敏预览；上传由用户在界面上确认后另行处理
 #[tauri::command]
 fn prepare_diagnosis(
@@ -3310,6 +3358,8 @@ pub fn run() {
             remove_server,
             reorder_servers,
             refresh_servers,
+            scan_game_servers,
+            import_game_servers,
             diagnose_instance,
             read_crash_report,
             plan_support_bundle,
@@ -7714,6 +7764,103 @@ Caused by: java.lang.IllegalStateException: bad state\n";
                     }
                 }
                 let _ = std::fs::remove_dir_all(&sg);
+            }
+
+            // 20b) 读游戏自己的 servers.dat：只读，收进来能进收藏列表
+            {
+                let sd =
+                    std::env::temp_dir().join(format!("astral-srvdat-self-{}", time::now_nanos()));
+                let ok = std::fs::create_dir_all(&sd).is_ok();
+                if ok {
+                    // 造一个游戏格式的 servers.dat（未压缩 NBT）
+                    let mut one = std::collections::BTreeMap::new();
+                    one.insert("name".to_string(), nbt::Value::String("主服".into()));
+                    one.insert(
+                        "ip".to_string(),
+                        nbt::Value::String("play.example.com".into()),
+                    );
+                    one.insert("hidden".to_string(), nbt::Value::Byte(0));
+                    let mut two = std::collections::BTreeMap::new();
+                    two.insert("name".to_string(), nbt::Value::String(String::new()));
+                    two.insert(
+                        "ip".to_string(),
+                        nbt::Value::String("mc.example.org:25566".into()),
+                    );
+                    two.insert("hidden".to_string(), nbt::Value::Byte(1));
+                    let mut root = std::collections::BTreeMap::new();
+                    root.insert(
+                        "servers".to_string(),
+                        nbt::Value::List(vec![
+                            nbt::Value::Compound(one),
+                            nbt::Value::Compound(two),
+                        ]),
+                    );
+                    let bytes = nbt::encode(&nbt::Value::Compound(root));
+                    let wrote = std::fs::write(sd.join(servers_dat::DAT_FILE), bytes).is_ok();
+
+                    let scan = servers_dat::scan(&sd);
+                    check!(
+                        "game servers.dat is read",
+                        wrote
+                            && scan.exists
+                            && scan.found.len() == 2
+                            && scan.found[0].name == "主服"
+                            && scan.found[0].ip == "play.example.com"
+                            && scan.found[1].name.is_empty()
+                            && scan.found[1].hidden
+                            && scan.note.is_none()
+                    );
+
+                    // 收进收藏列表：空的跳过、重复的报原因，不算整批失败
+                    let g = sd.join("game");
+                    let _ = std::fs::create_dir_all(&g);
+                    let mut added = 0usize;
+                    let mut skipped = 0usize;
+                    for f in &scan.found {
+                        let name = if f.name.trim().is_empty() {
+                            f.ip.clone()
+                        } else {
+                            f.name.clone()
+                        };
+                        match servers::add(&g, &name, &f.ip, None, "") {
+                            Ok(_) => added += 1,
+                            Err(_) => skipped += 1,
+                        }
+                    }
+                    let again = servers::add(&g, "", "play.example.com", None, "");
+                    check!(
+                        "game servers import into the list",
+                        added == 2
+                            && skipped == 0
+                            && servers::list(&g).len() == 2
+                            && again.is_err()
+                    );
+
+                    // 文件不在时安静地返回空，不报错
+                    let empty = std::env::temp_dir()
+                        .join(format!("astral-srvdat-none-{}", time::now_nanos()));
+                    let _ = std::fs::create_dir_all(&empty);
+                    let none = servers_dat::scan(&empty);
+                    check!(
+                        "game servers missing file is quiet",
+                        !none.exists && none.found.is_empty() && none.note.is_none()
+                    );
+
+                    // 坏文件只给一句说明，不让整页失败
+                    let _ = std::fs::write(sd.join(servers_dat::DAT_FILE), b"not nbt at all");
+                    let broken = servers_dat::scan(&sd);
+                    check!(
+                        "game servers broken file is reported",
+                        broken.exists && broken.found.is_empty() && broken.note.is_some()
+                    );
+                    let _ = std::fs::remove_dir_all(&empty);
+                } else {
+                    check!("game servers.dat is read", false);
+                    check!("game servers import into the list", false);
+                    check!("game servers missing file is quiet", false);
+                    check!("game servers broken file is reported", false);
+                }
+                let _ = std::fs::remove_dir_all(&sd);
             }
 
             // 21) 调度统计字段齐全，前端能直接用

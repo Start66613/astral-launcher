@@ -2158,3 +2158,98 @@ const r = await invoke<WorldImport>("import_world_zip", {
 - `problem` 非空时不要让玩家点确认，直接把那句话显示出来
 - 覆盖时用二次确认弹窗，并说明「旧存档会保留一份，不会删除」
 - 导入成功后刷新存档列表（`list_saves` / `get_world_info`）
+
+## 31. 游戏服务器列表导入（V2.5 新增）
+
+玩家多半已经在游戏里存了一堆服务器（多人游戏列表）。启动器这边另有一份收藏列表（§16），
+两边不通气的话，玩家得把地址一个个重新输一遍。这一节把它接上。
+
+**只读，不写 `servers.dat`。** 那是游戏自己的内部格式（未压缩 NBT），我们读出来给界面看，
+玩家点了才写进启动器自己的 `.astral-servers.json`。不碰游戏文件一个字节——写坏了游戏会丢列表。
+
+### 31.1 命令一览
+
+| 命令 | 参数 | 返回 |
+|---|---|---|
+| `scan_game_servers` | `instanceId` | `GameServerScan` |
+| `import_game_servers` | `instanceId`, `addresses: string[]` | `ImportResult` |
+
+### 31.2 类型
+
+```ts
+/** 游戏 `servers.dat` 里的一条 */
+interface FoundServer {
+  /** 游戏里显示的名字，可能是空的 */
+  name: string;
+  /** `host` 或 `host:port` */
+  ip: string;
+  /** 游戏里被「隐藏」的服务器 */
+  hidden: boolean;
+}
+
+interface GameServerScan {
+  /** `servers.dat` 的完整路径（界面上可以显示出来，让玩家知道读的是哪个文件） */
+  path: string;
+  /** 文件在不在 */
+  exists: boolean;
+  /** 读出来的服务器，按游戏里的顺序 */
+  found: FoundServer[];
+  /** 读不出来时说明原因；文件不存在不算错，这时是 null */
+  note: string | null;
+}
+
+interface ImportResult {
+  /** 这次新收进来的（就是 `ServerEntry`，见 §16） */
+  added: ServerEntry[];
+  /** 没进来的，每条一句话说明原因，比如「play.example.com：这个服务器已经在列表里了」 */
+  skipped: string[];
+}
+```
+
+### 31.3 调用示例
+
+```ts
+// 打开「从游戏里导入」弹窗时先扫一遍
+const scan = await invoke<GameServerScan>("scan_game_servers", {
+  instanceId: current.id,
+});
+if (!scan.exists) {
+  showEmpty("这个实例还没有在游戏里加过服务器");
+} else if (scan.note) {
+  showWarning(scan.note); // 读不出来，但页面不崩
+} else {
+  showList(scan.found); // 勾选框列表，hidden 的可以默认不勾
+}
+
+// 玩家勾完点「导入」
+const r = await invoke<ImportResult>("import_game_servers", {
+  instanceId: current.id,
+  addresses: checked.map((f) => f.ip),
+});
+toast(`收进 ${r.added.length} 个`);
+if (r.skipped.length) showSkipped(r.skipped);
+```
+
+### 31.4 行为约定
+
+- **按 `ip` 字段匹配。** 前端把玩家勾选的那些 `ip` 原样传回来，后端在扫描结果里找对应的那一条，
+  用它的名字（空的就用地址）建收藏项。
+- **重复不算失败。** 已经在收藏里的会进 `skipped` 并说明原因，同批其它照常收进来。
+  一批里有一条重复不该让整批失败。
+- **地址不存在也不算失败。** 如果传了一个扫描结果里没有的 `ip`（比如界面上的数据过期了），
+  同样进 `skipped`。
+- **`hidden` 只是给界面参考。** 游戏里被隐藏的服务器照样能导入，界面上可以默认不勾。
+- **没勾任何一条** 会报 `INVALID_VALUE|没有勾选任何服务器`，不是静默成功。
+
+### 31.5 为什么不做「双向同步」
+
+写 `servers.dat` 需要完整的 NBT 写入 + 游戏版本之间格式差异的兼容，一旦写坏玩家的多人列表就全丢了。
+收益（省一次点击）远小于风险。所以这里只读；玩家想同步回去，就在游戏里手动加一次。
+
+### 31.6 前端接入建议
+
+- 「服务器」页面顶部加一个「从游戏导入」按钮，点了先 `scan_game_servers`
+- `!exists` → 提示「这个实例还没在游戏里加过服务器」，按钮置灰
+- `note` 非空 → 黄色提示条显示那句话，列表为空
+- 列表按 `hidden` 分组，隐藏的默认不勾
+- 导入成功后刷新收藏列表（`list_servers`），并提示 `skipped` 里的内容

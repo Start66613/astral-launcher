@@ -44,6 +44,19 @@ struct ListFile {
     servers: Vec<ServerEntry>,
 }
 
+/// 从游戏自己的列表里收服务器的结果。
+///
+/// `skipped` 里每条都带原因（比如已经在收藏里了），不是错误 ——
+/// 一批里有一条重复不该让整批失败。
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    /// 这次新收进来的
+    pub added: Vec<ServerEntry>,
+    /// 没进来的，每条一句话说明
+    pub skipped: Vec<String>,
+}
+
 fn list_path(game: &Path) -> std::path::PathBuf {
     game.join(LIST_FILE)
 }
