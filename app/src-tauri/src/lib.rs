@@ -1,5 +1,6 @@
 mod account;
 mod ai;
+mod batch_toggle;
 mod cache;
 mod components;
 mod core;
@@ -3623,6 +3624,47 @@ fn delete_mod(instance_id: String, file_name: String) -> Result<(), String> {
     mods::delete(std::path::Path::new(&inst.dirs.mods), &file_name)
 }
 
+/// 批量操作要动的目录：`mod` 走实例的 `mods/`，其余复用 `pack_dir`。
+fn batch_dir(instance_id: &str, kind: &str, world_id: Option<&str>) -> Result<PathBuf, String> {
+    let kind = batch_toggle::normalize_kind(kind)?;
+    if kind == "mod" {
+        let inst = managed_instance(instance_id)?;
+        return Ok(PathBuf::from(inst.dirs.mods));
+    }
+    pack_dir(instance_id, kind, world_id)
+}
+
+/// 批量启用 / 禁用的预览：只读，说清楚要动几个文件、多大。
+///
+/// `kind` 支持 `mod` / `resourcepack` / `shaderpack` / `datapack`，
+/// 数据包需要 `worldId`（和单个列表一样）。
+#[tauri::command]
+fn plan_batch_toggle(
+    instance_id: String,
+    kind: String,
+    enabled: bool,
+    world_id: Option<String>,
+) -> Result<batch_toggle::BatchPlan, String> {
+    let dir = batch_dir(&instance_id, &kind, world_id.as_deref())?;
+    batch_toggle::plan(&dir, &kind, enabled)
+}
+
+/// 批量启用 / 禁用。游戏运行中拒绝；单个失败不影响其他，结果里逐条报。
+#[tauri::command]
+fn apply_batch_toggle(
+    instance_id: String,
+    kind: String,
+    enabled: bool,
+    world_id: Option<String>,
+    only: Option<Vec<String>>,
+) -> Result<batch_toggle::BatchResult, String> {
+    let dir = batch_dir(&instance_id, &kind, world_id.as_deref())?;
+    let running = session::active(Some(&instance_id)).is_some();
+    let out = batch_toggle::apply(&dir, &kind, enabled, only.as_deref(), running)?;
+    emit_instance_changed(&instance_id, "batch-toggle");
+    Ok(out)
+}
+
 // ── 资源包 / 光影包 / 数据包 ──────────────────────────────────────
 
 /// 数据包不在实例根目录，而是挂在某个存档自己的 `datapacks/` 里，
@@ -3951,6 +3993,8 @@ pub fn run() {
             read_mod_icon,
             set_mod_enabled,
             delete_mod,
+            plan_batch_toggle,
+            apply_batch_toggle,
             list_packs,
             set_pack_enabled,
             delete_pack,
@@ -4256,6 +4300,75 @@ pub fn selftest() -> i32 {
     );
     let _ = std::fs::remove_dir_all(&mod_dir);
 
+    // 批量启停：预览只读，执行逐个改名，运行中一律拒绝
+    {
+        let dir = std::env::temp_dir().join(format!("astral-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("one.jar"), b"1111");
+        let _ = std::fs::write(dir.join("two.jar"), b"22");
+        let _ = std::fs::write(dir.join("three.jar.disabled"), b"3");
+        let _ = std::fs::write(dir.join("notes.txt"), b"skip");
+
+        let batch_plan = batch_toggle::plan(&dir, "mod", false).expect("批量预览应该成功");
+        check!(
+            "batch plan counts changes",
+            batch_plan.changing == 2 && batch_plan.unchanged == 1 && batch_plan.bytes == 6
+        );
+        check!(
+            "batch plan is read only",
+            dir.join("one.jar").exists() && !dir.join("one.jar.disabled").exists()
+        );
+
+        let batch_out = batch_toggle::apply(&dir, "mod", false, None, false);
+        check!(
+            "batch apply renames all",
+            batch_out
+                .as_ref()
+                .map(|r| r.changed.len() == 2 && r.failed.is_empty())
+                .unwrap_or(false)
+        );
+        check!(
+            "batch apply leaves files on disk",
+            dir.join("one.jar.disabled").exists()
+                && dir.join("two.jar.disabled").exists()
+                && dir.join("three.jar.disabled").exists()
+                && dir.join("notes.txt").exists()
+        );
+
+        let back = batch_toggle::apply(&dir, "mod", true, None, false);
+        check!(
+            "batch apply can re-enable",
+            back.as_ref()
+                .map(|r| r.changed.len() == 3 && dir.join("one.jar").exists())
+                .unwrap_or(false)
+        );
+
+        let only = vec!["two.jar".to_string()];
+        let subset = batch_toggle::apply(&dir, "mod", false, Some(&only), false);
+        check!(
+            "batch apply honours the subset",
+            subset
+                .as_ref()
+                .map(|r| r.changed == vec!["two.jar.disabled".to_string()])
+                .unwrap_or(false)
+                && dir.join("one.jar").exists()
+        );
+        check!(
+            "batch apply refuses while running",
+            batch_toggle::apply(&dir, "mod", false, None, true)
+                .err()
+                .map(|e| e.starts_with("INSTANCE_BUSY|"))
+                .unwrap_or(false)
+        );
+        check!(
+            "batch rejects an unknown kind",
+            batch_toggle::plan(&dir, "taco", false).is_err()
+                && batch_toggle::apply(&dir, "taco", false, None, false).is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // 资源包 / 光影包：文件层管理（pack_format 解析、启停、删除确认）
     let pack_dir = std::env::temp_dir().join(format!("astral-packs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&pack_dir);
@@ -4369,8 +4482,8 @@ pub fn selftest() -> i32 {
         check!(
             "datapack list only sees zips",
             listed.len() == 1
-                && listed[0].file_name == "Vein Miner.zip"
-                && listed[0].pack_format == Some(15)
+                && listed.first().map(|f| f.file_name.as_str()) == Some("Vein Miner.zip")
+                && listed.first().and_then(|f| f.pack_format) == Some(15)
         );
 
         let toggled = resolved

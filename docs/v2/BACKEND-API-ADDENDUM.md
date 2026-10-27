@@ -3995,3 +3995,133 @@ const sorted = await invoke<Instance[]>("reorder_instances", { ids: list.map(i =
 - 拖拽结束后调 `reorder_instances`；拖拽过程中不要发请求。
 - 置顶的项建议加一条左侧强调色竖线，别只靠位置区分——位置会因为别人置顶而变。
 - 如果前端有自己的本地排序缓存，收到返回的列表后要**整表覆盖**，不要 merge。
+
+## 52. 批量启用 / 禁用（V2.5 新增）
+
+装了个 200 Mod 的整合包，怀疑是某个 Mod 引起崩溃，想「先把 Mod 全关了，
+再一半一半往回开」——现在只能在列表里一个一个点，点 200 次。
+
+这一组命令一次改完，但**只改文件名后缀**，和单个启停完全一样：
+不删文件、不改 `options.txt`、不动存档，玩家随时能在游戏里改回来。
+
+### 52.1 命令
+
+| 命令 | 参数 | 返回 | 说明 |
+|---|---|---|---|
+| `plan_batch_toggle` | `{ instanceId, kind, enabled, worldId? }` | `BatchPlan` | 只读预览：要动几个、多大、有没有动不了的 |
+| `apply_batch_toggle` | `{ instanceId, kind, enabled, worldId?, only? }` | `BatchResult` | 真去改名，单个失败不影响其他 |
+
+`kind` 支持 `"mod"` / `"resourcepack"` / `"shaderpack"` / `"datapack"`，
+也认 `"mods"` 这种复数写法。`datapack` 必须给 `worldId`（数据包挂在存档里）。
+
+### 52.2 类型
+
+```ts
+interface BatchItem {
+  /** 当前文件名（禁用态带 .disabled） */
+  fileName: string;
+  /** 改完之后的名字 */
+  targetName: string;
+  /** 现在是不是启用的 */
+  enabled: boolean;
+  /** 会不会真的动（已经是目标状态的不会动） */
+  willChange: boolean;
+  sizeBytes: number;
+}
+
+interface BatchPlan {
+  kind: string;
+  /** 目标状态：true = 全部启用，false = 全部禁用 */
+  enabled: boolean;
+  items: BatchItem[];
+  /** 真正会被改名的数量 */
+  changing: number;
+  /** 已经是目标状态、不用动的数量 */
+  unchanged: number;
+  /** 会被改名的文件总字节数 */
+  bytes: number;
+  /** 动不了的文件名（符号链接等） */
+  blocked: string[];
+  issues: string[];
+  /** 有没有阻塞问题（目前恒为 false，留作将来扩展） */
+  blocking: boolean;
+}
+
+interface BatchFailure {
+  fileName: string;
+  reason: string;
+}
+
+interface BatchResult {
+  kind: string;
+  enabled: boolean;
+  /** 成功改名的文件名（改完之后的） */
+  changed: string[];
+  unchanged: number;
+  /** 改失败的，带原因 */
+  failed: BatchFailure[];
+  bytes: number;
+}
+```
+
+### 52.3 调用示例
+
+```ts
+// 1. 先预览，把数量和占用显示在确认框里
+const plan = await invoke<BatchPlan>("plan_batch_toggle", {
+  instanceId: id,
+  kind: "mod",
+  enabled: false,
+});
+// plan.changing === 198, plan.unchanged === 2, plan.bytes === 1_284_331_520
+
+// 2. 玩家点了确认才动手
+if (plan.changing > 0) {
+  const result = await invoke<BatchResult>("apply_batch_toggle", {
+    instanceId: id,
+    kind: "mod",
+    enabled: false,
+  });
+  // result.changed.length === 198, result.failed.length === 0
+}
+
+// 3. 只对列表里筛选出来的那批动手
+const result = await invoke<BatchResult>("apply_batch_toggle", {
+  instanceId: id,
+  kind: "mod",
+  enabled: false,
+  only: filtered.map((m) => m.fileName),
+});
+```
+
+### 52.4 行为约定
+
+- **先预览再动手**：`plan_batch_toggle` 不写盘，前端拿它填确认框
+  （「将禁用 198 个 Mod，共 1.2 GB」）。
+- **单个失败不影响其他**：某个文件被游戏或杀毒软件占着，只有它进 `failed`，
+  其余照常改完。改完的 `changed` 已经是**新文件名**，可以直接替换列表。
+- **游戏运行中一律拒绝**（`INSTANCE_BUSY|`）：游戏退出时可能覆盖文件，
+  中途改名会让它读到半个状态。前端收到这个码应该提示"先退出游戏"，
+  而不是重试。
+- **符号链接跳过**：改名会把链接本身移走，玩家的真实文件就"丢"了。
+  跳过的会出现在 `blocked` 里，并在 `issues` 里说明。
+- **名字冲突自动让路**：目标名已被占用时依次加 `-1`、`-2`……
+  （和单文件启停同一套规则），所以 `targetName` 可能和"去掉 `.disabled`"不一样，
+  **必须用返回的 `targetName`**，不要自己拼。
+- **Mod 的账本跟着改名**：`changed` 里的文件会同步更新依赖账本，
+  否则依赖解析会以为这个 Mod 被删了。
+- **一次最多 2000 个**：超过直接报 `INVALID_VALUE`，提示分批处理。
+- **目录不存在不算错**：没装过这类文件时返回空计划 + 一条 `issues` 说明。
+- `enabled` 和当前状态一致的文件进 `unchanged`，不会重复改名。
+
+### 52.5 前端接入建议
+
+- 列表页顶部放两个按钮「全部启用」「全部禁用」，点击先调 `plan_batch_toggle`，
+  用返回的 `changing` / `bytes` 填确认框；`changing === 0` 时按钮置灰，
+  直接把 `issues[0]` 显示出来（"已经全部是禁用状态了"）。
+- 确认框里给出 `blocked.length`，说明"有 N 个文件是符号链接，会跳过"。
+- 执行完用 `BatchResult.changed` 里的新文件名就地更新列表项，
+  不用重新拉整个列表；`failed` 用 toast 逐条报，别只报个总数。
+- 大批量（> 100）建议在执行时禁用按钮并显示进度条——虽然是本地改名很快，
+  但磁盘慢的时候仍能感知到。
+- 游戏运行中这个按钮应该直接置灰，不要等报错。

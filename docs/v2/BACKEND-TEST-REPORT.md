@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 386 项全过，单元测试 382 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 394 项全过，单元测试 393 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（386 项）
+## 2. 自检覆盖（394 项）
 
 按前缀分组：
 
@@ -102,7 +102,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（388 个）
+## 3. 单元测试（399 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -155,10 +155,12 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `game_options` | +4 | 备份列表最新在前、恢复并留底、恢复拒运行中与非法名、删除要确认 |
 | `world_stats` | 7 | 新格式统计、老格式统计、进度排除配方、多玩家合并排序、空存档、坏文件、未知存档 |
 | `world_icon` | 4 | 读成 data URL、没图标返回 None、非 PNG 不给尺寸、超大文件被拒 |
+| `batch_toggle` | 8 | 预览计数与只读、全量改名、文件仍在盘上、可反向启用、子集限定、运行中拒绝、非法种类 |
 | `pack_update` | 5 | 差异分类（新增/删除/改动/未变）、同 sha1 不算改动、路径归类、长文本截断、没来源信息的实例被拒 |
 | `snapshot` | 11 | 实例不存在、运行中拒绝、创建与列表、跳过 logs/截图、还原回环、旧实例留底、实例被删后能重建、删除需确认、坏 id、Zip Slip、坏 zip 被拦 |
 | `jvm` | 12 | 正常内存、0/过小内存、超过物理内存、超过建议上限只提醒、系统内存未知时跳过比较、-Xmx/-Xms 写进参数被拒、换行与引号、条数与长度上限、javaagent 找不到只提醒、空白清理、validate 报第一个错、上限随机器 |
 | `game_args` | 10 | 正常参数、认证类参数（含 `=` 写法）、换行与超长、条数上限、`--server` 只提醒、清洗空白、`validate` 取第一个错误、存读、非法值不落盘、坏文件当没配过 |
+| `batch_toggle` | 11 | 拆名（jar/zip 与 .disabled）、扩展名过滤、预览计数与只读、全量改名、子集限定、运行中拒绝、目录不存在不算错、已是目标态不动、非法种类、复数种类归一 |
 | `error` | 3 | 编码带/不带 detail、detail 含分隔符 |
 | jdk | 4 | 主版本范围、正常解压落地、拒绝 `../` 穿越、拒绝符号链接条目 |
 | 其余 | 各 1–3 | 账户、组件、实例、Java、加载器、mods、计划、资源、时间、统计、世界、导出 |
