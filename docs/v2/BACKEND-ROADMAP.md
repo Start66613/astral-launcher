@@ -10,7 +10,7 @@
 
 A1–A5、B1–B4、C1–C4、D1–D2 已完成并有自动化测试；D3 的测试矩阵已随各功能逐项落地；
 D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发布检查清单与自动更新
-签名方案尚未完成。共 177 个 Tauri 命令、380 项自检、379 个 Rust 单元测试（373 通过 6 忽略）。
+签名方案尚未完成。共 179 个 Tauri 命令、386 项自检、388 个 Rust 单元测试（382 通过 6 忽略）。
 
 ---
 
@@ -126,11 +126,11 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 | E34 | 日志清理 | ✅ | `log_maintenance.rs` + `log_usage` / `plan_log_cleanup` / `prune_logs`；先预览再删，`latest.log` 永远保留，只认 `logs/` 与 `crash-reports/` 里的文本日志，删前要确认 |
 | E35 | 数据包管理 | ✅ | `packs::world_dir` + `list_packs`/`set_pack_enabled`/`delete_pack` 新增 `worldId`；数据包挂在存档自己的 `datapacks/` 里，只认 `.zip`，存档没了报 `TARGET_CHANGED` |
 | E36 | 游戏设置备份恢复 | ✅ | `game_options::list_backups`/`restore_backup`/`delete_backup` + 3 个命令；列出历史备份（时间、行数、渲染距离）、恢复前把当前文件也留底、同名备份不覆盖、删除要确认、运行中拒绝 |
-
 | E37 | 存档统计 | ✅ | `world_stats.rs` + `get_world_stats`；读游戏自己写的 `stats/` 与 `advancements/`，给出游戏时长、死亡、击杀、挖掘、距离、进度完成数；新旧两套键名都认，配方不算进度，坏文件只提示不拖垮页面 |
 | E38 | 存档图标与打开文件夹 | ✅ | `world_icon.rs` + `read_world_icon` / `open_world_folder`；游戏自己写的 `icon.png` 读成 data URL（尺寸从 PNG 头读，不解码像素），没有图标返回 null 不算错；顺手能在文件管理器里打开存档目录 |
 | E39 | 资源包图标 | ✅ | `packs::read_icon` + `read_pack_icon`；列表只给 `hasIcon` 布尔（打开 zip 顺手判断），真要看图再取 data URL；`pack.png`/`pack.jpg`/`logo.png` 都认，超过 512 KB 当没有，坏包不算错误 |
 | E40 | 实例的游戏参数 | ✅ | `game_args.rs` + `get_game_args` / `set_game_args`；窗口大小这类参数终于有地方填了，存在实例自己的 `game-args.json`；`--username`/`--accessToken`/`--gameDir` 等 12 个启动器负责的参数一律拒绝（写错了会顶掉登录信息）；一键进服的参数排在自己配的后面 |
+| E41 | 实例置顶与手动排序 | ✅ | `instance_order.rs` + `pin_instance` / `reorder_instances`；置顶的排最前（后钉的在前），手动拖过的顺序压过"上次玩过"，`Instance` 多一个 `pinned` 字段；排序偏好存 `<game>/.astral-instance-order.json`，删掉的实例自动忽略 |
 ---
 
 ## 2. 关键取舍（写给后来的人）
@@ -155,10 +155,10 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 ## 3. 测试策略
 
 - **单元测试**：纯逻辑（解析、分类、命名、路径校验、状态机）放 `#[cfg(test)]`。
-  当前 379 个，373 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
+  当前 388 个，382 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
 - **自检（`--selftest`）**：所有需要真实文件系统、真实 HTTP、真实进程的检查都放这里。
   用 `testsrv.rs` 起一个只监听 `127.0.0.1` 的临时服务器，能确定性制造 503、慢速、
-  重定向、Range 响应。当前 380 项。
+  重定向、Range 响应。当前 386 项。
 - **为什么不依赖 `cargo test` 跑全部**：本机 `cargo test` 的测试二进制在仓库目录里
   运行会因路径 ACL 报"拒绝访问"（见 `10-cargo-test-调查.md`），所以 `scripts/run-tests.ps1`
   会先把二进制复制到 `%TEMP%` 再跑。CI 上没有这个问题。

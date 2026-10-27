@@ -92,6 +92,8 @@ pub struct Instance {
     pub created_at: String,
     /// true = instances/ 下的托管实例；false = 从 versions/ 兼容出来的
     pub managed: bool,
+    /// 玩家把它钉在列表最上面了
+    pub pinned: bool,
 }
 
 /// 每个实例的统计（由 stats 模块提供，避免循环依赖）
@@ -379,6 +381,7 @@ fn build(game: &Path, meta: InstanceMeta, stats: PlayStats, managed: bool) -> In
         java_path: meta.java_path.clone(),
         created_at: meta.created_at.clone(),
         managed,
+        pinned: false,
     }
 }
 
@@ -438,7 +441,12 @@ pub fn discover(game: &Path, stats: &dyn Fn(&str) -> PlayStats) -> Vec<Instance>
             .cmp(&a.last_played)
             .then_with(|| a.name.cmp(&b.name))
     });
-    out
+    // 玩家自己钉的、自己拖过的顺序，压过"上次玩过"的默认排序
+    let order = crate::instance_order::load(game);
+    for item in out.iter_mut() {
+        item.pinned = order.pinned.iter().any(|id| id == &item.id);
+    }
+    crate::instance_order::apply(out, &order, |i| i.id.clone())
 }
 
 pub fn find(game: &Path, id: &str, stats: &dyn Fn(&str) -> PlayStats) -> Option<Instance> {

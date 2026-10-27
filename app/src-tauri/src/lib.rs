@@ -14,6 +14,7 @@ mod game_dir;
 mod game_options;
 mod game_stop;
 mod instance;
+mod instance_order;
 mod java;
 mod java_audit;
 mod jdk;
@@ -235,6 +236,29 @@ fn set_active_instance(id: Option<String>) -> Result<Config, String> {
     cfg.active_instance_id = id;
     core::save_config(&cfg)?;
     Ok(cfg)
+}
+
+/// 置顶 / 取消置顶一个实例。返回排好序的完整列表，前端直接替换即可。
+#[tauri::command]
+fn pin_instance(id: String, pinned: bool) -> Result<Vec<Instance>, String> {
+    let game = game_root();
+    if instance::find(&game, &id, &play_stats).is_none() {
+        return error::fail(error::INSTANCE_NOT_FOUND, "实例不存在");
+    }
+    instance_order::pin(&game, &id, pinned)?;
+    Ok(instance::discover(&game, &play_stats))
+}
+
+/// 记住玩家拖出来的顺序。`ids` 是列表当前的完整顺序。
+#[tauri::command]
+fn reorder_instances(ids: Vec<String>) -> Result<Vec<Instance>, String> {
+    let game = game_root();
+    let known: Vec<String> = instance::discover(&game, &play_stats)
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    instance_order::reorder(&game, &ids, &known)?;
+    Ok(instance::discover(&game, &play_stats))
 }
 
 #[derive(Deserialize, Default)]
@@ -3880,6 +3904,8 @@ pub fn run() {
             get_instance,
             get_active_instance,
             set_active_instance,
+            pin_instance,
+            reorder_instances,
             update_instance,
             delete_instance,
             list_trash,
@@ -4360,6 +4386,71 @@ pub fn selftest() -> i32 {
         );
 
         let _ = std::fs::remove_dir_all(&saves);
+    }
+
+    // 实例置顶与手动排序：玩家自己排的顺序要压过"上次玩过"
+    {
+        let game = std::env::temp_dir().join(format!("astral-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&game);
+        let _ = std::fs::create_dir_all(&game);
+        for (id, name) in [("a", "Alpha"), ("b", "Bravo"), ("c", "Charlie")] {
+            let meta = instance::InstanceMeta {
+                id: id.to_string(),
+                name: name.to_string(),
+                game_version: "1.20.1".into(),
+                loader_kind: None,
+                loader_version: None,
+                launch_version: None,
+                memory_mb: None,
+                jvm_args: vec![],
+                java_path: None,
+                cover: None,
+                created_at: String::new(),
+            };
+            let _ = instance::create(&game, &meta);
+        }
+        let order_of = |g: &std::path::Path| -> Vec<String> {
+            instance::discover(g, &|_| instance::PlayStats::default())
+                .into_iter()
+                .map(|i| i.id)
+                .collect()
+        };
+
+        let base = order_of(&game);
+        check!("order starts alphabetical", base == vec!["a", "b", "c"]);
+
+        let _ = instance_order::pin(&game, "c", true);
+        check!(
+            "order pin moves to front",
+            order_of(&game) == vec!["c", "a", "b"]
+        );
+        let pinned_flag = instance::discover(&game, &|_| instance::PlayStats::default())
+            .into_iter()
+            .find(|i| i.id == "c")
+            .map(|i| i.pinned)
+            .unwrap_or(false);
+        check!("order reports the pinned flag", pinned_flag);
+
+        let known: Vec<String> = base.clone();
+        let _ = instance_order::reorder(&game, &["b".into(), "a".into(), "c".into()], &known);
+        check!(
+            "order honours a manual drag",
+            order_of(&game) == vec!["c", "b", "a"]
+        );
+
+        let _ = instance_order::pin(&game, "c", false);
+        check!(
+            "order unpin falls back to manual",
+            order_of(&game) == vec!["b", "a", "c"]
+        );
+
+        let _ = instance_order::reorder(&game, &["ghost".into()], &known);
+        check!(
+            "order ignores unknown ids",
+            order_of(&game) == vec!["a", "b", "c"]
+        );
+
+        let _ = std::fs::remove_dir_all(&game);
     }
 
     // 资源包图标：列表只给布尔，真看图才读 data URL

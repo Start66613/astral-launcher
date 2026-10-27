@@ -3924,3 +3924,74 @@ try {
 - 设置页给一个多行输入框，一行一条；保存前先调 `set_game_args`，把 `issues` 里 `severity: "error"` 的标红。
 - 常用项可以做快捷按钮：`--width 1920 --height 1080`、`-Dfml.queryResult=confirm`（Forge 首次启动不弹确认框）。
 - `get_game_args` 返回的 `args` 已经清洗过，直接填回输入框即可。
+
+## 51. 实例置顶与手动排序（V2.5 新增）
+
+`list_instances` 原来的顺序是固定的：**上次玩过的排前面，同时间按名字**。
+装了十几个实例之后，常玩的那几个会被新装的挤下去，每次都要在列表里找。
+
+### 50.1 命令
+
+| 命令 | 参数 | 返回 | 说明 |
+|---|---|---|---|
+| `pin_instance` | `{ id, pinned }` | `Instance[]` | 置顶 / 取消置顶，返回排好序的完整列表 |
+| `reorder_instances` | `{ ids }` | `Instance[]` | 记住玩家拖出来的顺序，`ids` 是列表当前完整顺序 |
+
+两个命令都**返回完整列表**，前端直接替换即可，不用再调一次 `list_instances`。
+
+### 50.2 `Instance` 多了一个字段
+
+```ts
+interface Instance {
+  // ……原有字段不变
+  /** 玩家把它钉在列表最上面了 */
+  pinned: boolean;
+}
+```
+
+`pinned` 是只读的派生字段：它来自排序偏好文件，不是实例自己的配置，
+所以 `update_instance` 不接受它。
+
+### 50.3 排序规则
+
+优先级从高到低：
+
+1. **置顶**：按置顶的先后，**最近钉的排最前**（和微信置顶一个习惯）。
+2. **手动顺序**：`reorder_instances` 记下的顺序。
+3. **剩下的**：保持 `list_instances` 原本的顺序（上次玩过的在前）。
+
+置顶永远压过手动顺序——把某个实例钉上去，它就该在第一屏。
+
+### 50.4 调用示例
+
+```ts
+// 置顶
+const after = await invoke<Instance[]>("pin_instance", { id: "abc123", pinned: true });
+
+// 取消置顶
+const back = await invoke<Instance[]>("pin_instance", { id: "abc123", pinned: false });
+
+// 拖拽结束（ids 是拖完之后的完整顺序）
+const sorted = await invoke<Instance[]>("reorder_instances", { ids: list.map(i => i.id) });
+```
+
+前端建议用 `dnd-kit` 或原生 HTML5 拖拽，`onDragEnd` 里把新顺序的 id 数组整个传上来，
+不要一个一个调。
+
+### 50.5 行为约定
+
+- 排序偏好存在 **`<游戏目录>/.astral-instance-order.json`**，不进每个实例的
+  `instance.json`——那是实例的"身份"，排序是列表的偏好，而且兼容实例
+  （`versions/` 下的老版本）根本没有 `instance.json` 可写。
+- 文件坏了、格式不对、读不出来，一律当"没设过"，不会让列表打不开。
+- 已经删掉的实例 id 不是错误：排序时直接忽略，下次写文件时顺手清掉。
+- `reorder_instances` 只认**当前真实存在**的实例 id；传了不存在的 id 会被丢掉。
+  没被提到的实例接在后面，保持它们原来的相对顺序。
+- 置顶/排序**不改实例目录里任何东西**，也不影响启动、存档、Mod。
+
+### 50.6 前端接入建议
+
+- 列表项右上角放一个图钉按钮，点了调 `pin_instance`，用返回的列表替换本地状态。
+- 拖拽结束后调 `reorder_instances`；拖拽过程中不要发请求。
+- 置顶的项建议加一条左侧强调色竖线，别只靠位置区分——位置会因为别人置顶而变。
+- 如果前端有自己的本地排序缓存，收到返回的列表后要**整表覆盖**，不要 merge。
