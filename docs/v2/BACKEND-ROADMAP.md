@@ -10,7 +10,7 @@
 
 A1–A5、B1–B4、C1–C4、D1–D2 已完成并有自动化测试；D3 的测试矩阵已随各功能逐项落地；
 D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发布检查清单与自动更新
-签名方案尚未完成。共 168 个 Tauri 命令、360 项自检、351 个 Rust 单元测试（345 通过 6 忽略）。
+签名方案尚未完成。共 171 个 Tauri 命令、365 项自检、355 个 Rust 单元测试（349 通过 6 忽略）。
 
 ---
 
@@ -125,6 +125,7 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 | E33 | 项目详情页 | ✅ | `project_detail.rs` + `get_project_detail`；图集（只收 https、封面排最前、最多 20 张）、介绍正文（按字符截到 2 万）、分类与附加分类、客户端/服务端支持、关注数与相关链接；离线时标 `stale` |
 | E34 | 日志清理 | ✅ | `log_maintenance.rs` + `log_usage` / `plan_log_cleanup` / `prune_logs`；先预览再删，`latest.log` 永远保留，只认 `logs/` 与 `crash-reports/` 里的文本日志，删前要确认 |
 | E35 | 数据包管理 | ✅ | `packs::world_dir` + `list_packs`/`set_pack_enabled`/`delete_pack` 新增 `worldId`；数据包挂在存档自己的 `datapacks/` 里，只认 `.zip`，存档没了报 `TARGET_CHANGED` |
+| E36 | 游戏设置备份恢复 | ✅ | `game_options::list_backups`/`restore_backup`/`delete_backup` + 3 个命令；列出历史备份（时间、行数、渲染距离）、恢复前把当前文件也留底、同名备份不覆盖、删除要确认、运行中拒绝 |
 
 ---
 
@@ -150,10 +151,10 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 ## 3. 测试策略
 
 - **单元测试**：纯逻辑（解析、分类、命名、路径校验、状态机）放 `#[cfg(test)]`。
-  当前 351 个，345 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
+  当前 355 个，349 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
 - **自检（`--selftest`）**：所有需要真实文件系统、真实 HTTP、真实进程的检查都放这里。
   用 `testsrv.rs` 起一个只监听 `127.0.0.1` 的临时服务器，能确定性制造 503、慢速、
-  重定向、Range 响应。当前 360 项。
+  重定向、Range 响应。当前 365 项。
 - **为什么不依赖 `cargo test` 跑全部**：本机 `cargo test` 的测试二进制在仓库目录里
   运行会因路径 ACL 报"拒绝访问"（见 `10-cargo-test-调查.md`），所以 `scripts/run-tests.ps1`
   会先把二进制复制到 `%TEMP%` 再跑。CI 上没有这个问题。

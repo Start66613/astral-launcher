@@ -1109,6 +1109,33 @@ fn set_game_options(
     game_options::write(&dir, &changes, running)
 }
 
+/// 列出 `options.txt` 的历史备份（只读）
+#[tauri::command]
+fn list_option_backups(instance_id: String) -> Result<Vec<game_options::OptionsBackup>, String> {
+    Ok(game_options::list_backups(&inst_dir_of(&instance_id)?))
+}
+
+/// 从某份备份恢复设置；恢复前会把当前文件也存一份
+#[tauri::command]
+fn restore_option_backup(
+    instance_id: String,
+    file_name: String,
+) -> Result<game_options::OptionsRestore, String> {
+    let dir = inst_dir_of(&instance_id)?;
+    let running = session::active(Some(&instance_id)).is_some();
+    game_options::restore_backup(&dir, &file_name, running)
+}
+
+/// 删掉某份备份（必须确认）。只删这一个文件，不动当前设置。
+#[tauri::command]
+fn delete_option_backup(
+    instance_id: String,
+    file_name: String,
+    confirm: bool,
+) -> Result<(), String> {
+    game_options::delete_backup(&inst_dir_of(&instance_id)?, &file_name, confirm)
+}
+
 // ── 实例封面 ───────────────────────────────────────────────────
 
 /// 给实例设置封面：把图片复制进实例目录，只存固定文件名
@@ -3854,6 +3881,9 @@ pub fn run() {
             delete_screenshot,
             get_game_options,
             set_game_options,
+            list_option_backups,
+            restore_option_backup,
+            delete_option_backup,
             set_instance_cover,
             clear_instance_cover,
             read_instance_cover,
@@ -5773,6 +5803,54 @@ pub fn selftest() -> i32 {
                 .map(|e| e.starts_with("INSTANCE_BUSY|"))
                 .unwrap_or(false)
         );
+
+        // 备份能列、能恢复、能删；恢复前当前文件会留底
+        {
+            let mut bump = std::collections::BTreeMap::new();
+            bump.insert("renderDistance".to_string(), "20".to_string());
+            let _ = game_options::write(&base, &bump, false);
+            let backups = game_options::list_backups(&base);
+            check!(
+                "options backups are listed",
+                backups.len() >= 2
+                    && backups[0].render_distance.is_some()
+                    && backups[0].created_at.contains('T')
+            );
+
+            let target = backups
+                .last()
+                .map(|b| b.file_name.clone())
+                .unwrap_or_default();
+            let restored = game_options::restore_backup(&base, &target, false);
+            check!(
+                "options restore brings the file back",
+                restored.is_ok() && game_options::read(&base).map(|o| o.exists).unwrap_or(false)
+            );
+            check!(
+                "options restore keeps the old copy",
+                restored
+                    .map(|r| r
+                        .previous
+                        .map(|p| std::path::Path::new(&p).is_file())
+                        .unwrap_or(false))
+                    .unwrap_or(false)
+            );
+
+            check!(
+                "options backup delete needs confirm",
+                game_options::delete_backup(&base, &target, false).is_err()
+                    && game_options::delete_backup(&base, &target, true).is_ok()
+                    && !game_options::list_backups(&base)
+                        .iter()
+                        .any(|b| b.file_name == target)
+            );
+            check!(
+                "options restore rejects junk names",
+                game_options::restore_backup(&base, "../options.txt", false).is_err()
+                    && game_options::restore_backup(&base, "options-99999999-999999.txt", false)
+                        .is_err()
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }

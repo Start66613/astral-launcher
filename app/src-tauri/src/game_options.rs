@@ -611,8 +611,7 @@ pub fn write(
     if text.is_some() {
         let dir = backup_dir_of(instance_dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建备份目录失败|{e}"))?;
-        let name = format!("options-{}.txt", crate::time::now_stamp());
-        let dest = dir.join(&name);
+        let dest = free_backup_path(&dir, &format!("options-{}.txt", crate::time::now_stamp()));
         std::fs::copy(&path, &dest).map_err(|e| format!("PERMISSION|备份 options.txt 失败|{e}"))?;
         backup = Some(dest.to_string_lossy().to_string());
         prune_backups(&dir);
@@ -655,6 +654,202 @@ fn prune_backups(dir: &Path) {
     for n in names.into_iter().take(drop_n) {
         let _ = std::fs::remove_file(dir.join(n));
     }
+}
+
+// ── 备份的列表 / 恢复 / 删除 ──────────────────────────────────────
+
+/// 一份 `options.txt` 备份
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionsBackup {
+    /// 文件名，例如 `options-20261027-081500.txt`；恢复和删除都靠它
+    pub file_name: String,
+    pub path: String,
+    pub bytes: u64,
+    /// 从文件名里解析出来的时间；解析不出来就是文件名本身
+    pub created_at: String,
+    /// 备份里有几行键值对（能看出是不是一份正常设置）
+    pub lines: u32,
+    /// 这份备份里的渲染距离，用来在列表里给个直观印象；没有就是 null
+    pub render_distance: Option<String>,
+}
+
+/// 恢复备份的结果
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionsRestore {
+    pub path: String,
+    /// 恢复前的当前文件被存到了哪（本来就没有文件时是 null）
+    pub previous: Option<String>,
+    pub restored_from: String,
+}
+
+/// 同名备份已存在时（同一秒内改了两次）加 `-1`、`-2`，绝不覆盖旧备份。
+fn free_backup_path(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let stem = name.strip_suffix(".txt").unwrap_or(name);
+    for i in 1..=20 {
+        let p = dir.join(format!("{stem}-{i}.txt"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(format!("{stem}-{}.txt", crate::time::now_nanos()))
+}
+
+fn backup_name_ok(file_name: &str) -> Result<(), String> {
+    if file_name.is_empty() || file_name.len() > 128 {
+        return Err("INVALID_NAME|备份文件名不合法".into());
+    }
+    if file_name.contains(['/', '\\', ':']) || file_name.contains("..") {
+        return Err("INVALID_NAME|备份文件名不合法".into());
+    }
+    if !file_name.starts_with("options-") || !file_name.ends_with(".txt") {
+        return Err("INVALID_NAME|不是 options 备份文件".into());
+    }
+    Ok(())
+}
+
+/// 把 `options-20261027-081500.txt` 里的时间戳转成 ISO。
+///
+/// 解析不出来就原样返回文件名 —— 早期版本的备份名字可能不是这个格式，
+/// 显示一个怪名字也比报错强。
+fn stamp_of(file_name: &str) -> String {
+    let stem = file_name
+        .strip_prefix("options-")
+        .and_then(|s| s.strip_suffix(".txt"))
+        .unwrap_or(file_name);
+    let Some((date, time)) = stem.split_once('-') else {
+        return file_name.to_string();
+    };
+    if date.len() != 8 || time.len() != 6 {
+        return file_name.to_string();
+    }
+    let iso = format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &date[0..4],
+        &date[4..6],
+        &date[6..8],
+        &time[0..2],
+        &time[2..4],
+        &time[4..6]
+    );
+    if iso.len() == 20 {
+        iso
+    } else {
+        file_name.to_string()
+    }
+}
+
+/// 列出全部备份，最新的在前（只读）
+pub fn list_backups(instance_dir: &Path) -> Vec<OptionsBackup> {
+    let dir = backup_dir_of(instance_dir);
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<OptionsBackup> = rd
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| {
+            let file_name = e.file_name().to_string_lossy().to_string();
+            backup_name_ok(&file_name).ok()?;
+            let path = e.path();
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let text = std::fs::read(&path)
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            let mut lines = 0u32;
+            let mut render_distance = None;
+            for l in parse(&text) {
+                if let Line::Kv(k, v) = l {
+                    lines += 1;
+                    if k == "renderDistance" {
+                        render_distance = Some(v);
+                    }
+                }
+            }
+            Some(OptionsBackup {
+                file_name,
+                path: path.to_string_lossy().to_string(),
+                bytes,
+                created_at: stamp_of(&e.file_name().to_string_lossy()),
+                lines,
+                render_distance,
+            })
+        })
+        .collect();
+    // 文件名里带时间戳，倒序就是最新在前
+    out.sort_by(|a, b| b.file_name.cmp(&a.file_name));
+    out
+}
+
+/// 从备份恢复。恢复前先把当前 `options.txt` 也存一份，别让人"恢复错了"没退路。
+pub fn restore_backup(
+    instance_dir: &Path,
+    file_name: &str,
+    running: bool,
+) -> Result<OptionsRestore, String> {
+    if running {
+        return Err(
+            "INSTANCE_BUSY|游戏正在运行，先退出游戏再恢复设置（游戏退出时会覆盖这个文件）".into(),
+        );
+    }
+    backup_name_ok(file_name)?;
+    let src = backup_dir_of(instance_dir).join(file_name);
+    if !src.is_file() {
+        return Err("NOT_FOUND|找不到这份备份|它可能已经被清理掉了".into());
+    }
+    if crate::net::is_reparse_point(&src) {
+        return Err("INVALID_PATH|这是一份符号链接，已拒绝读取".into());
+    }
+
+    let path = path_of(instance_dir);
+    // 当前文件先留底，名字加 -before 前缀，一眼能看出来是恢复前的
+    let mut previous = None;
+    if path.is_file() {
+        let dir = backup_dir_of(instance_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("PERMISSION|创建备份目录失败|{e}"))?;
+        let dest = free_backup_path(
+            &dir,
+            &format!("options-before-{}.txt", crate::time::now_stamp()),
+        );
+        std::fs::copy(&path, &dest).map_err(|e| format!("PERMISSION|备份当前设置失败|{e}"))?;
+        previous = Some(dest.to_string_lossy().to_string());
+        prune_backups(&dir);
+    }
+
+    // 先写 .part 再换，避免半截文件
+    let tmp = path.with_extension("txt.part");
+    std::fs::copy(&src, &tmp).map_err(|e| format!("PERMISSION|写入设置失败|{e}"))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("PERMISSION|替换设置失败|{e}"));
+    }
+
+    Ok(OptionsRestore {
+        path: path.to_string_lossy().to_string(),
+        previous,
+        restored_from: file_name.to_string(),
+    })
+}
+
+/// 删掉一份备份（要确认）。只删这一个文件。
+pub fn delete_backup(instance_dir: &Path, file_name: &str, confirm: bool) -> Result<(), String> {
+    if !confirm {
+        return Err("UNSUPPORTED|删除备份需要明确确认".into());
+    }
+    backup_name_ok(file_name)?;
+    let p = backup_dir_of(instance_dir).join(file_name);
+    if !p.is_file() {
+        return Err("NOT_FOUND|找不到这份备份".into());
+    }
+    if crate::net::is_reparse_point(&p) {
+        return Err("INVALID_PATH|这是一份符号链接，已拒绝删除".into());
+    }
+    std::fs::remove_file(&p).map_err(|e| format!("PERMISSION|删除备份失败|{e}"))
 }
 
 #[cfg(test)]
@@ -806,5 +1001,84 @@ mod tests {
         prune_backups(&b);
         let n = std::fs::read_dir(&b).unwrap().count();
         assert_eq!(n, MAX_BACKUPS);
+    }
+
+    #[test]
+    fn lists_backups_newest_first() {
+        let d = tmp("listbk");
+        std::fs::write(d.join("options.txt"), "renderDistance:12\nlang:zh_cn\n").unwrap();
+        write(&d, &changes(&[("renderDistance", "16")]), false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        write(&d, &changes(&[("renderDistance", "20")]), false).unwrap();
+
+        let list = list_backups(&d);
+        assert_eq!(list.len(), 2);
+        // 最新在前：第二次改之前备份的是 16
+        assert!(list[0].file_name > list[1].file_name);
+        assert_eq!(list[0].render_distance.as_deref(), Some("16"));
+        assert!(list[0].lines >= 2);
+        assert!(list[0].created_at.contains('T'));
+        assert!(!list[0].created_at.contains("options-"));
+    }
+
+    #[test]
+    fn restores_a_backup_and_keeps_the_old_one() {
+        let d = tmp("restore");
+        std::fs::write(d.join("options.txt"), "renderDistance:8\n").unwrap();
+        write(&d, &changes(&[("renderDistance", "16")]), false).unwrap();
+        let list = list_backups(&d);
+        assert_eq!(list.len(), 1);
+
+        let out = restore_backup(&d, &list[0].file_name, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(d.join("options.txt")).unwrap(),
+            "renderDistance:8\n"
+        );
+        // 恢复前的那份（16）被留底了，玩家还能再回去
+        let after = list_backups(&d);
+        assert_eq!(after.len(), 2);
+        assert!(
+            after
+                .iter()
+                .any(|b| b.file_name.contains("-before")
+                    && b.render_distance.as_deref() == Some("16"))
+        );
+        assert_eq!(out.restored_from, list[0].file_name);
+        assert!(out.previous.is_some());
+    }
+
+    #[test]
+    fn restore_refuses_running_and_junk() {
+        let d = tmp("restorejunk");
+        std::fs::write(d.join("options.txt"), "lang:zh_cn\n").unwrap();
+        write(&d, &changes(&[("lang", "en_us")]), false).unwrap();
+        let name = list_backups(&d)[0].file_name.clone();
+
+        assert!(restore_backup(&d, &name, true).is_err());
+        assert!(restore_backup(&d, "../options.txt", false).is_err());
+        assert!(restore_backup(&d, "options-nope.txt", false).is_err());
+        // 上面三次都不该改动文件
+        assert_eq!(
+            std::fs::read_to_string(d.join("options.txt")).unwrap(),
+            "lang:en_us\n"
+        );
+    }
+
+    #[test]
+    fn deletes_a_backup_only_with_confirm() {
+        let d = tmp("delbk");
+        std::fs::write(d.join("options.txt"), "lang:zh_cn\n").unwrap();
+        write(&d, &changes(&[("lang", "en_us")]), false).unwrap();
+        let name = list_backups(&d)[0].file_name.clone();
+
+        assert!(delete_backup(&d, &name, false).is_err());
+        assert_eq!(list_backups(&d).len(), 1);
+        assert!(delete_backup(&d, &name, true).is_ok());
+        assert!(list_backups(&d).is_empty());
+        // 删备份不该动当前设置
+        assert_eq!(
+            std::fs::read_to_string(d.join("options.txt")).unwrap(),
+            "lang:en_us\n"
+        );
     }
 }

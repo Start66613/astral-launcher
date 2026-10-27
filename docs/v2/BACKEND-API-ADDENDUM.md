@@ -3608,3 +3608,72 @@ await invoke<PackFile>("set_pack_enabled", {
 - 没选存档时不要调 `list_packs`，直接显示「先选一个存档」。
 - 存档选择器的选项被删掉了（`list_target_worlds` 里没了）时，把当前选择清空并重新拉列表。
 - 数据包一般不会很多，列表直接铺开就行，不用分页。
+
+## 46. 游戏设置的备份与恢复（V2.5 新增）
+
+`set_game_options` 每次改设置前都会备份到 `<实例>/.astral-options/`，保留最近 10 份——但**备份只写不读**：玩家改错了想退回去，只能自己进文件夹里翻，还得手动改名覆盖 `options.txt`。这一节把备份补成可用功能。
+
+### 46.1 命令
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `list_option_backups` | `instanceId` | `OptionsBackup[]` |
+| `restore_option_backup` | `instanceId`, `fileName` | `OptionsRestore` |
+| `delete_option_backup` | `instanceId`, `fileName`, `confirm` | `void` |
+
+### 46.2 类型
+
+```ts
+interface OptionsBackup {
+  fileName: string;              // options-20261027-081500.txt，恢复/删除都用它
+  path: string;                  // 完整路径，仅用于展示
+  bytes: number;
+  createdAt: string;             // ISO 时间；解析不出来时退化成文件名
+  lines: number;                 // 备份里有几行键值对
+  renderDistance: string | null; // 这份备份里的渲染距离，列表里给个直观印象
+}
+
+interface OptionsRestore {
+  path: string;
+  previous: string | null;  // 恢复前的当前文件存到哪了（本来没文件就是 null）
+  restoredFrom: string;
+}
+```
+
+### 46.3 调用示例
+
+```ts
+// 1. 设置页「历史版本」里列出来
+const backups = await invoke<OptionsBackup[]>("list_option_backups", { instanceId });
+// 最新的在前
+
+// 2. 玩家点某一条的「恢复」
+const out = await invoke<OptionsRestore>("restore_option_backup", {
+  instanceId, fileName: backups[0].fileName,
+});
+// out.previous 是恢复前的那份，界面上可以给个「撤销恢复」按钮
+
+// 3. 删掉不要的备份
+await invoke<void>("delete_option_backup", {
+  instanceId, fileName: backups[2].fileName, confirm: true,
+});
+```
+
+### 46.4 行为约定
+
+- **恢复前先留底**：把当前 `options.txt` 复制成 `options-before-<时间戳>.txt` 再覆盖。恢复错了还能再恢复回来，不会一路错到底。
+- **恢复是整文件替换**，不是合并。备份里没有的键会消失——这正是"回到那一刻"的意思。
+- **同名备份不覆盖**：同一秒内改两次时，第二份会变成 `options-...-1.txt`，旧备份永远不会被悄悄冲掉。
+- **运行中一律拒绝**（`INSTANCE_BUSY`）：游戏退出时会把内存里的设置写回 `options.txt`，这时候恢复等于白做。
+- **只删备份，不动当前设置**：`delete_option_backup` 删掉的是 `.astral-options/` 里的一个文件，`options.txt` 一个字节都不变。
+- **删除要 `confirm: true`**，拒符号链接。
+- **备份文件名严格校验**：只认 `options-` 开头、`.txt` 结尾、不含路径分隔符的名字。`../options.txt` 这类会报 `INVALID_NAME`。
+- **列表按文件名倒序**：文件名里带时间戳，倒序天然就是最新在前，不用读 mtime（mtime 在复制、同步、解压之后常常是乱的）。
+
+### 46.5 前端接入建议
+
+- 设置页底部加一栏「历史版本」，显示条数与「最近一次：<createdAt>」。
+- 点开是列表，每条显示 `createdAt`、`renderDistance`（有的话）、`lines` 行、大小。
+- 每条后面两个按钮：「恢复」「删除」。恢复前弹确认框写清「会用这份备份整个替换当前的 options.txt，当前设置会另存一份」。
+- 恢复成功后提示「已恢复。想撤销的话点这里」，把 `previous` 传回去再调一次 `restore_option_backup`（把 `previous` 的文件名传进去）就能退回去。
+- 备份少于 2 份时不要显示「历史版本」入口，免得让玩家以为坏了。
