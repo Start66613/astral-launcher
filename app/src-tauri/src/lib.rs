@@ -9,6 +9,7 @@ mod deps;
 mod disk_usage;
 mod error;
 mod export;
+mod game_args;
 mod game_dir;
 mod game_options;
 mod game_stop;
@@ -590,6 +591,8 @@ fn launch_impl(
     if task::has_running(&instance_id) {
         return error::fail(error::BUSY, "该实例有进行中的任务");
     }
+    // 实例自己的游戏参数（窗口大小、Forge 确认等），校验过的
+    let own_args = game_args::load(std::path::Path::new(&inst.dir));
 
     let label = match &join {
         Some((_, addr)) => format!("启动 {} 并进入 {addr}", inst.name),
@@ -637,7 +640,11 @@ fn launch_impl(
             Some(p) => Some(std::path::PathBuf::from(p)),
             None => core::auto_java_for(&main_dir, &version),
         };
-        let game_args = join.map(|(a, _)| a).unwrap_or_default();
+        // 一键进服的参数排在自己配的后面：同一个键后者生效，进服优先
+        let mut game_args = own_args.clone();
+        if let Some((join_args, _)) = &join {
+            game_args.extend(join_args.iter().cloned());
+        }
         let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             task::progress(&tid, "validate", "检查实例与版本文件", 0, 0);
             core::spawn_with_join(
@@ -2026,6 +2033,26 @@ async fn check_instance_jvm(instance_id: String) -> Result<jvm::JvmCheck, String
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 读这个实例自己配的游戏参数（只读）
+#[tauri::command]
+fn get_game_args(instance_id: String) -> Result<game_args::ArgsCheck, String> {
+    let inst = managed_instance(&instance_id)?;
+    Ok(game_args::check(&game_args::load(std::path::Path::new(
+        &inst.dir,
+    ))))
+}
+
+/// 改这个实例的游戏参数。运行中不许改（下次启动才生效，改了会让人以为当次就生效）
+#[tauri::command]
+fn set_game_args(instance_id: String, args: Vec<String>) -> Result<game_args::ArgsCheck, String> {
+    let inst = managed_instance(&instance_id)?;
+    if session::active(Some(&instance_id)).is_some() {
+        return error::fail(error::INSTANCE_BUSY, "实例正在运行，先退出游戏");
+    }
+    let saved = game_args::save(std::path::Path::new(&inst.dir), &args)?;
+    Ok(game_args::check(&saved))
 }
 
 /// 删除启动器自己下载的 JDK（必须显式确认，系统 Java 一律拒绝）
@@ -3978,6 +4005,8 @@ pub fn run() {
             java_audit,
             check_instance_java,
             check_instance_jvm,
+            get_game_args,
+            set_game_args,
             remove_managed_java,
             java_cache_stats,
             clear_java_cache,
@@ -6171,6 +6200,34 @@ pub fn selftest() -> i32 {
         check!("jvm ceiling tracks the machine", {
             jvm::max_mb_for(8192) == 6144 && jvm::max_mb_for(16384) == 12288
         });
+    }
+
+    // 游戏参数：启动器自己负责的那些不许玩家填，配置能存能读
+    {
+        let ga = std::env::temp_dir().join(format!("astral-ga-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ga);
+        std::fs::create_dir_all(&ga).unwrap();
+        check!(
+            "game args accept window size",
+            game_args::check(&["--width".into(), "1920".into()]).ok
+        );
+        check!(
+            "game args reject auth flags",
+            !game_args::check(&["--username".into(), "Steve".into()]).ok
+                && !game_args::check(&["--accessToken=abc".into()]).ok
+        );
+        check!(
+            "game args save and reload",
+            game_args::save(&ga, &["--height".into(), "1080".into()])
+                .map(|a| a.len() == 2)
+                .unwrap_or(false)
+                && game_args::load(&ga) == vec!["--height", "1080"]
+        );
+        check!(
+            "game args refuse to save bad values",
+            game_args::save(&ga, &["--uuid".into(), "x".into()]).is_err()
+        );
+        let _ = std::fs::remove_dir_all(&ga);
     }
 
     // 整合包更新：查作者有没有发新版本、新旧差异、本地导入的包查不了

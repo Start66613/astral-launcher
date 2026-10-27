@@ -3853,3 +3853,74 @@ const icon = pack.hasIcon
 
 - 资源包/光影包卡片用 `hasIcon` 决定要不要调 `read_pack_icon`，拿到后按 `fileName` 缓存，禁用/启用改名后 `fileName` 会变，缓存自然失效。
 - 数据包（`kind: "datapack"`）也支持，但要带 `worldId`——和 `list_packs` 一样。
+
+## 50. 实例的游戏参数（V2.5 新增）
+
+`jvmArgs` 是给 Java 的（`-Xmx`、`-XX:`），但给 Minecraft 自己的那一串参数（窗口大小、Forge 的确认开关）之前**根本没有地方填**。玩家想固定 1920×1080 开窗，只能每次自己调。
+
+### 50.1 命令
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `get_game_args` | `instanceId` | `ArgsCheck` |
+| `set_game_args` | `instanceId`, `args: string[]` | `ArgsCheck` |
+
+### 50.2 类型
+
+```ts
+interface ArgIssue {
+  severity: "error" | "warn";
+  message: string;
+}
+
+interface ArgsCheck {
+  args: string[];      // 清洗后的参数（去掉空白与空项）
+  issues: ArgIssue[];
+  ok: boolean;         // 没有 error 级问题
+}
+```
+
+### 50.3 调用示例
+
+```ts
+const check = await invoke<ArgsCheck>("get_game_args", { instanceId });
+
+// 保存：有 error 会直接抛错，文案可以直接弹给玩家
+try {
+  const saved = await invoke<ArgsCheck>("set_game_args", {
+    instanceId,
+    args: ["--width", "1920", "--height", "1080"],
+  });
+  // saved.issues 里可能还有 warn，展示出来但不用拦
+} catch (e) {
+  // e 形如 "INVALID_VALUE|游戏参数有问题：..."
+}
+```
+
+### 50.4 规则
+
+| 情况 | 结果 |
+| --- | --- |
+| 超过 32 条 | error |
+| 单条超过 512 字符 | error |
+| 含换行 | error |
+| 出现 `--username` / `--uuid` / `--accessToken` / `--clientId` / `--xuid` / `--userType` / `--userProperties` / `--gameDir` / `--assetsDir` / `--assetIndex` / `--version` / `--versionType` | error |
+| 出现 `--server` | warn（和一键进服会重复） |
+
+- **`--width` / `--height` 是允许的**：启动器没给游戏设分辨率，改窗口大小正是玩家最想配的一项。
+- **`--username` 这些必须拦**：写在这里会顶掉启动器拼的认证参数，游戏进了离线模式却看不出来。
+- **带等号的写法也认**：`--accessToken=abc` 会被拆出 `--accessToken` 再比。
+
+### 50.5 行为约定
+
+- 存在实例目录的 `game-args.json`，不塞进 `instance.json`——那份是实例的"身份"，参数属于随时可改的偏好。
+- **运行中不许改**（`INSTANCE_BUSY`）：参数下次启动才生效，改了会让人以为当次就生效。
+- **校验不过不落盘**，不会留下半截文件。
+- 一键进服的参数**排在自己配的后面**：同一个键后者生效，所以「启动并进服」永远以进服地址为准。
+- 文件坏了（手改坏、编码错）当"没配过"，不影响启动。
+
+### 50.6 前端接入建议
+
+- 设置页给一个多行输入框，一行一条；保存前先调 `set_game_args`，把 `issues` 里 `severity: "error"` 的标红。
+- 常用项可以做快捷按钮：`--width 1920 --height 1080`、`-Dfml.queryResult=confirm`（Forge 首次启动不弹确认框）。
+- `get_game_args` 返回的 `args` 已经清洗过，直接填回输入框即可。
