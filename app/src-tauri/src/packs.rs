@@ -70,8 +70,37 @@ pub struct PackFile {
     pub description: Option<String>,
     /// 由 `pack_format` 推出来的游戏版本区间，推断不出来就是空
     pub compatible_versions: Vec<String>,
+    /// 包里有没有 `pack.png`（列目录时顺手判断，不额外解压）
+    pub has_icon: bool,
     /// 给人看的补充说明，例如"这个包是给 1.20.1 做的"
     pub note: Option<String>,
+}
+
+/// 图标文件大小上限（和 Mod 图标一致）
+pub const MAX_ICON: u64 = 512 * 1024;
+
+/// 一个包图标（以 data URL 形式交给前端）
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PackIcon {
+    pub file_name: String,
+    /// 在 zip 里的路径
+    pub entry: String,
+    pub mime: String,
+    pub size_bytes: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub data_url: String,
+}
+
+/// 资源包/光影包的图标就在 zip 根目录，命名是约定俗成的几种。
+fn icon_entry<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Option<String> {
+    for name in ["pack.png", "pack.jpg", "pack.jpeg", "logo.png", "icon.png"] {
+        if zip.by_name(name).is_ok() {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 /// `pack_format` → 游戏版本区间。Minecraft 官方没给完整对照表，
@@ -142,6 +171,7 @@ struct PackMeta {
     format: Option<u32>,
     description: Option<String>,
     has_shaders: bool,
+    has_icon: bool,
 }
 
 /// 描述字段在 `pack.mcmeta` 里可能是字符串，也可能是文本组件对象。
@@ -190,8 +220,11 @@ fn read_pack_meta(path: &Path, kind: &str) -> PackMeta {
             .file_names()
             .filter_map(|n| n.ok())
             .any(|n| n.starts_with("shaders/") || n == "shaders");
+        meta.has_icon = icon_entry(&mut zip).is_some();
         return meta;
     }
+
+    meta.has_icon = icon_entry(&mut zip).is_some();
 
     if let Some(text) = read_entry(&mut zip, "pack.mcmeta") {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -245,6 +278,7 @@ fn build(dir: &Path, file_name: &str, enabled: bool, kind: &str, meta: PackMeta)
         pack_format: meta.format,
         description: meta.description,
         compatible_versions,
+        has_icon: meta.has_icon,
         note,
     }
 }
@@ -360,6 +394,70 @@ pub fn delete(dir: &Path, kind: &str, file_name: &str, confirm: bool) -> Result<
     std::fs::remove_file(&p).map_err(|e| format!("PERMISSION|删除失败|{e}"))
 }
 
+/// 读取单个包的图标，返回 data URL。
+///
+/// 和 Mod 图标一样的取舍：列表只给 `hasIcon` 布尔，真要显示时再调这个，
+/// 避免一次列几十个包就把几 MB 图片塞进 IPC。
+pub fn read_icon(dir: &Path, kind: &str, file_name: &str) -> Result<Option<PackIcon>, String> {
+    normalize_kind(kind)?;
+    safe_name(file_name)?;
+    if split_name(file_name).is_none() {
+        return Err("INVALID_NAME|不是可识别的包文件".into());
+    }
+    let path = dir.join(file_name);
+    if !path.is_file() {
+        return Err("INVALID_NAME|文件不存在".into());
+    }
+    if crate::net::is_reparse_point(&path) {
+        return Err("INVALID_PATH|这是一个符号链接，已拒绝读取".into());
+    }
+    let Ok(file) = std::fs::File::open(&path) else {
+        return Err("PERMISSION|打不开这个文件".into());
+    };
+    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+        // 坏包不报错，只是没图标 —— 列表里那个包本身还能禁用/删除
+        return Ok(None);
+    };
+    let Some(entry) = icon_entry(&mut zip) else {
+        return Ok(None);
+    };
+    let Ok(mut f) = zip.by_name(&entry) else {
+        return Ok(None);
+    };
+    if f.size() > MAX_ICON {
+        return Ok(None);
+    }
+    let mut bytes = Vec::with_capacity(f.size() as usize);
+    if f.read_to_end(&mut bytes).is_err() {
+        return Ok(None);
+    }
+    drop(f);
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let mime = match crate::mod_icon::mime_of(&bytes) {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    let (width, height) = match crate::cover::size_of(mime, &bytes) {
+        Some((w, h)) => (Some(w), Some(h)),
+        None => (None, None),
+    };
+    Ok(Some(PackIcon {
+        file_name: file_name.to_string(),
+        entry,
+        mime: mime.to_string(),
+        size_bytes: bytes.len() as u64,
+        width,
+        height,
+        data_url: format!(
+            "data:{};base64,{}",
+            mime,
+            crate::screenshots::base64_encode(&bytes)
+        ),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +557,80 @@ mod tests {
         let missing = world_dir(&saves, "w_deadbeef").unwrap_err();
         assert!(missing.starts_with("TARGET_CHANGED|"));
         let _ = std::fs::remove_dir_all(&saves);
+    }
+
+    /// 最小可用的 PNG 头（够 `cover::size_of` 读出宽高，不需要真的能显示）
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+            b'D', b'R',
+        ];
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[0x08, 0x06, 0x00, 0x00, 0x00]);
+        v
+    }
+
+    /// 造一个最小可用的 zip（带 pack.mcmeta 与可选的 pack.png）
+    fn make_pack(path: &Path, with_icon: bool) {
+        use std::io::Write;
+        let f = std::fs::File::create(path).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        z.start_file("pack.mcmeta", opts).unwrap();
+        z.write_all(br#"{"pack":{"pack_format":15,"description":"Demo"}}"#)
+            .unwrap();
+        if with_icon {
+            z.start_file("pack.png", opts).unwrap();
+            z.write_all(&png(8, 8)).unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    #[test]
+    fn lists_icon_flag_without_reading_the_image() {
+        let dir = std::env::temp_dir().join(format!("astral-packs-{}", crate::time::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        make_pack(&dir.join("with.zip"), true);
+        make_pack(&dir.join("without.zip"), false);
+        let list = list(&dir, "resourcepack").unwrap();
+        assert_eq!(list.len(), 2);
+        let with = list.iter().find(|p| p.file_name == "with.zip").unwrap();
+        let without = list.iter().find(|p| p.file_name == "without.zip").unwrap();
+        assert!(with.has_icon);
+        assert!(!without.has_icon);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_a_pack_icon_as_data_url() {
+        let dir = std::env::temp_dir().join(format!("astral-packs-{}", crate::time::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        make_pack(&dir.join("with.zip"), true);
+        let icon = read_icon(&dir, "resourcepack", "with.zip")
+            .unwrap()
+            .unwrap();
+        assert_eq!(icon.entry, "pack.png");
+        assert_eq!(icon.mime, "image/png");
+        assert_eq!(icon.width, Some(8));
+        assert_eq!(icon.height, Some(8));
+        assert!(icon.data_url.starts_with("data:image/png;base64,"));
+
+        // 没有图标的包返回 None，不是错误
+        make_pack(&dir.join("without.zip"), false);
+        assert!(read_icon(&dir, "resourcepack", "without.zip")
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pack_icon_rejects_bad_names_and_missing_files() {
+        let dir = std::env::temp_dir().join(format!("astral-packs-{}", crate::time::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_icon(&dir, "resourcepack", "../x.zip").is_err());
+        assert!(read_icon(&dir, "resourcepack", "nope.zip").is_err());
+        assert!(read_icon(&dir, "taco", "a.zip").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

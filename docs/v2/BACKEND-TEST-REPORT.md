@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 373 项全过，单元测试 360 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 376 项全过，单元测试 363 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（373 项）
+## 2. 自检覆盖（376 项）
 
 按前缀分组：
 
@@ -59,7 +59,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `retry` | 4 | 拒绝运行中、拒绝缺 spec、拒绝未知类型、接受已知类型 |
 | `loader` | 4 | 解析、空安全、兼容性、NeoForge 提示 |
 | `mod` | 4 | 列表、启用标记、禁用、启用、删除、路径守卫 |
-| `packs` | 5 | 解析 `pack.mcmeta` 的 pack_format 与描述、禁用/启用改名、删除需确认、非法类型与危险文件名被拒 |
+| `packs` | 8 | 解析 `pack.mcmeta` 的 pack_format 与描述、禁用/启用改名、删除需确认、非法类型与危险文件名被拒、图标标记随列表给出、图标读成 data URL、没有图标不算错误 |
 | `modscan` | 5 | 重复 mod id、缺失依赖、版本不满足、计数与结论、干净目录保持安静 |
 | `ledger` | 3 | 账本让 Astral 装的进 known、玩家手放的仍 unknown、文件删掉后不再算已装 |
 | `cache` | 3 | 第二次走缓存、统计与淘汰、只清缓存不动文件 |
@@ -100,11 +100,11 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（366 个）
+## 3. 单元测试（369 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
-| `packs` | 6 | 文件名拆分、pack_format 对照表、description 文本组件、危险文件名、扩展名过滤、删除需确认 |
+| `packs` | 9 | 文件名拆分、pack_format 对照表、description 文本组件、危险文件名、扩展名过滤、删除需确认、数据包只认 zip、world_id 找不到时报 TARGET_CHANGED、图标标记与读图 |
 | `modscan` | 7 | 版本比较、常见范围、乱写范围判未知、Forge TOML 依赖、平台 id 白名单、重复+版本不满足、干净目录 |
 | `ledger` | 5 | 记录读回、升级替换旧条目、改名与删除跟随文件、文件丢失不算已装、空字段拒绝 |
 | `deps` | 9 | 嵌套顺序、环、双版本冲突、深度/节点上限、已装跳过、release 优先、缺失、via 链 |
@@ -149,7 +149,6 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `mod_icon` | 8 | Fabric 图标、图标对象取大图、Forge logoFile、根目录兜底、无图标、非法名与缺文件、声明缺失回退、超大图标被拒 |
 | `project_detail` | 7 | 详情字段、图集过滤与封面优先、正文按字符截断、缺字段为空、非对象与空 id、缓存来源、图集上限 |
 | `log_maintenance` | 9 | 占用分类统计、永远保留 latest.log、按份数保留、按天数保留、忽略非日志文件、删前要确认、只删计划内的、keep_days=0 不按天数保、空目录不炸 |
-| `packs` | +2 | 数据包只认 zip、world_id 找不到时报 TARGET_CHANGED |
 | `game_options` | +4 | 备份列表最新在前、恢复并留底、恢复拒运行中与非法名、删除要确认 |
 | `world_stats` | 7 | 新格式统计、老格式统计、进度排除配方、多玩家合并排序、空存档、坏文件、未知存档 |
 | `world_icon` | 4 | 读成 data URL、没图标返回 None、非 PNG 不给尺寸、超大文件被拒 |

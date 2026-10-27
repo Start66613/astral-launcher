@@ -140,7 +140,7 @@ pub fn entry_in<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Option<(String,
 }
 
 /// 按魔数判断图片类型
-fn mime_of(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn mime_of(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         return Some("image/png");
     }

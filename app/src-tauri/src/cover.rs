@@ -106,7 +106,7 @@ fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-fn size_of(mime: &str, bytes: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn size_of(mime: &str, bytes: &[u8]) -> Option<(u32, u32)> {
     match mime {
         "image/png" => png_size(bytes),
         "image/jpeg" => jpeg_size(bytes),

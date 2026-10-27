@@ -3625,6 +3625,21 @@ fn delete_pack(
     packs::delete(&dir, &kind, &file_name, confirm)
 }
 
+/// 读资源包 / 光影包 / 数据包的图标。
+///
+/// 列表里只给 `hasIcon` 布尔，玩家真要看图时才调这个 —— 一次列几十个包
+/// 就把几 MB 图片塞进 IPC 不值得。
+#[tauri::command]
+fn read_pack_icon(
+    instance_id: String,
+    kind: String,
+    file_name: String,
+    world_id: Option<String>,
+) -> Result<Option<packs::PackIcon>, String> {
+    let dir = pack_dir(&instance_id, &kind, world_id.as_deref())?;
+    packs::read_icon(&dir, &kind, &file_name)
+}
+
 // ── 本地文件导入（自己下的 jar / zip）─────────────────────────────
 
 fn import_targets(instance_id: &str) -> Result<local_import::Targets, String> {
@@ -3886,6 +3901,7 @@ pub fn run() {
             list_packs,
             set_pack_enabled,
             delete_pack,
+            read_pack_icon,
             inspect_local_files,
             import_local_files,
             scan_mods,
@@ -4315,6 +4331,64 @@ pub fn selftest() -> i32 {
         );
 
         let _ = std::fs::remove_dir_all(&saves);
+    }
+
+    // 资源包图标：列表只给布尔，真看图才读 data URL
+    {
+        use std::io::Write as _;
+        let pk = std::env::temp_dir().join(format!("astral-picon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&pk);
+        std::fs::create_dir_all(&pk).unwrap();
+        let mk = |name: &str, with_icon: bool| {
+            let f = std::fs::File::create(pk.join(name)).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.start_file("pack.mcmeta", opts).unwrap();
+            z.write_all(br#"{"pack":{"pack_format":15,"description":"Demo"}}"#)
+                .unwrap();
+            if with_icon {
+                let mut png = vec![
+                    0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I',
+                    b'H', b'D', b'R',
+                ];
+                png.extend_from_slice(&8u32.to_be_bytes());
+                png.extend_from_slice(&8u32.to_be_bytes());
+                png.extend_from_slice(&[0x08, 0x06, 0x00, 0x00, 0x00]);
+                z.start_file("pack.png", opts).unwrap();
+                z.write_all(&png).unwrap();
+            }
+            z.finish().unwrap();
+        };
+        mk("with-icon.zip", true);
+        mk("no-icon.zip", false);
+
+        let listed = packs::list(&pk, "resourcepack").unwrap();
+        check!(
+            "pack icon flag is listed",
+            listed
+                .iter()
+                .any(|p| p.file_name == "with-icon.zip" && p.has_icon)
+                && listed
+                    .iter()
+                    .any(|p| p.file_name == "no-icon.zip" && !p.has_icon)
+        );
+        check!(
+            "pack icon reads as data url",
+            packs::read_icon(&pk, "resourcepack", "with-icon.zip")
+                .map(|o| o
+                    .map(|i| i.mime == "image/png"
+                        && i.width == Some(8)
+                        && i.data_url.starts_with("data:image/png;base64,"))
+                    .unwrap_or(false))
+                .unwrap_or(false)
+        );
+        check!(
+            "pack icon missing is not an error",
+            packs::read_icon(&pk, "resourcepack", "no-icon.zip")
+                .map(|o| o.is_none())
+                .unwrap_or(false)
+        );
+        let _ = std::fs::remove_dir_all(&pk);
     }
 
     // 本地 Mod 静态扫描：重复 id / 缺依赖 / 版本不满足 / 干净目录保持安静

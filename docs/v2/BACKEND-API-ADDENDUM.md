@@ -3801,3 +3801,55 @@ await invoke<void>("open_world_folder", { instanceId, worldId });
 - 存档卡片用 `hasIcon` 决定要不要调 `read_world_icon`——没有图标就别发这次 IPC。
 - 拿到 data URL 后缓存起来（同一个 `worldId` 不要重复调），图标在游戏里改过就靠 `lastModified` 变化触发重取。
 - 存档详情里放一个「打开文件夹」按钮，比让玩家自己找路径方便。
+
+## 49. 资源包 / 光影包图标（V2.5 新增）
+
+资源包和光影包的 zip 根目录通常带一张 `pack.png`（就是游戏里那个缩略图）。之前 `list_packs` 只给了名字、大小和 `pack_format`，列表只能显示一排文件名。
+
+### 49.1 改动
+
+- `PackFile` 新增 `hasIcon: boolean`——列目录时打开 zip 顺手判断，不读图。
+- 新增命令 `read_pack_icon`，真要看图时才取 data URL。
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `read_pack_icon` | `instanceId`, `kind`, `fileName`, `worldId?` | `PackIcon \| null` |
+
+### 49.2 类型
+
+```ts
+interface PackIcon {
+  fileName: string;
+  entry: string;        // 在 zip 里的路径，例如 "pack.png"
+  mime: string;
+  sizeBytes: number;
+  width: number | null;
+  height: number | null;
+  dataUrl: string;
+}
+```
+
+### 49.3 调用示例
+
+```ts
+// 列表里先看 hasIcon，没有就别发这次 IPC
+const icon = pack.hasIcon
+  ? await invoke<PackIcon | null>("read_pack_icon", {
+      instanceId, kind: "resourcepack", fileName: pack.fileName,
+    })
+  : null;
+```
+
+### 49.4 行为约定
+
+- 认这几个条目：`pack.png`、`pack.jpg`、`pack.jpeg`、`logo.png`、`icon.png`，按这个顺序取第一个存在的。
+- **没有图标返回 `null`**，不是错误。
+- **超过 512 KB 当没有**——有些包里塞了整张壁纸，塞进 IPC 不值得。
+- **zip 打不开**（坏包）也返回 `null`，不报错：列表里那个包还得能禁用和删除。
+- 宽高从图片头里读（PNG 的 IHDR / JPEG 的 SOFn），不解码像素。
+- `dataUrl` 用的 `data:` 协议，CSP 里 `img-src` 已经允许，不需要额外配置。
+
+### 49.5 前端接入建议
+
+- 资源包/光影包卡片用 `hasIcon` 决定要不要调 `read_pack_icon`，拿到后按 `fileName` 缓存，禁用/启用改名后 `fileName` 会变，缓存自然失效。
+- 数据包（`kind: "datapack"`）也支持，但要带 `worldId`——和 `list_packs` 一样。
