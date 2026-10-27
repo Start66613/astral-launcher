@@ -3677,3 +3677,79 @@ await invoke<void>("delete_option_backup", {
 - 每条后面两个按钮：「恢复」「删除」。恢复前弹确认框写清「会用这份备份整个替换当前的 options.txt，当前设置会另存一份」。
 - 恢复成功后提示「已恢复。想撤销的话点这里」，把 `previous` 传回去再调一次 `restore_option_backup`（把 `previous` 的文件名传进去）就能退回去。
 - 备份少于 2 份时不要显示「历史版本」入口，免得让玩家以为坏了。
+
+## 47. 存档统计（V2.5 新增）
+
+存档列表原来只给目录名、大小、游戏版本。玩家真正关心的「这个存档我玩了多久、死了多少次、进度做到哪」都在游戏自己写的两份文件里，启动器一直没读。
+
+### 47.1 命令
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `get_world_stats` | `instanceId`, `worldId` | `WorldStats` |
+
+`worldId` 来自 `list_target_worlds`，和 `get_world_info` 用的是同一个 id。
+
+### 47.2 类型
+
+```ts
+interface PlayerStats {
+  uuid: string;              // 存档里的玩家 id，也是 stats/<uuid>.json 的文件名
+  playTimeMs: number;        // 游戏时长
+  deaths: number;
+  mobKills: number;          // 击杀的生物数
+  blocksMined: number;       // 挖掉的方块数
+  distanceCm: number;        // 走过的距离（厘米，游戏里就这么记）
+  jumps: number;
+  advancementsDone: number;  // 完成的进度数（不含配方）
+  advancementsTotal: number; // 这个存档里一共有多少条进度（不含配方）
+}
+
+interface WorldStats {
+  worldId: string;
+  players: PlayerStats[];    // 按游戏时长倒序
+  playTimeMs: number;        // 所有玩家加起来
+  deaths: number;
+  mobKills: number;
+  blocksMined: number;
+  distanceCm: number;
+  jumps: number;
+  advancementsDone: number;
+  advancementsTotal: number;
+  note: string | null;       // 为什么没数据 / 有几份文件坏了
+}
+```
+
+### 47.3 调用示例
+
+```ts
+const stats = await invoke<WorldStats>("get_world_stats", {
+  instanceId, worldId,
+});
+
+// 存档卡片上放一行概要
+const summary = `${formatDuration(stats.playTimeMs)} · 死亡 ${stats.deaths} 次 · 进度 ${stats.advancementsDone}/${stats.advancementsTotal}`;
+
+// 点开详情才展示 players 明细（多人存档 / 局域网一起玩过的存档会有多条）
+if (stats.note) showHint(stats.note);
+```
+
+`distanceCm / 100` 是米，`distanceCm / 100000` 是公里，显示时按量级选单位。
+
+### 47.4 行为约定
+
+- **只读**。读的是 `<存档>/stats/*.json` 与 `<存档>/advancements/*.json`，一个字节都不改。
+- **新旧格式都认**。1.12 之前是 `stat.playOneMinute`、`stat.deaths`、`stat.mobKills` 这一套，之后是 `minecraft:custom` 里的 `minecraft:play_time`、`minecraft:deaths`。两套都解析，打开老存档不会显示全是 0。
+- **配方不算进度**。`minecraft:recipes/...` 在游戏里也算 advancement，但玩家不会觉得自己"做了 300 个进度"，统计时排除。`advancementsTotal` 因此是"值得看的进度数"，不是游戏内那个含配方的总数。
+- **距离是分项相加**。走、跑、飞、游、坐船、坐矿车、骑马、爬、坠落、潜行……全加起来才是"走过多少路"。
+- **坏文件只提示不失败**。某份 `stats/*.json` 解析不了时跳过它，在 `note` 里写「有 N 份统计文件读不出来」，其余玩家照常显示。整页不会因为一个坏文件白屏。
+- **没进过游戏的存档**不是错误：`players` 为空，`note` 说明「这个存档还没有统计文件」。
+- **存档不存在**报 `WORLD_NOT_FOUND`，实例不存在报 `INSTANCE_NOT_FOUND`。
+- **游戏时长单位**：游戏内部按 tick 记（20 tick = 1 秒），这里换算成毫秒返回。
+
+### 47.5 前端接入建议
+
+- 存档列表卡片右下角加一行灰字概要（时长 · 死亡 · 进度），不要一进列表就为每个存档都调一次——列表滚动到可见时再调，或者只对当前选中的存档调。
+- 详情抽屉里放「统计」页签：上面一行汇总，下面 `players` 列表（单人存档只有一条，可以不显示列表）。
+- `note` 非空时用浅色提示条显示，不要当错误弹窗。
+- 进度显示成 `done/total` 加一条进度条；`total === 0` 时只显示「还没有进度数据」。

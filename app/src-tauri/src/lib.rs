@@ -59,6 +59,7 @@ mod updates;
 mod verify;
 mod world_backup;
 mod world_io;
+mod world_stats;
 mod worlds;
 
 use core::Config;
@@ -752,6 +753,20 @@ fn get_world_info(instance_id: String, world_id: String) -> Result<worlds::World
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
     worlds::detail(std::path::Path::new(&inst.dirs.saves), &world_id)
+}
+
+/// 存档里玩家玩了多久、死了几次、挖了多少方块、进度做到哪。
+///
+/// 只读游戏自己写的 `stats/` 与 `advancements/`，不改存档一个字节。
+#[tauri::command]
+fn get_world_stats(
+    instance_id: String,
+    world_id: String,
+) -> Result<world_stats::WorldStats, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    world_stats::world_stats(std::path::Path::new(&inst.dirs.saves), &world_id)
 }
 
 /// 启动前预检：只读，把"能不能启动、卡在哪"一次问清楚。
@@ -3852,6 +3867,7 @@ pub fn run() {
             repair_instance,
             list_target_worlds,
             get_world_info,
+            get_world_stats,
             preflight_launch,
             scan_local_versions,
             plan_instance_copy,
@@ -5358,6 +5374,71 @@ pub fn selftest() -> i32 {
                 .map(|e| e.starts_with("WORLD_NOT_FOUND|"))
                 .unwrap_or(false)
         );
+    }
+
+    // 存档统计：读游戏自己写的 stats/ 与 advancements/，只读不改。
+    {
+        let wid = worlds::world_id("World1");
+        let empty = world_stats::world_stats(&game.join("saves"), &wid);
+        check!(
+            "world stats explain an empty world",
+            empty
+                .as_ref()
+                .map(|s| s.players.is_empty() && s.note.is_some())
+                .unwrap_or(false)
+        );
+
+        let stats_dir = save.join("stats");
+        let adv_dir = save.join("advancements");
+        let _ = std::fs::create_dir_all(&stats_dir);
+        let _ = std::fs::create_dir_all(&adv_dir);
+        let _ = std::fs::write(
+            stats_dir.join("aaaa.json"),
+            r#"{"stats":{"minecraft:custom":{"minecraft:play_time":2400,"minecraft:deaths":2,"minecraft:jump":10,"minecraft:walk_one_cm":500},"minecraft:mined":{"minecraft:stone":6},"minecraft:killed":{"minecraft:zombie":3}}}"#,
+        );
+        let _ = std::fs::write(
+            adv_dir.join("aaaa.json"),
+            r#"{"minecraft:story/root":{"done":true},"minecraft:story/x":{"done":false},"minecraft:recipes/y":{"done":true}}"#,
+        );
+        let _ = std::fs::write(stats_dir.join("bbbb.json"), "not json at all");
+        let got = world_stats::world_stats(&game.join("saves"), &wid);
+        check!(
+            "world stats read play time and counts",
+            got.as_ref()
+                .map(|s| {
+                    s.players.len() == 1
+                        && s.play_time_ms == 120_000
+                        && s.deaths == 2
+                        && s.blocks_mined == 6
+                        && s.mob_kills == 3
+                })
+                .unwrap_or(false)
+        );
+        check!(
+            "world stats count advancements without recipes",
+            got.as_ref()
+                .map(|s| s.players[0].advancements_done == 1 && s.players[0].advancements_total == 2)
+                .unwrap_or(false)
+        );
+        check!(
+            "world stats report broken files",
+            got.as_ref()
+                .map(|s| s
+                    .note
+                    .as_deref()
+                    .map(|n| n.contains("读不出来"))
+                    .unwrap_or(false))
+                .unwrap_or(false)
+        );
+        check!(
+            "world stats reject unknown world",
+            world_stats::world_stats(&game.join("saves"), "w_00000000")
+                .err()
+                .map(|e| e.starts_with("WORLD_NOT_FOUND|"))
+                .unwrap_or(false)
+        );
+        let _ = std::fs::remove_dir_all(&stats_dir);
+        let _ = std::fs::remove_dir_all(&adv_dir);
     }
 
     // 存档管理：改名 / 复制 / 删除到回收站 / 恢复 / 永久删除。
@@ -8336,13 +8417,16 @@ java.lang.RuntimeException: boom\n";
             // 缓存是落盘的，上一次自检跑完会把它留着。不清一下的话，
             // 第一次下载就直接命中缓存、根本不联网，`after_first > before_hits`
             // 会假失败（这个检查曾经一次过、一次挂，就是这么来的）。
+            // 光清缓存还不够：两个自检进程同时跑时仍会互相踩。所以这次的
+            // 文件大小带一点进程号偏移，每次跑都是一个全新的哈希键。
             let _ = cache::clear();
+            let probe: u64 = 200 * 1024 + (std::process::id() as u64 % 61);
             let c1 = dl.join("cache1.bin");
             let c2 = dl.join("cache2.bin");
-            let csha = testsrv::expected_sha1(200 * 1024);
+            let csha = testsrv::expected_sha1(probe);
             let before_hits = srv.served.load(std::sync::atomic::Ordering::SeqCst);
             let _ = net::download(
-                &srv.data_url(200 * 1024, 32 * 1024, 0),
+                &srv.data_url(probe, 32 * 1024, 0),
                 &c1,
                 &local_opts(Some(&csha)),
                 &*net::never_cancel(),
@@ -8350,7 +8434,7 @@ java.lang.RuntimeException: boom\n";
             );
             let after_first = srv.served.load(std::sync::atomic::Ordering::SeqCst);
             let second = net::download(
-                &srv.data_url(200 * 1024, 32 * 1024, 0),
+                &srv.data_url(probe, 32 * 1024, 0),
                 &c2,
                 &local_opts(Some(&csha)),
                 &*net::never_cancel(),
@@ -8362,7 +8446,7 @@ java.lang.RuntimeException: boom\n";
                 after_first > before_hits
                     && after_second == after_first
                     && second
-                        .map(|r| r.reused && r.bytes == 200 * 1024)
+                        .map(|r| r.reused && r.bytes == probe)
                         .unwrap_or(false)
                     && net::sha1_file(&c2).ok().as_deref() == Some(csha.as_str())
             );
