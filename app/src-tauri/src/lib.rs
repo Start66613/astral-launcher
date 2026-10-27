@@ -3502,21 +3502,32 @@ fn delete_mod(instance_id: String, file_name: String) -> Result<(), String> {
     mods::delete(std::path::Path::new(&inst.dirs.mods), &file_name)
 }
 
-// ── 资源包 / 光影包 ─────────────────────────────────────────────
+// ── 资源包 / 光影包 / 数据包 ──────────────────────────────────────
 
-fn pack_dir(instance_id: &str, kind: &str) -> Result<PathBuf, String> {
+/// 数据包不在实例根目录，而是挂在某个存档自己的 `datapacks/` 里，
+/// 所以只有 `kind = "datapack"` 时才需要 `world_id`。
+fn pack_dir(instance_id: &str, kind: &str, world_id: Option<&str>) -> Result<PathBuf, String> {
     let inst = managed_instance(instance_id)?;
     let dir = match packs::normalize_kind(kind)? {
         "resourcepack" => inst.dirs.resourcepacks.clone(),
         "shaderpack" => inst.dirs.shaderpacks.clone(),
+        "datapack" => {
+            let wid = world_id.ok_or_else(|| "INVALID_VALUE|数据包必须指定存档".to_string())?;
+            let saves = PathBuf::from(&inst.dirs.saves);
+            return packs::world_dir(&saves, wid);
+        }
         other => return Err(format!("INVALID_VALUE|这个类型不支持文件管理：{other}")),
     };
     Ok(PathBuf::from(dir))
 }
 
 #[tauri::command]
-fn list_packs(instance_id: String, kind: String) -> Result<Vec<packs::PackFile>, String> {
-    let dir = pack_dir(&instance_id, &kind)?;
+fn list_packs(
+    instance_id: String,
+    kind: String,
+    world_id: Option<String>,
+) -> Result<Vec<packs::PackFile>, String> {
+    let dir = pack_dir(&instance_id, &kind, world_id.as_deref())?;
     packs::list(&dir, &kind)
 }
 
@@ -3526,8 +3537,9 @@ fn set_pack_enabled(
     kind: String,
     file_name: String,
     enabled: bool,
+    world_id: Option<String>,
 ) -> Result<packs::PackFile, String> {
-    let dir = pack_dir(&instance_id, &kind)?;
+    let dir = pack_dir(&instance_id, &kind, world_id.as_deref())?;
     packs::set_enabled(&dir, &kind, &file_name, enabled)
 }
 
@@ -3537,8 +3549,9 @@ fn delete_pack(
     kind: String,
     file_name: String,
     confirm: bool,
+    world_id: Option<String>,
 ) -> Result<(), String> {
-    let dir = pack_dir(&instance_id, &kind)?;
+    let dir = pack_dir(&instance_id, &kind, world_id.as_deref())?;
     packs::delete(&dir, &kind, &file_name, confirm)
 }
 
@@ -4159,6 +4172,74 @@ pub fn selftest() -> i32 {
             && packs::delete(&pack_dir, "resourcepack", "../x.zip", true).is_err()
     );
     let _ = std::fs::remove_dir_all(&pack_dir);
+
+    // 数据包：住在存档自己的 datapacks/ 里，得先按 world_id 找到存档
+    {
+        let saves = std::env::temp_dir().join(format!("astral-dp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&saves);
+        let world = saves.join("DatapackWorld");
+        let dp = world.join("datapacks");
+        let _ = std::fs::create_dir_all(&dp);
+        let _ = std::fs::write(
+            world.join("level.dat"),
+            nbt::sample_level_dat("1.20.1", 0, false),
+        );
+        {
+            use std::io::Write as _;
+            let f = std::fs::File::create(dp.join("Vein Miner.zip")).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            zw.start_file("pack.mcmeta", opts).unwrap();
+            zw.write_all(br#"{"pack":{"pack_format":15,"description":"Vein"}}"#)
+                .unwrap();
+            zw.finish().unwrap();
+        }
+        // 数据包只认 zip：同目录的 jar 不该出现在列表里
+        let _ = std::fs::write(dp.join("not-a-pack.jar"), b"x");
+
+        let wid = worlds::world_id("DatapackWorld");
+        let resolved = packs::world_dir(&saves, &wid);
+        check!(
+            "datapack resolves inside the world",
+            resolved
+                .as_ref()
+                .map(|p| p.ends_with("DatapackWorld/datapacks"))
+                .unwrap_or(false)
+        );
+        check!(
+            "datapack needs an existing world",
+            packs::world_dir(&saves, "w_deadbeef")
+                .err()
+                .map(|e| e.starts_with("TARGET_CHANGED|"))
+                .unwrap_or(false)
+        );
+
+        let listed = resolved
+            .as_ref()
+            .ok()
+            .map(|d| packs::list(d, "datapack").unwrap_or_default())
+            .unwrap_or_default();
+        check!(
+            "datapack list only sees zips",
+            listed.len() == 1
+                && listed[0].file_name == "Vein Miner.zip"
+                && listed[0].pack_format == Some(15)
+        );
+
+        let toggled = resolved
+            .as_ref()
+            .ok()
+            .and_then(|d| packs::set_enabled(d, "datapack", "Vein Miner.zip", false).ok());
+        check!(
+            "datapack disable renames file",
+            toggled
+                .map(|p| p.file_name == "Vein Miner.zip.disabled" && !p.enabled)
+                .unwrap_or(false)
+                && dp.join("Vein Miner.zip.disabled").exists()
+        );
+
+        let _ = std::fs::remove_dir_all(&saves);
+    }
 
     // 本地 Mod 静态扫描：重复 id / 缺依赖 / 版本不满足 / 干净目录保持安静
     let scan_dir = std::env::temp_dir().join(format!("astral-scan-{}", std::process::id()));

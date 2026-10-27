@@ -40,8 +40,20 @@ pub fn sub_dir(kind: &str) -> Result<&'static str, String> {
 fn extensions(kind: &str) -> &'static [&'static str] {
     match kind {
         "shaderpack" => &[".zip"],
+        // 数据包只可能是 zip；带 .jar 的一律不认
+        "datapack" => &[".zip"],
         _ => &[".zip", ".jar"],
     }
+}
+
+/// 数据包住在某个存档自己的 `datapacks/` 里，得先按 world_id 找到存档。
+///
+/// 存档不存在（可能被删了或改名了）时给 `TARGET_CHANGED`，
+/// 因为这不是"参数写错"，而是玩家看到的东西已经变了。
+pub fn world_dir(saves_dir: &Path, world_id: &str) -> Result<PathBuf, String> {
+    let world = crate::worlds::resolve(saves_dir, world_id)
+        .ok_or_else(|| "TARGET_CHANGED|存档不存在（可能已被移动或删除）".to_string())?;
+    Ok(world.join("datapacks"))
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -417,5 +429,35 @@ mod tests {
         assert!(delete(&dir, "resourcepack", "a.zip", true).is_ok());
         assert!(!dir.join("a.zip").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn datapacks_only_accept_zip() {
+        let dir = std::env::temp_dir().join(format!("astral-packs-{}", crate::time::now_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.zip"), b"x").unwrap();
+        // 数据包目录里放 jar 不认：游戏也读不出来
+        std::fs::write(dir.join("b.jar"), b"y").unwrap();
+        let list = list(&dir, "datapack").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].file_name, "a.zip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn datapack_world_dir_needs_a_real_world() {
+        let saves = std::env::temp_dir().join(format!("astral-saves-{}", crate::time::now_nanos()));
+        let world = saves.join("World A");
+        std::fs::create_dir_all(&world).unwrap();
+        std::fs::write(world.join("level.dat"), b"x").unwrap();
+
+        let id = crate::worlds::world_id("World A");
+        let found = world_dir(&saves, &id).unwrap();
+        assert!(found.ends_with("World A/datapacks"));
+
+        // 不存在的 world_id 不能返回一个"随便找个目录"的路径
+        let missing = world_dir(&saves, "w_deadbeef").unwrap_err();
+        assert!(missing.starts_with("TARGET_CHANGED|"));
+        let _ = std::fs::remove_dir_all(&saves);
     }
 }

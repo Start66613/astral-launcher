@@ -3554,3 +3554,57 @@ const result = await invoke<LogCleanupResult>("prune_logs", {
 - 点清理 → 弹窗列出 `plan.remove` 的条数与 `freedBytes`，下面小字写「会保留最近 5 份和 30 天内的日志，`latest.log` 永远保留」。
 - 玩家点确定 → `prune_logs(..., confirm: true)` → 用返回值刷新占用。
 - 有 `failed` 时提示「有 N 个日志正在被占用，关掉游戏后再试」。
+
+## 45. 数据包管理（V2.5 新增）
+
+资源包、光影包早就能在启动器里启停和删除，**数据包一直不行**：`packs.rs` 里有 `datapack` 这个类型，但命令层的 `pack_dir` 只认前两种，界面上传 `kind: "datapack"` 会直接报「这个类型不支持文件管理」。玩家要装数据包只能自己去 `saves/<存档>/datapacks/` 里翻。
+
+这一节把数据包补上。和资源包最大的区别：**它不属于实例，属于某一个存档**。
+
+### 45.1 命令（都多了一个可选参数 `worldId`）
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `list_packs` | `instanceId`, `kind`, `worldId?` | `PackFile[]` |
+| `set_pack_enabled` | `instanceId`, `kind`, `fileName`, `enabled`, `worldId?` | `PackFile` |
+| `delete_pack` | `instanceId`, `kind`, `fileName`, `confirm`, `worldId?` | `void` |
+
+`kind` 现在三种都支持：`"resourcepack"` / `"shaderpack"` / `"datapack"`。
+
+**`kind: "datapack"` 时必须给 `worldId`**，否则报 `INVALID_VALUE|数据包必须指定存档`。
+
+### 45.2 调用示例
+
+```ts
+// 资源包、光影包：worldId 不用传
+const packs = await invoke<PackFile[]>("list_packs", {
+  instanceId, kind: "resourcepack",
+});
+
+// 数据包：先选存档，再列它自己的数据包
+const worlds = await invoke<WorldTarget[]>("list_target_worlds", { instanceId });
+const datapacks = await invoke<PackFile[]>("list_packs", {
+  instanceId, kind: "datapack", worldId: worlds[0].worldId,
+});
+
+await invoke<PackFile>("set_pack_enabled", {
+  instanceId, kind: "datapack", worldId: worlds[0].worldId,
+  fileName: "Vein Miner.zip", enabled: false,
+});
+```
+
+### 45.3 行为约定
+
+- **落在存档自己的目录**：`<实例>/saves/<存档名>/datapacks/`。存档名由 `worlds::resolve` 按 `world_id` 找出来，不是前端传进来的字符串，所以拼不出 `../` 这种东西。
+- **存档不存在时报 `TARGET_CHANGED`**（不是 `NOT_FOUND`）：这不是参数写错，而是玩家看到的存档已经被删或改名了，界面上应该提示「刷新一下存档列表」。
+- **只认 `.zip`**：`extensions("datapack")` 里没有 `.jar`。数据包目录里放 jar 游戏也读不出来，列出来只会让人困惑。
+- **启停还是靠改名 `.disabled`**，和资源包、光影包完全一致；不动游戏里的启用顺序（那在存档自己的 `level.dat` 里，动它风险大于收益）。
+- **删除要 `confirm: true`**，且拒符号链接。
+- **`pack_format` 照样解析**：数据包的 `pack.mcmeta` 和资源包是同一套格式，`note` 会写「pack_format 15，适配 1.20 – 1.20.1」。
+
+### 45.4 前端接入建议
+
+- 实例详情页里，「资源包 / 光影包」那一栏旁边加一个「数据包」页签，但**页签里先要有个存档选择器**（数据来自 `list_target_worlds`）。
+- 没选存档时不要调 `list_packs`，直接显示「先选一个存档」。
+- 存档选择器的选项被删掉了（`list_target_worlds` 里没了）时，把当前选择清空并重新拉列表。
+- 数据包一般不会很多，列表直接铺开就行，不用分页。
