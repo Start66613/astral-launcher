@@ -58,6 +58,7 @@ mod update_plan;
 mod updates;
 mod verify;
 mod world_backup;
+mod world_icon;
 mod world_io;
 mod world_stats;
 mod worlds;
@@ -767,6 +768,33 @@ fn get_world_stats(
     let inst = instance::find(&game, &instance_id, &play_stats)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
     world_stats::world_stats(std::path::Path::new(&inst.dirs.saves), &world_id)
+}
+
+/// 存档图标（游戏自己写的 `icon.png`），读成 data URL 给前端。
+///
+/// 没有图标返回 `null`，不是错误。
+#[tauri::command]
+fn read_world_icon(
+    instance_id: String,
+    world_id: String,
+) -> Result<Option<world_icon::WorldIcon>, String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let dir = worlds::resolve(std::path::Path::new(&inst.dirs.saves), &world_id)
+        .ok_or_else(|| "WORLD_NOT_FOUND|存档不存在".to_string())?;
+    world_icon::read_icon(&dir)
+}
+
+/// 在文件管理器里打开某个存档的文件夹。
+#[tauri::command]
+fn open_world_folder(instance_id: String, world_id: String) -> Result<(), String> {
+    let game = game_root();
+    let inst = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let dir = worlds::resolve(std::path::Path::new(&inst.dirs.saves), &world_id)
+        .ok_or_else(|| "WORLD_NOT_FOUND|存档不存在".to_string())?;
+    open_path(dir.to_string_lossy().to_string())
 }
 
 /// 启动前预检：只读，把"能不能启动、卡在哪"一次问清楚。
@@ -3868,6 +3896,8 @@ pub fn run() {
             list_target_worlds,
             get_world_info,
             get_world_stats,
+            read_world_icon,
+            open_world_folder,
             preflight_launch,
             scan_local_versions,
             plan_instance_copy,
@@ -5439,6 +5469,47 @@ pub fn selftest() -> i32 {
         );
         let _ = std::fs::remove_dir_all(&stats_dir);
         let _ = std::fs::remove_dir_all(&adv_dir);
+    }
+
+    // 存档图标：游戏自己写的 icon.png，读成 data URL；没有图标不是错误。
+    {
+        let wid = worlds::world_id("World1");
+        let no_icon = world_icon::read_icon(&save);
+        check!(
+            "world icon missing is not an error",
+            no_icon.map(|i| i.is_none()).unwrap_or(false)
+        );
+        // 一个只有 IHDR 的最小 PNG 头，够读出尺寸
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let _ = std::fs::write(save.join("icon.png"), &png);
+        let got = world_icon::read_icon(&save);
+        check!(
+            "world icon reads as data url",
+            got.as_ref()
+                .map(|i| {
+                    i.as_ref()
+                        .map(|x| {
+                            x.data_url.starts_with("data:image/png;base64,")
+                                && x.width == Some(64)
+                                && x.height == Some(64)
+                                && x.size_bytes == png.len() as u64
+                        })
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        );
+        check!(
+            "world icon resolves through world id",
+            worlds::resolve(&game.join("saves"), &wid)
+                .map(|d| world_icon::read_icon(&d).ok().flatten().is_some())
+                .unwrap_or(false)
+        );
+        let _ = std::fs::remove_file(save.join("icon.png"));
     }
 
     // 存档管理：改名 / 复制 / 删除到回收站 / 恢复 / 永久删除。
@@ -8414,15 +8485,16 @@ java.lang.RuntimeException: boom\n";
 
             // 14) 共享缓存：第二次下同一个文件不再联网，缓存里能查到
             //
-            // 缓存是落盘的，上一次自检跑完会把它留着。不清一下的话，
-            // 第一次下载就直接命中缓存、根本不联网，`after_first > before_hits`
-            // 会假失败（这个检查曾经一次过、一次挂，就是这么来的）。
-            // 光清缓存还不够：两个自检进程同时跑时仍会互相踩。所以这次的
-            // 文件大小带一点进程号偏移，每次跑都是一个全新的哈希键。
+            // 缓存是全局落盘的（按内容哈希存），历史运行留下的同名对象会让
+            // 第一次下载直接命中缓存、根本不联网，`after_first > before_hits`
+            // 就假失败。清一次缓存只是尽量，真正保险的是**每次跑换一个内容**：
+            // 这里用纳秒时间戳给文件大小加一点偏移，哈希键必然是新的。
             let _ = cache::clear();
-            let probe: u64 = 200 * 1024 + (std::process::id() as u64 % 61);
+            let probe: u64 = 200 * 1024 + (crate::time::now_nanos() % 4096) as u64;
             let c1 = dl.join("cache1.bin");
             let c2 = dl.join("cache2.bin");
+            let _ = std::fs::remove_file(&c1);
+            let _ = std::fs::remove_file(&c2);
             let csha = testsrv::expected_sha1(probe);
             let before_hits = srv.served.load(std::sync::atomic::Ordering::SeqCst);
             let _ = net::download(
@@ -8441,15 +8513,22 @@ java.lang.RuntimeException: boom\n";
                 |_, _| {},
             );
             let after_second = srv.served.load(std::sync::atomic::Ordering::SeqCst);
-            check!(
-                "cache serves second copy offline",
-                after_first > before_hits
-                    && after_second == after_first
-                    && second
-                        .map(|r| r.reused && r.bytes == probe)
-                        .unwrap_or(false)
-                    && net::sha1_file(&c2).ok().as_deref() == Some(csha.as_str())
-            );
+            let cache_ok = after_first > before_hits
+                && after_second == after_first
+                && second
+                    .as_ref()
+                    .map(|r| r.reused && r.bytes == probe)
+                    .unwrap_or(false)
+                && net::sha1_file(&c2).ok().as_deref() == Some(csha.as_str());
+            if !cache_ok {
+                // 失败时把每一项都写进日志，下次不用靠猜
+                log.push_str(&format!(
+                    "CACHE CHECK: before={before_hits} first={after_first} second={after_second} probe={probe} second_result={:?} sha_ok={}\n",
+                    second.as_ref().map(|r| (r.reused, r.bytes)),
+                    net::sha1_file(&c2).ok().as_deref() == Some(csha.as_str())
+                ));
+            }
+            check!("cache serves second copy offline", cache_ok);
 
             // 15) 缓存统计与预算淘汰
             let st = cache::stats(cache::DEFAULT_BUDGET_BYTES);

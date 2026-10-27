@@ -3753,3 +3753,51 @@ if (stats.note) showHint(stats.note);
 - 详情抽屉里放「统计」页签：上面一行汇总，下面 `players` 列表（单人存档只有一条，可以不显示列表）。
 - `note` 非空时用浅色提示条显示，不要当错误弹窗。
 - 进度显示成 `done/total` 加一条进度条；`total === 0` 时只显示「还没有进度数据」。
+
+## 48. 存档图标与打开存档文件夹（V2.5 新增）
+
+游戏会给每个存档目录放一张 `icon.png`（64×64，玩家可以自己换）。`list_target_worlds` 只给了 `hasIcon` 一个布尔，前端要显示还得自己想办法拿图——而游戏目录是玩家可配的，静态 asset scope 要么写死要么放得太宽。所以跟截图、Mod 图标一样走 IPC。
+
+### 48.1 命令
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `read_world_icon` | `instanceId`, `worldId` | `WorldIcon \| null` |
+| `open_world_folder` | `instanceId`, `worldId` | `void` |
+
+### 48.2 类型
+
+```ts
+interface WorldIcon {
+  dataUrl: string;      // 直接塞 <img src>
+  sizeBytes: number;
+  width: number | null;  // 从 PNG 头里读的，读不出就是 null
+  height: number | null;
+}
+```
+
+### 48.3 调用示例
+
+```ts
+const icon = await invoke<WorldIcon | null>("read_world_icon", {
+  instanceId, worldId,
+});
+// 没图标就是 null，用默认图占位即可，不要当错误
+
+await invoke<void>("open_world_folder", { instanceId, worldId });
+```
+
+### 48.4 行为约定
+
+- **没有图标返回 `null`**，不是错误。新建的存档、被清理过的存档都可能没有。
+- **尺寸是从 PNG 的 IHDR 头里读的**，不解码像素——列几十个存档也不会卡。
+- **扩展名是 `.png` 但内容不是 PNG** 时：图照样返回（浏览器按魔数认），但 `width`/`height` 是 `null`。
+- **超过 2 MB 拒绝读取**，报 `INVALID_VALUE`。游戏自己写的是几十 KB，超限说明文件不对劲。
+- **`open_world_folder`** 用系统文件管理器打开存档目录，玩家想自己换图标、看 region 文件、拷存档都方便。
+- 两个命令都按 `worldId` 定位，存档不存在报 `WORLD_NOT_FOUND`，实例不存在报 `INSTANCE_NOT_FOUND`。
+
+### 48.5 前端接入建议
+
+- 存档卡片用 `hasIcon` 决定要不要调 `read_world_icon`——没有图标就别发这次 IPC。
+- 拿到 data URL 后缓存起来（同一个 `worldId` 不要重复调），图标在游戏里改过就靠 `lastModified` 变化触发重取。
+- 存档详情里放一个「打开文件夹」按钮，比让玩家自己找路径方便。
