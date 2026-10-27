@@ -3457,3 +3457,100 @@ const cover = detail.gallery[0]?.url ?? detail.iconUrl;
 - 正文是 Markdown，渲染前记得过滤 HTML（Modrinth 的 body 是 Markdown 不是 HTML，但别直接把字符串塞 `dangerouslySetInnerHTML`）。
 - 图集做成横向缩略图条 + 点击放大；封面图直接用在页头背景。
 - `clientSide` / `serverSide` 是 `unsupported` 时，在「安装到客户端」按钮旁标一行提醒（服务端专属的 Mod 装到客户端没用）。
+
+## 44. 日志清理（V2.5 新增）
+
+磁盘分析里 `logs` 一直标着"可以安全清理"，但之前**没有任何命令能清**。玩家只能自己去文件夹里挑着删，一不小心把 `latest.log` 删了，下次出问题就没法查。这一节补上「先预览、再清理」。
+
+### 44.1 命令
+
+| 命令 | 参数 | 返回 |
+| --- | --- | --- |
+| `log_usage` | `instanceId` | `LogUsage` |
+| `plan_log_cleanup` | `instanceId`, `keepDays?`, `keepCount?` | `LogCleanupPlan` |
+| `prune_logs` | `instanceId`, `keepDays?`, `keepCount?`, `confirm` | `LogCleanupResult` |
+
+默认 `keepDays = 30`、`keepCount = 5`。
+
+### 44.2 类型
+
+```ts
+interface LogUsage {
+  instanceId: string;
+  logsDir: string;
+  files: number;           // logs/ 里的日志份数
+  bytes: number;
+  archives: number;        // 其中 .gz 归档
+  archiveBytes: number;
+  oldest: string | null;
+  newest: string | null;
+  crashFiles: number;      // crash-reports/ 单独算
+  crashBytes: number;
+  truncated: boolean;      // 文件太多只处理了一部分
+}
+
+interface LogFileItem {
+  path: string;            // 相对实例目录，例如 logs/2025-01-01-1.log.gz
+  bytes: number;
+  modifiedAt: string;
+  reason: string | null;   // 只有 keep 里有：为什么留着
+}
+
+interface LogCleanupPlan {
+  instanceId: string;
+  keepDays: number;
+  keepCount: number;
+  remove: LogFileItem[];
+  removeBytes: number;
+  keep: LogFileItem[];
+  keepBytes: number;
+  issues: string[];
+  freedBytes: number;      // 删完能省多少
+}
+
+interface LogCleanupResult {
+  instanceId: string;
+  removed: number;
+  freedBytes: number;
+  kept: number;
+  failed: string[];        // 删失败的（多半是被占用）
+}
+```
+
+### 44.3 调用示例
+
+```ts
+// 1. 设置页显示占用
+const usage = await invoke<LogUsage>("log_usage", { instanceId });
+
+// 2. 点「清理日志」先出预览
+const plan = await invoke<LogCleanupPlan>("plan_log_cleanup", {
+  instanceId, keepDays: 30, keepCount: 5,
+});
+// plan.keep 里每一条都有 reason，直接列给玩家看
+
+// 3. 玩家确认后才真删
+const result = await invoke<LogCleanupResult>("prune_logs", {
+  instanceId, keepDays: 30, keepCount: 5, confirm: true,
+});
+```
+
+### 44.4 行为约定
+
+- **`latest.log` 永远不删**，不管参数怎么传。它是当前这次启动的日志，删了下次崩就没得查。
+- **只认日志文件**：`logs/` 与 `crash-reports/` 下的 `.log` / `.txt` / `.log.gz` / `.txt.gz`。别的一概不碰（`notes.md`、`settings.json` 都不会被删）。
+- **三条保留规则**（按顺序判断，命中就留）：
+  1. 文件名是 `latest.log` → 留；
+  2. 是最新的 `keepCount` 份 → 留；
+  3. `keepDays` 天内还写过 → 留（`keepDays = 0` 表示不按天数保）。
+- **删前必须 `confirm: true`**，否则报 `UNSUPPORTED|清理日志需要明确确认`。
+- **删失败不算致命**：文件被占用（游戏还开着）时记进 `failed`，其他照删。
+- **只读的计划**：`plan_log_cleanup` 不删任何东西，可以随便调。
+- **不跟符号链接**：`logs/` 里指向别处的文件不会被删。
+
+### 44.5 前端接入建议
+
+- 设置页「存储」那一栏：显示 `log_usage` 的 `bytes` 与 `archives`，旁边一个「清理」按钮。
+- 点清理 → 弹窗列出 `plan.remove` 的条数与 `freedBytes`，下面小字写「会保留最近 5 份和 30 天内的日志，`latest.log` 永远保留」。
+- 玩家点确定 → `prune_logs(..., confirm: true)` → 用返回值刷新占用。
+- 有 `failed` 时提示「有 N 个日志正在被占用，关掉游戏后再试」。

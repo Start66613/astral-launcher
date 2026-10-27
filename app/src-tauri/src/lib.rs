@@ -21,6 +21,7 @@ mod ledger;
 mod live;
 mod loader;
 mod local_import;
+mod log_maintenance;
 mod log_search;
 mod logs;
 mod migrate;
@@ -2287,6 +2288,47 @@ fn search_log(
     )
 }
 
+/// 日志占了多少空间（只读）。磁盘分析里 `logs` 标着"可以清"，这里告诉玩家有多少可清。
+#[tauri::command]
+fn log_usage(instance_id: String) -> Result<log_maintenance::LogUsage, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    Ok(log_maintenance::usage(&dir, &instance_id))
+}
+
+/// 只读：算一遍清理计划，列出准备删哪些、保留哪些、为什么保留。
+#[tauri::command]
+fn plan_log_cleanup(
+    instance_id: String,
+    keep_days: Option<u64>,
+    keep_count: Option<u32>,
+) -> Result<log_maintenance::LogCleanupPlan, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    Ok(log_maintenance::plan(
+        &dir,
+        &instance_id,
+        keep_days.unwrap_or(log_maintenance::DEFAULT_KEEP_DAYS),
+        keep_count.unwrap_or(log_maintenance::DEFAULT_KEEP_COUNT),
+    ))
+}
+
+/// 真删日志。`confirm` 必须为 true；`latest.log` 永远保留。
+#[tauri::command]
+fn prune_logs(
+    instance_id: String,
+    keep_days: Option<u64>,
+    keep_count: Option<u32>,
+    confirm: bool,
+) -> Result<log_maintenance::LogCleanupResult, String> {
+    let dir = instance_dir_of(&instance_id)?;
+    log_maintenance::prune(
+        &dir,
+        &instance_id,
+        keep_days.unwrap_or(log_maintenance::DEFAULT_KEEP_DAYS),
+        keep_count.unwrap_or(log_maintenance::DEFAULT_KEEP_COUNT),
+        confirm,
+    )
+}
+
 /// 查询 Minecraft 服务器的在线状态（服务器列表协议）。
 ///
 /// 地址可以写成 `example.com` 或 `example.com:25566`。
@@ -3850,6 +3892,9 @@ pub fn run() {
             ai_clear_cache,
             tail_log,
             search_log,
+            log_usage,
+            plan_log_cleanup,
+            prune_logs,
             ping_server,
             list_servers,
             add_server,
@@ -6708,6 +6753,63 @@ java.lang.RuntimeException: boom\n";
         );
     }
     let _ = std::fs::remove_dir_all(&log_dir);
+
+    // 日志清理：latest.log 永远留着，只删旧的，必须确认
+    {
+        let lm = std::env::temp_dir().join(format!("astral-logmaint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&lm);
+        let _ = std::fs::create_dir_all(lm.join("logs"));
+        let _ = std::fs::create_dir_all(lm.join("crash-reports"));
+        let _ = std::fs::write(lm.join("logs").join("latest.log"), b"current run");
+        let _ = std::fs::write(lm.join("logs").join("2019-01-01-1.log.gz"), b"old archive");
+        let _ = std::fs::write(
+            lm.join("crash-reports").join("crash-2019.txt"),
+            b"old crash",
+        );
+        let _ = std::fs::write(lm.join("logs").join("notes.md"), b"not a log");
+
+        let u = log_maintenance::usage(&lm, "lm1");
+        check!(
+            "log usage counts files",
+            u.files == 2 && u.archives == 1 && u.crash_files == 1 && u.bytes > 0
+        );
+
+        let p = log_maintenance::plan(&lm, "lm1", 0, 1);
+        check!(
+            "log plan always keeps latest",
+            p.keep.iter().any(|i| i.path.ends_with("latest.log"))
+                && p.remove.iter().all(|i| !i.path.ends_with("latest.log"))
+                && !p.remove.iter().any(|i| i.path.ends_with(".md"))
+        );
+
+        check!(
+            "log prune needs confirm",
+            log_maintenance::prune(&lm, "lm1", 0, 1, false).is_err()
+        );
+
+        match log_maintenance::prune(&lm, "lm1", 0, 1, true) {
+            Ok(r) => {
+                check!(
+                    "log prune keeps latest on disk",
+                    lm.join("logs").join("latest.log").is_file()
+                        && r.removed >= 1
+                        && r.freed_bytes > 0
+                );
+                // 计划里说要删的，删完必须真没了
+                let gone = p.remove.iter().all(|i| {
+                    let full = lm.join(i.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    !full.exists()
+                });
+                check!("log prune really removes old files", gone);
+            }
+            Err(_) => {
+                check!("log prune keeps latest on disk", false);
+                check!("log prune really removes old files", false);
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&lm);
+    }
 
     // 可选的真实整合包安装：ASTRAL_LIVE_MODPACK="gameDir|projectId"
     if let Ok(spec) = std::env::var("ASTRAL_LIVE_MODPACK") {

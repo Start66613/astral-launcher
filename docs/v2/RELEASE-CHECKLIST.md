@@ -19,8 +19,8 @@
 - [ ] `cargo clippy --all-targets -- -D warnings` 通过
 - [ ] `cargo check --release` 通过
 - [ ] `cargo build --release` 通过
-- [ ] `cargo test --release --lib` 通过（334 通过 / 6 忽略）
-- [ ] `--selftest` 退出码为 0（351 项全过）
+- [ ] `cargo test --release --lib` 通过（343 通过 / 6 忽略）
+- [ ] `--selftest` 退出码为 0（356 项全过）
 - [ ] `scripts/check-commands.ps1` 通过（没有"写了命令忘了注册"）
 - [ ] `cargo audit` 无已知漏洞
 - [ ] 前端 `tsc --noEmit` 与 `vite build` 通过
