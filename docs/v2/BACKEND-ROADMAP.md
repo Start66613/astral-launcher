@@ -10,7 +10,7 @@
 
 A1–A5、B1–B4、C1–C4、D1–D2 已完成并有自动化测试；D3 的测试矩阵已随各功能逐项落地；
 D4 的 CI 已跑通（fmt / clippy / check / build / selftest / audit），发布检查清单与自动更新
-签名方案尚未完成。共 181 个 Tauri 命令、394 项自检、399 个 Rust 单元测试（393 通过 6 忽略）。
+签名方案尚未完成。共 182 个 Tauri 命令、396 项自检、405 个 Rust 单元测试（399 通过 6 忽略）。
 
 ---
 
@@ -132,6 +132,8 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 | E40 | 实例的游戏参数 | ✅ | `game_args.rs` + `get_game_args` / `set_game_args`；窗口大小这类参数终于有地方填了，存在实例自己的 `game-args.json`；`--username`/`--accessToken`/`--gameDir` 等 12 个启动器负责的参数一律拒绝（写错了会顶掉登录信息）；一键进服的参数排在自己配的后面 |
 | E41 | 实例置顶与手动排序 | ✅ | `instance_order.rs` + `pin_instance` / `reorder_instances`；置顶的排最前（后钉的在前），手动拖过的顺序压过"上次玩过"，`Instance` 多一个 `pinned` 字段；排序偏好存 `<game>/.astral-instance-order.json`，删掉的实例自动忽略 |
 | E42 | 批量启用 / 禁用 | ✅ | `batch_toggle.rs` + `plan_batch_toggle` / `apply_batch_toggle`；整合包里 200 个 Mod 想一次性全关，现在能一把改完；先预览再动手，单个失败不影响其他，只改文件名后缀不删文件，符号链接跳过，游戏运行中一律拒绝 |
+| E43 | 复制实例（一键 + 可取消） | ✅ | `start_duplicate_instance` 走任务系统，前端 `types.ts` 里早就写好的 `"duplicate"` 任务类型终于有后端了；默认带 mods/config/资源包，不带存档与截图；允许"只复制版本与加载器"的干净副本（`CopyOptions.allowEmpty`，迁移向导仍要求至少勾一项）；失败自动回滚不留半截实例 |
+| E44 | 实例重名检查 | ✅ | `instance::name_taken` / `ensure_name_free`；以前可以建出两个一模一样名字的实例，列表里分不清；现在新建、改名、复制、迁移复制统一按 Windows 习惯做大小写不敏感比较，回收站等点开头的目录不算占用，改成自己现在的名字不算冲突（`NAME_TAKEN`） |
 ---
 
 ## 2. 关键取舍（写给后来的人）
@@ -156,10 +158,10 @@ Range 续传、逐 chunk 取消检查、重定向逐跳过白名单。`net.rs` �
 ## 3. 测试策略
 
 - **单元测试**：纯逻辑（解析、分类、命名、路径校验、状态机）放 `#[cfg(test)]`。
-  当前 399 个，393 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
+  当前 405 个，399 通过、6 个 `#[ignore]`（真实联网的 Mojang 安装测试）。
 - **自检（`--selftest`）**：所有需要真实文件系统、真实 HTTP、真实进程的检查都放这里。
   用 `testsrv.rs` 起一个只监听 `127.0.0.1` 的临时服务器，能确定性制造 503、慢速、
-  重定向、Range 响应。当前 394 项。
+  重定向、Range 响应。当前 396 项。
 - **为什么不依赖 `cargo test` 跑全部**：本机 `cargo test` 的测试二进制在仓库目录里
   运行会因路径 ACL 报"拒绝访问"（见 `10-cargo-test-调查.md`），所以 `scripts/run-tests.ps1`
   会先把二进制复制到 `%TEMP%` 再跑。CI 上没有这个问题。

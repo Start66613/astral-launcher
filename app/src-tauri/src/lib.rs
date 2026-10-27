@@ -290,7 +290,8 @@ fn update_instance(id: String, patch: InstancePatch) -> Result<Instance, String>
     let mut meta = instance::read_meta(&game, &id)
         .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在或不是托管实例".to_string())?;
     if let Some(name) = patch.name {
-        instance::validate_name(&name)?;
+        // 改名也要防重名：允许改成自己现在的名字，但不许和别的实例撞
+        instance::ensure_name_free(&game, &name, Some(&id))?;
         meta.name = name.trim().to_string();
     }
     if let Some(mem) = patch.memory_mb {
@@ -351,7 +352,7 @@ struct CreateInstanceRequest {
 /// 创建托管实例：只建目录与元数据；缺版本文件时由 health 暴露，不静默下载
 #[tauri::command]
 async fn start_create_instance(request: CreateInstanceRequest) -> Result<Task, String> {
-    instance::validate_name(&request.name)?;
+    instance::ensure_name_free(&game_root(), &request.name, None)?;
     jvm::validate(request.memory_mb, &[], jvm::system_memory_mb())?;
     if task::has_running_kind("create", None, Some(&request.game_version)) {
         return Err("BUSY|同类任务正在运行，请等待或取消".into());
@@ -1292,6 +1293,95 @@ fn apply_instance_copy(plan_id: String) -> Result<migrate::CopyResult, String> {
     let r = migrate::execute(&game, &plan_id, &*net::never_cancel(), |_, _| {})?;
     emit_instance_changed(&r.instance_id, "created");
     Ok(r)
+}
+
+/// 复制实例（一步到位，带任务与取消）。
+///
+/// 和 `plan_instance_copy` + `apply_instance_copy` 的区别：
+/// - 这里**不需要前端记 planId**，前端只有一个"复制"按钮；
+/// - 走任务系统，所以能取消、能在任务列表里看到进度、失败自动回滚；
+/// - 前端 `types.ts` 的 `TaskKind` 早就写了 `"duplicate"`，
+///   任务完成时会带着新实例返回，前端据此刷新列表。
+///
+/// 复制的是**版本 + 加载器 + 内存/JVM 配置 + mods + config + 资源包**；
+/// 存档、截图、日志默认不带（体积大、容易撞名、通常不想复制）。
+/// 想精细控制就继续用 `plan_instance_copy` 那一套。
+#[tauri::command]
+async fn start_duplicate_instance(
+    instance_id: String,
+    name: String,
+    options: Option<migrate::CopyOptions>,
+) -> Result<Task, String> {
+    let game = game_root();
+    let src = instance::find(&game, &instance_id, &play_stats)
+        .ok_or_else(|| "INSTANCE_NOT_FOUND|实例不存在".to_string())?;
+    let trimmed = name.trim().to_string();
+    instance::ensure_name_free(&game, &trimmed, None)?;
+    if !src.managed {
+        return Err("UNSUPPORTED|兼容实例来自共享游戏目录，不能整体复制；请改用导入版本".into());
+    }
+    if session::active(Some(&instance_id)).is_some() {
+        return error::fail(error::INSTANCE_BUSY, "该实例正在运行，先退出游戏再复制");
+    }
+    if task::has_running(&instance_id) {
+        return error::fail(error::BUSY, "该实例有进行中的任务");
+    }
+    let opts = options.unwrap_or_else(migrate::CopyOptions::for_duplicate);
+
+    let t = task::create(
+        "duplicate",
+        Some(instance_id.clone()),
+        Some(src.game_version.clone()),
+        format!("复制实例 {}", src.name),
+    );
+    let tid = t.task_id.clone();
+    std::thread::spawn(move || {
+        task::start(&tid);
+        task::progress(&tid, "validate", "准备复制", 0, 0);
+        let cancel = net::cancel_from({
+            let tid = tid.clone();
+            move || task::is_cancelled(&tid)
+        });
+        let tid2 = tid.clone();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            migrate::duplicate(
+                &game,
+                &instance_id,
+                &trimmed,
+                &opts,
+                &play_stats,
+                &*cancel,
+                move |done, total| {
+                    task::progress(
+                        &tid2,
+                        "extract",
+                        format!("复制文件 {done}/{total}"),
+                        done,
+                        total,
+                    );
+                },
+            )
+        }));
+        match res {
+            Ok(Ok((r, _plan))) => {
+                emit_instance_changed(&r.instance_id, "created");
+                task::finish(
+                    &tid,
+                    serde_json::json!({
+                        "kind": "duplicate",
+                        "instance": instance::find(&game, &r.instance_id, &play_stats),
+                        "files": r.files,
+                        "bytes": r.bytes,
+                        "skipped": r.skipped.len(),
+                    }),
+                );
+            }
+            _ if task::is_cancelled(&tid) => task::cancelled(&tid),
+            Ok(Err(e)) => task::fail(&tid, e),
+            Err(_) => task::fail(&tid, "INTERNAL|复制实例时发生内部错误".into()),
+        }
+    });
+    Ok(t)
 }
 
 #[tauri::command]
@@ -4016,6 +4106,7 @@ pub fn run() {
             plan_instance_copy,
             plan_version_import,
             apply_instance_copy,
+            start_duplicate_instance,
             list_world_backups,
             backup_world,
             preview_world_restore,
@@ -10426,6 +10517,80 @@ java.lang.RuntimeException: boom\n";
 
                 let twice = migrate::execute(&g, &plan_id, &*net::never_cancel(), |_, _| {});
                 check!("instance copy plan is single use", twice.is_err());
+            }
+
+            // 30b) 复制实例：干净的实例也能复制（只带版本与加载器）
+            {
+                let g = dl.join("duplicate-game");
+                let meta = instance::InstanceMeta {
+                    id: instance::new_id(),
+                    name: "空实例".into(),
+                    game_version: "1.20.1".into(),
+                    loader_kind: Some("fabric".into()),
+                    loader_version: Some("0.16.9".into()),
+                    launch_version: None,
+                    memory_mb: Some(2048),
+                    jvm_args: vec![],
+                    java_path: None,
+                    cover: None,
+                    created_at: time::now_iso(),
+                };
+                let src_id = instance::create(&g, &meta)
+                    .map(|i| i.id)
+                    .unwrap_or_default();
+                let stats_fn = |_: &str| instance::PlayStats::default();
+
+                // 一个文件都没有时：迁移向导拒绝，复制实例放行
+                let strict = migrate::plan_copy(
+                    &g,
+                    &src_id,
+                    "不该成功",
+                    &migrate::CopyOptions::settings_only(),
+                    &stats_fn,
+                );
+                let plan = migrate::plan_copy(
+                    &g,
+                    &src_id,
+                    "空实例副本",
+                    &migrate::CopyOptions::for_duplicate(),
+                    &stats_fn,
+                );
+                let empty_ok =
+                    strict.is_err() && plan.as_ref().map(|p| p.total_files == 0).unwrap_or(false);
+                let plan_id = plan.as_ref().map(|p| p.plan_id.clone()).unwrap_or_default();
+                let done = migrate::execute(&g, &plan_id, &*net::never_cancel(), |_, _| {});
+                let new_id = done
+                    .as_ref()
+                    .map(|r| r.instance_id.clone())
+                    .unwrap_or_default();
+                let copied = instance::read_meta(&g, &new_id)
+                    .map(|m| {
+                        m.name == "空实例副本"
+                            && m.game_version == "1.20.1"
+                            && m.loader_kind.as_deref() == Some("fabric")
+                            && m.loader_version.as_deref() == Some("0.16.9")
+                            && m.memory_mb == Some(2048)
+                    })
+                    .unwrap_or(false);
+                let independent = new_id != src_id
+                    && instance::instance_dir(&g, &new_id) != instance::instance_dir(&g, &src_id)
+                    && instance::read_meta(&g, &src_id)
+                        .map(|m| m.name == "空实例")
+                        .unwrap_or(false);
+                check!(
+                    "duplicate allows empty and stays independent",
+                    empty_ok && copied && independent
+                );
+
+                // 同名拒绝：不能复制出一个重名实例
+                let same_name = migrate::plan_copy(
+                    &g,
+                    &src_id,
+                    "空实例",
+                    &migrate::CopyOptions::for_duplicate(),
+                    &stats_fn,
+                );
+                check!("duplicate rejects taken name", same_name.is_err());
             }
 
             // 31) 本地版本导入：只写实例记录，不移动原文件

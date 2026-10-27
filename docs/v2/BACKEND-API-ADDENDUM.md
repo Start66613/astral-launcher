@@ -4125,3 +4125,111 @@ const result = await invoke<BatchResult>("apply_batch_toggle", {
 - 大批量（> 100）建议在执行时禁用按钮并显示进度条——虽然是本地改名很快，
   但磁盘慢的时候仍能感知到。
 - 游戏运行中这个按钮应该直接置灰，不要等报错。
+
+---
+
+## 53. 复制实例（V2.5 新增）
+
+玩家想"再开一个一样的"时，以前只能自己一个个装 Mod、一个个填参数。
+现在一条命令复制出一个独立实例：版本、加载器、内存、JVM 参数、mods、config、
+资源包全带过去，**存档与截图默认不带**（体积大、容易撞名、通常也不想复制）。
+
+和 `plan_instance_copy` + `apply_instance_copy` 的区别：那两个是**两段式精细向导**
+（前端要记 `planId`，能逐项勾选）；这一条是**一键复制**，走任务系统，
+所以能取消、能在任务列表里看到进度、失败自动回滚。
+
+### 53.1 命令
+
+| 命令 | 参数 | 返回 | 说明 |
+|---|---|---|---|
+| `start_duplicate_instance` | `{ instanceId, name, options? }` | `Task` | 建任务并立即返回，进度走任务事件 |
+
+`options` 省略时等价于 `CopyOptions::for_duplicate()`：
+`{ settings: true, worlds: false, resources: true, screenshots: false, logs: false, overwrite: false, allowEmpty: true }`。
+
+### 53.2 类型
+
+```ts
+interface CopyOptions {
+  /** mods + config（默认开） */
+  settings: boolean;
+  /** saves（默认关） */
+  worlds: boolean;
+  /** resourcepacks + shaderpacks（默认开） */
+  resources: boolean;
+  /** screenshots（默认关） */
+  screenshots: boolean;
+  /** logs（默认关） */
+  logs: boolean;
+  /** 覆盖同名文件（默认关） */
+  overwrite: boolean;
+  /**
+   * 允许一个文件都不复制（默认关；复制实例时后端会传 true）。
+   * 迁移向导用不到它 —— 那里空计划确实是误操作。
+   */
+  allowEmpty: boolean;
+}
+
+interface DuplicateResult {
+  kind: "duplicate";
+  /** 新实例（复制完成后重新读出来的完整对象，拿不到时为 null） */
+  instance: Instance | null;
+  files: number;
+  bytes: number;
+  /** 被跳过的文件数（符号链接、已存在且不覆盖等） */
+  skipped: number;
+}
+```
+
+### 53.3 调用示例
+
+```ts
+// 最简单的用法：名字必须自己起（不能和已有实例重名）
+const task = await invoke<Task>("start_duplicate_instance", {
+  instanceId: "inst_1a2b3c",
+  name: "我的生存（副本）",
+});
+
+// 想带存档就显式传 options
+const task2 = await invoke<Task>("start_duplicate_instance", {
+  instanceId: "inst_1a2b3c",
+  name: "带存档的副本",
+  options: {
+    settings: true,
+    worlds: true,
+    resources: true,
+    screenshots: false,
+    logs: false,
+    overwrite: false,
+    allowEmpty: true,
+  },
+});
+```
+
+任务事件里 `task.kind === "duplicate"`，完成时 `result` 就是上面的 `DuplicateResult`。
+前端 `useInstances.ts` 里已有的 `task.kind === "duplicate" && task.state === "done"` 分支
+可以直接用，不用改。
+
+### 53.4 行为约定
+
+- **先校验后建任务**：名字非法、重名、实例在运行、实例有别的任务在跑、
+  兼容实例（来自共享 `.mcl`）—— 这些都在建任务之前就报错，不会留下一个必然失败的任务。
+- **重名一律拒绝**（`NAME_TAKEN|已经有一个叫「X」的实例了`），大小写不敏感。
+- **失败自动回滚**：复制中途出错会把这次新建的实例目录整个删掉，
+  不会留下"半个实例"（存档、mods 都不完整但看起来能用，比直接失败更糟）。
+- **可取消**：`cancel_task` 之后复制在下一个文件处停下，`task::cancelled` 收尾，
+  同样会回滚新建目录。
+- **允许空复制**：`allowEmpty: true` 时一个文件都没有也能复制，
+  得到的是"同一套版本 + 加载器 + 内存配置"的干净实例。
+- **源实例不受影响**：只读源目录，不移动、不删除、不改名。
+- **不带 `options.txt`**：游戏设置文件在 `instance_dir` 根上，不在这六个类别里，
+  所以新实例保持游戏默认设置 —— 这是有意的，两套实例共用同一份键鼠设置通常会打架。
+
+### 53.5 前端接入建议
+
+- 列表项右键菜单加「复制实例」，弹一个只填名字的输入框，默认填 `${原名} 副本`；
+  如果这个名字已被占用，输入框下方直接提示，不要等提交后报错。
+- 提交后按 `taskId` 订阅任务事件，`phase` 会走 `checking-files`，
+  `done` 之后用 `result.instance` 直接插进列表（不必重新拉全量）。
+- 想给玩家"要不要连存档一起复制"的选项时，展开成高级面板传 `options`，
+  默认值就是上面的 `for_duplicate()`，别自己另定一套默认。

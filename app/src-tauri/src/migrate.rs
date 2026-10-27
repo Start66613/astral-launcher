@@ -36,6 +36,13 @@ pub struct CopyOptions {
     /// 覆盖同名文件（默认关；关掉时同名文件跳过并记入 skipped）
     #[serde(default)]
     pub overwrite: bool,
+    /// 允许一个文件都不复制（默认关）。
+    ///
+    /// "复制这个实例"本身是合法的：玩家可能只想拿同一套版本 + 加载器 + 内存
+    /// 配置再开一个干净的实例。这时一个 mod 都不带，但实例仍然是完整可用的。
+    /// 老的"至少勾一项"规则只对**迁移向导**有意义，那里空计划确实是误操作。
+    #[serde(default)]
+    pub allow_empty: bool,
 }
 
 impl CopyOptions {
@@ -43,6 +50,19 @@ impl CopyOptions {
         Self {
             settings: true,
             ..Default::default()
+        }
+    }
+
+    /// 复制实例时的默认值：配置全带，存档不带（体积大且容易撞名）。
+    pub fn for_duplicate() -> Self {
+        Self {
+            settings: true,
+            worlds: false,
+            resources: true,
+            screenshots: false,
+            logs: false,
+            overwrite: false,
+            allow_empty: true,
         }
     }
 }
@@ -179,6 +199,9 @@ pub fn plan_copy(
     }
     let name = target_name.trim();
     crate::instance::validate_name(name)?;
+    if crate::instance::name_taken(game, name, None) {
+        return Err(format!("NAME_TAKEN|已经有一个叫「{name}」的实例了"));
+    }
     let src_dir = crate::instance::instance_dir(game, instance_id);
 
     let mut items = Vec::new();
@@ -208,7 +231,7 @@ pub fn plan_copy(
             total_bytes += bytes;
         }
     }
-    if items.is_empty() {
+    if items.is_empty() && !opts.allow_empty {
         return Err("INVALID_VALUE|没有可复制的内容，请至少勾选一项".into());
     }
     let mut issues = Vec::new();
@@ -566,6 +589,27 @@ fn copy_tree(
     Ok(())
 }
 
+/// 一步复制实例：算计划 + 立刻执行。
+///
+/// 命令 `start_duplicate_instance` 与自检共用这一条路径 —— 否则
+/// "失败要回滚"这种最容易写错的地方永远只有命令里那一份、测不到。
+///
+/// 返回 `(结果, 计划)`：计划里的 `total_files` 在开始前就能拿到，
+/// 调用方拿它初始化进度条的总数。
+pub fn duplicate(
+    game: &Path,
+    instance_id: &str,
+    name: &str,
+    opts: &CopyOptions,
+    stats: &dyn Fn(&str) -> crate::instance::PlayStats,
+    cancel: crate::net::CancelRef<'_>,
+    on: impl FnMut(u32, u32),
+) -> Result<(CopyResult, CopyPlan), String> {
+    let plan = plan_copy(game, instance_id, name, opts, stats)?;
+    let result = execute(game, &plan.plan_id, cancel, on)?;
+    Ok((result, plan))
+}
+
 #[allow(dead_code)]
 /// 删除计划缓存里过期的条目（不影响磁盘）
 pub fn prune_plans() {
@@ -598,12 +642,124 @@ mod tests {
             screenshots: true,
             logs: true,
             overwrite: false,
+            allow_empty: false,
         };
         assert_eq!(selected_categories(&all).len(), 5);
     }
 
     #[test]
+    fn duplicate_defaults_keep_settings_and_resources() {
+        let cats = selected_categories(&CopyOptions::for_duplicate());
+        assert_eq!(cats, vec!["settings", "resources"]);
+        // 复制实例允许"只复制版本与加载器"，不带任何文件
+        assert!(CopyOptions::for_duplicate().allow_empty);
+        assert!(!CopyOptions::for_duplicate().overwrite);
+        // 迁移向导仍然要求至少勾一项
+        assert!(!CopyOptions::settings_only().allow_empty);
+    }
+
+    #[test]
     fn plan_id_prefix() {
         assert!(new_plan_id().starts_with("cplan_"));
+    }
+
+    fn tmp_game(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("astral-dup-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn seed_instance(game: &Path, name: &str) -> String {
+        let meta = crate::instance::InstanceMeta {
+            id: crate::instance::new_id(),
+            name: name.into(),
+            game_version: "1.20.1".into(),
+            loader_kind: Some("fabric".into()),
+            loader_version: Some("0.16.9".into()),
+            launch_version: None,
+            memory_mb: Some(2048),
+            jvm_args: vec![],
+            java_path: None,
+            cover: None,
+            created_at: crate::time::now_iso(),
+        };
+        let inst = crate::instance::create(game, &meta).unwrap();
+        let dir = crate::instance::instance_dir(game, &inst.id);
+        std::fs::write(dir.join("mods").join("a.jar"), b"MOD").unwrap();
+        std::fs::write(dir.join("config").join("c.json"), b"{}").unwrap();
+        inst.id
+    }
+
+    #[test]
+    fn duplicate_copies_and_keeps_source() {
+        let g = tmp_game("ok");
+        let src = seed_instance(&g, "原实例");
+        let stats = |_: &str| crate::instance::PlayStats::default();
+        let (r, plan) = duplicate(
+            &g,
+            &src,
+            "副本",
+            &CopyOptions::for_duplicate(),
+            &stats,
+            &*crate::net::never_cancel(),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(r.files, 2);
+        assert_eq!(plan.total_files, 2);
+        assert_ne!(r.instance_id, src);
+        let dir = crate::instance::instance_dir(&g, &r.instance_id);
+        assert!(dir.join("mods").join("a.jar").is_file());
+        assert!(dir.join("config").join("c.json").is_file());
+        // 源实例一个文件都没少
+        let src_dir = crate::instance::instance_dir(&g, &src);
+        assert!(src_dir.join("mods").join("a.jar").is_file());
+        let _ = std::fs::remove_dir_all(&g);
+    }
+
+    #[test]
+    fn duplicate_rolls_back_on_cancel() {
+        let g = tmp_game("cancel");
+        let src = seed_instance(&g, "原实例");
+        let stats = |_: &str| crate::instance::PlayStats::default();
+        // 一开始就取消：计划算得出来，执行立刻停下
+        let cancelled = || true;
+        let err = duplicate(
+            &g,
+            &src,
+            "不该存在",
+            &CopyOptions::for_duplicate(),
+            &stats,
+            &cancelled,
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(err.starts_with("CANCELLED|"), "实际: {err}");
+        // 回滚过：只剩源实例，没留下半截副本
+        let list = crate::instance::discover(&g, &stats);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, src);
+        let _ = std::fs::remove_dir_all(&g);
+    }
+
+    #[test]
+    fn duplicate_rejects_taken_name() {
+        let g = tmp_game("taken");
+        let src = seed_instance(&g, "原实例");
+        let stats = |_: &str| crate::instance::PlayStats::default();
+        let err = duplicate(
+            &g,
+            &src,
+            "原实例",
+            &CopyOptions::for_duplicate(),
+            &stats,
+            &*crate::net::never_cancel(),
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(err.starts_with("NAME_TAKEN|"), "实际: {err}");
+        assert_eq!(crate::instance::discover(&g, &stats).len(), 1);
+        let _ = std::fs::remove_dir_all(&g);
     }
 }

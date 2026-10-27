@@ -2,7 +2,7 @@
 
 > 分支 `feature/astral-v2-core-next`
 > 数据采集时间：2026-10-26
-> 结论：**自检 394 项全过，单元测试 393 通过 / 6 忽略，clippy 与 rustfmt 干净。**
+> 结论：**自检 396 项全过，单元测试 399 通过 / 6 忽略，clippy 与 rustfmt 干净。**
 
 ---
 
@@ -36,7 +36,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 2. 自检覆盖（394 项）
+## 2. 自检覆盖（396 项）
 
 按前缀分组：
 
@@ -47,6 +47,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `verify` | 13 | 缺 jar、缺库、库大小校验、缺资源索引、四态报告、修复计划定位、不动玩家目录、浅检信任大小、深检发现内容损坏、复查反映修复、干净版本无动作、备份列表 |
 | `java` | 11 | 主版本表、satisfies 规则（Java 8 上限）、审计标记路径丢失、报告结构、删除需确认、缓存统计、清空需确认、只删目标目录 |
 | `instance` | 10 | 创建、发现（托管/遗留）、健康、mods 计数、名称校验、删除进回收站、健康原因 |
+| `duplicate` | 2 | 干净的实例也能复制且与原实例互相独立、重名被拒 |
 | `session` | 9 | 开始、退出、统计、对账、PID 复用识别、活进程不误判、死亡不活跃、已对账 |
 | `plan` | 8 | 安装计划准备/复用/取用/单次、坏名字、Forge、修订守卫 |
 | `modpack` | 8 | 路径穿越、符号链接、正常 overrides、env 过滤、本地导入拒绝/解析、来源记录、磁盘预检 |
@@ -102,7 +103,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 
 ---
 
-## 3. 单元测试（399 个）
+## 3. 单元测试（405 个）
 
 | 模块 | 数量 | 内容 |
 |---|---|---|
@@ -133,7 +134,7 @@ Start-Process D:\Astral\Astral-core.exe -ArgumentList "--selftest"
 | `recycle` | 3 | 名字拆分、怪名字容忍、拒绝穿越 |
 | `world_backup` | 3 | sanitize 安全字符、Zip Slip、备份 id 前缀 |
 | `modpack` | 5 | index 解析、路径守卫、坏包拒绝、穿越、纯 overrides 包不算空包 |
-| `migrate` | 3 | 类别白名单、settings only、计划 id |
+| `migrate` | 7 | 类别白名单、settings only、计划 id、复制实例默认勾选（带配置与资源包、不带存档、允许空复制）、复制保源、取消回滚、重名拒绝 |
 | `search` | 6 | 百分号编码、facets 分组、limit/offset 夹取、非法类型与排序、响应解析、坏响应 |
 | `modscan`（Maven 区间） | +1 | `[1.20,1.21)`、开闭区间、单边、精确 `[1.20.1]`、多段区间 |
 | `java_audit` | 3 | 主版本表、Java 8 上限、短版本解析 |

@@ -464,6 +464,60 @@ pub fn read_meta_at(dir: &Path) -> Option<InstanceMeta> {
     serde_json::from_str(&text).ok()
 }
 
+/// 是否已有实例叫这个名字（大小写不敏感，忽略首尾空格）。
+///
+/// 实例名是给玩家看的，目录靠 id 区分，所以重名本身不会撞坏文件；
+/// 但列表里两个一模一样的名字根本分不出谁是谁，"复制实例"更是会直接
+/// 造出一对同名实例。这里统一按 Windows 的习惯做大小写不敏感比较。
+///
+/// `except_id` 用于改名：允许"改成自己现在的名字"。
+pub fn name_taken(game: &Path, name: &str, except_id: Option<&str>) -> bool {
+    let want = name.trim().to_lowercase();
+    if want.is_empty() {
+        return false;
+    }
+    let Ok(rd) = std::fs::read_dir(instances_root(game)) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let dir = e.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        // 回收站、快照这些点开头的不是实例
+        if dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with('.'))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(meta) = read_meta_at(&dir) else {
+            continue;
+        };
+        if Some(meta.id.as_str()) == except_id {
+            continue;
+        }
+        if meta.name.trim().to_lowercase() == want {
+            return true;
+        }
+    }
+    false
+}
+
+/// 改名/新建/复制前的统一校验：名字合法，且不与别的实例重名。
+pub fn ensure_name_free(game: &Path, name: &str, except_id: Option<&str>) -> Result<(), String> {
+    validate_name(name)?;
+    if name_taken(game, name, except_id) {
+        return Err(format!(
+            "NAME_TAKEN|已经有一个叫「{}」的实例了",
+            name.trim()
+        ));
+    }
+    Ok(())
+}
+
 /// 删除：默认进回收站
 pub fn delete(game: &Path, id: &str, trash: bool) -> Result<(), String> {
     let dir = instance_dir(game, id);
@@ -595,6 +649,48 @@ mod tests {
         let list = discover(&g, &|_| PlayStats::default());
         let mine = list.iter().find(|i| i.id == m.id).unwrap();
         assert_eq!((mine.mods_count, mine.mods_disabled), (1, 1));
+        let _ = std::fs::remove_dir_all(&g);
+    }
+
+    #[test]
+    fn name_taken_ignores_case_and_self() {
+        let g = tmp_game("names");
+        let a = meta("inst_00000010");
+        let mut b = meta("inst_00000011");
+        b.name = "Survival".into();
+        create(&g, &a).unwrap();
+        create(&g, &b).unwrap();
+
+        assert!(name_taken(&g, "测试实例", None));
+        assert!(name_taken(&g, "  测试实例  ", None));
+        assert!(name_taken(&g, "survival", None), "重名判断应忽略大小写");
+        assert!(!name_taken(&g, "创造模式", None));
+        // 改名成自己现在的名字不算冲突
+        assert!(!name_taken(&g, "Survival", Some("inst_00000011")));
+        // 空名字不算占用（合法性由 validate_name 负责）
+        assert!(!name_taken(&g, "   ", None));
+
+        assert!(ensure_name_free(&g, "创造模式", None).is_ok());
+        assert!(ensure_name_free(&g, "survival", None).is_err());
+        assert!(ensure_name_free(&g, "a/b", None).is_err());
+        let _ = std::fs::remove_dir_all(&g);
+    }
+
+    #[test]
+    fn name_taken_skips_non_instance_dirs() {
+        let g = tmp_game("names2");
+        let a = meta("inst_00000012");
+        create(&g, &a).unwrap();
+        // 回收站这类点开头的目录不是实例，不该占用名字
+        let junk = instances_root(&g).join(".trash").join("old");
+        std::fs::create_dir_all(&junk).unwrap();
+        std::fs::write(
+            junk.join("instance.json"),
+            r#"{"id":"old","name":"另一个名字","gameVersion":"1.20.1"}"#,
+        )
+        .unwrap();
+        assert!(!name_taken(&g, "另一个名字", None));
+        assert!(name_taken(&g, "测试实例", None));
         let _ = std::fs::remove_dir_all(&g);
     }
 }
